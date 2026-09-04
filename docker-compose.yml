@@ -1,0 +1,134 @@
+# =============================================================================
+#  ALLANA — painel + bot do WhatsApp em container
+#
+#  Subir:      docker compose up -d
+#  Ver o QR:   abra http://localhost:8000 -> aba Status
+#  Logs:       docker compose logs -f
+#
+#  A automação do Santander NÃO roda aqui. No Windows, ao lado do Brave:
+#      python agente.py --url http://IP_DESTA_MAQUINA:8000 --token SEU_TOKEN
+# =============================================================================
+services:
+  allana:
+    build: .
+    container_name: allana
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+
+    # Os segredos (senha do painel, SESSION_SECRET, AGENT_TOKEN) vêm do .env do
+    # host e nunca entram na imagem.
+    env_file:
+      - .env
+
+    # ATENÇÃO: o .env acima é a configuração do WINDOWS e traz caminhos no
+    # formato "C:\Users\...". Dentro do Linux eles não significam nada, então
+    # TODO caminho é sobrescrito aqui — o bloco `environment` vence o `env_file`.
+    environment:
+      WEB_HOST: "0.0.0.0"
+      WEB_PORT: "8000"
+
+      # A automação do banco fica FORA do container (ver agente.py).
+      SIMULATOR_MODE: "remote"
+      # Só existem no Windows. Anulados para não poluir os avisos de boot e
+      # para falhar de forma clara se alguém voltar para local aqui dentro.
+      SIM_BOT_PATH: "/app/sem-simulador-no-container"
+      SIMULATOR_PROFILE_DIR: "/app/dados/simulator-profile"
+      BROWSER_EXECUTABLE: ""
+
+      # Sem tela no container: o QR Code aparece no painel.
+      WHATSAPP_HEADLESS: "true"
+      WHATSAPP_PROFILE_DIR: "/app/.whatsapp-profile"
+
+      DB_PATH: "/app/dados/simulacoes.db"
+      STATE_PATH: "/app/dados/state.json"
+      TZ: "${TIMEZONE:-America/Sao_Paulo}"
+
+    volumes:
+      # Banco, state.json e comprovantes: o que precisa sobreviver ao container.
+      - allana-dados:/app/dados
+      - allana-comprovantes:/app/comprovantes
+      - allana-logs:/app/logs
+      # A sessão do WhatsApp. Em volume nomeado para não precisar ler o QR
+      # de novo a cada `docker compose up`.
+      - allana-whatsapp:/app/.whatsapp-profile
+
+    # O Chromium precisa de mais que os 64 MB padrão de /dev/shm, senão a aba
+    # do WhatsApp morre com "Target closed" sob carga.
+    shm_size: "1gb"
+
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  #  Evolution API — a camada nova de WhatsApp (WHATSAPP_MODE=evolution)
+  #
+  #  Perfil `evolution`: NAO sobe por padrao. Para ligar:
+  #      docker compose --profile evolution up -d
+  #
+  #  Depois de subir, na ordem:
+  #    1. abrir http://localhost:8080/manager e ATIVAR A LICENCA
+  #       (sem isso todo endpoint responde 503 e voce perde a noite
+  #        caçando erro de payload que nao existe)
+  #    2. criar a instancia e ler o QR com o celular do bot
+  #    3. python -m app.evolution_check  -> descobre o JID do grupo
+  #    4. so' entao trocar WHATSAPP_MODE para evolution
+  # ---------------------------------------------------------------------------
+  evolution:
+    # Tag FIXA, nunca `latest`: uma atualizacao silenciosa da imagem muda
+    # variaveis de ambiente entre releases e derruba a instancia sem aviso.
+    image: evoapicloud/evolution-api:v2.4.1
+    container_name: allana-evolution
+    profiles: ["evolution"]
+    restart: unless-stopped
+    ports:
+      - "${EVOLUTION_PORT:-8080}:8080"
+    environment:
+      AUTHENTICATION_API_KEY: "${EVOLUTION_API_KEY}"
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: "postgresql"
+      DATABASE_CONNECTION_URI: "postgresql://evolution:${EVOLUTION_DB_PASSWORD:-evolution}@evolution-db:5432/evolution"
+      CACHE_REDIS_ENABLED: "false"
+      CACHE_LOCAL_ENABLED: "true"
+      # O webhook e' configurado por instancia (POST /webhook/set), nao aqui:
+      # o global vale para todas e nao e' o que queremos.
+      WEBHOOK_GLOBAL_ENABLED: "false"
+      LOG_LEVEL: "ERROR"
+      TZ: "${TIMEZONE:-America/Sao_Paulo}"
+    volumes:
+      - evolution-instances:/evolution/instances
+    depends_on:
+      evolution-db:
+        condition: service_healthy
+
+  evolution-db:
+    image: postgres:16-alpine
+    container_name: allana-evolution-db
+    profiles: ["evolution"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "evolution"
+      POSTGRES_PASSWORD: "${EVOLUTION_DB_PASSWORD:-evolution}"
+      POSTGRES_DB: "evolution"
+    volumes:
+      - evolution-db:/var/lib/postgresql/data
+    healthcheck:
+      # A Evolution falha ao subir se o banco ainda nao aceita conexao.
+      test: ["CMD-SHELL", "pg_isready -U evolution"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  allana-dados:
+  allana-comprovantes:
+  allana-logs:
+  allana-whatsapp:
+  # A sessao da Evolution: sem isto, cada `up` pede QR de novo.
+  evolution-instances:
+  evolution-db:

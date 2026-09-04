@@ -1,0 +1,651 @@
+"""Fila de simulacoes.
+
+Diferencas para a fila anterior, que era um ``queue.Queue`` puro em memoria:
+
+* **Sobrevive a reinicio.** A verdade fica no banco. Ao subir, tudo que ficou
+  em ``queued``/``processing`` volta para a fila (ou vira ``interrupted``, se
+  as tentativas acabaram). Antes, esses registros ficavam ``queued`` para
+  sempre e poluiam a tela da fila indefinidamente.
+* **Tentativas de verdade.** O campo ``attempts`` era gravado com o literal
+  ``1``; agora conta as tentativas reais, e so' erros marcados como
+  recuperaveis sao repetidos.
+* **Sem vazamento.** A fila antiga empilhava todo resultado numa
+  ``results`` que ninguem consumia.
+* **Isolamento.** Cada job carrega o proprio ``request_id``, o chat e o id da
+  mensagem de origem, do inicio ao fim. Duas solicitacoes nunca compartilham
+  estado, e o despacho e' serializado por simulador.
+"""
+
+from __future__ import annotations
+
+import queue
+import threading
+import time
+from typing import Callable
+
+from .actor import ActorTimeout
+from .clock import iso_atras, now_iso, parse_iso, utc_now
+from .db import Database
+from .events import EventHub
+from .models import (
+    STAGE_LABELS,
+    IncomingMessage,
+    ParsedRequest,
+    SimulationJob,
+    SimulationResult,
+    Stage,
+    Status,
+)
+from .simulator import SimulatorService
+
+RETRY_BACKOFF_SECONDS = 8.0
+
+
+class QueueService:
+    def __init__(
+        self,
+        db: Database,
+        hub: EventHub,
+        simulators: list[SimulatorService],
+        *,
+        max_attempts: int = 2,
+        job_timeout: float = 300.0,
+        on_result: Callable[[SimulationResult], None] | None = None,
+        on_log: Callable[..., None] | None = None,
+        alerta_fila: int = 10,
+        alerta_espera_s: float = 300.0,
+    ) -> None:
+        self.db = db
+        self.hub = hub
+        self.simulators = simulators
+        self.max_attempts = max(1, max_attempts)
+        self.job_timeout = job_timeout
+        # Quando gritar: fila grande e' enxurrada (so' demora); espera longa
+        # e' travamento. Ver `_conferir_a_espera`.
+        self.alerta_fila = max(1, alerta_fila)
+        self.alerta_espera_s = max(30.0, alerta_espera_s)
+        self._on_result = on_result
+        self._on_log = on_log
+
+        self._pending: "queue.Queue[SimulationJob | None]" = queue.Queue()
+        self._threads: list[threading.Thread] = []
+        self._stop = threading.Event()
+        self._lock = threading.RLock()
+        self._active: dict[str, dict] = {}
+        self._timers: set[threading.Timer] = set()
+        # Um aviso por episodio, nao um por ciclo do vigia.
+        self._ja_avisei_da_espera = False
+
+    # ------------------------------------------------------------ ciclo de vida
+    def start(self) -> None:
+        if self._threads:
+            return
+        self._stop.clear()
+        for index, simulator in enumerate(self.simulators):
+            thread = threading.Thread(
+                target=self._dispatch_loop,
+                args=(simulator,),
+                name=f"dispatcher-{index + 1}",
+                daemon=True,
+            )
+            thread.start()
+            self._threads.append(thread)
+
+        vigia = threading.Thread(target=self._vigia_loop, name="vigia", daemon=True)
+        vigia.start()
+        self._threads.append(vigia)
+
+    # De quanto em quanto procurar solicitacoes presas, e a partir de quando
+    # considerar presa. A folga sobre o job_timeout evita brigar com uma
+    # simulacao que ainda esta' viva.
+    _INTERVALO_DO_VIGIA = 60.0
+    _FOLGA_SOBRE_O_TIMEOUT = 120.0
+
+    def _vigia_loop(self) -> None:
+        """Resolve solicitacoes que ficaram presas em `processing`.
+
+        O `recover()` cobre o reinicio; este cobre o resto. Uma solicitacao
+        presa em `processing` com o sistema NO AR fica invisivel para todo
+        mundo: nao esta' na fila, nao aparece como erro, e o laco de reenvio
+        nao a pega porque ele so' olha `completed` e `error`. O consultor fica
+        esperando uma resposta que nunca vem, sem explicacao -- foi o que
+        aconteceu com a REQ000037.
+        """
+        while not self._stop.wait(self._INTERVALO_DO_VIGIA):
+            try:
+                self._resolver_presas()
+                self._conferir_a_espera()
+            except Exception as exc:
+                self._log("ERROR", f"Vigia da fila falhou: {exc}")
+
+    def _resolver_presas(self) -> int:
+        limite = iso_atras(self.job_timeout + self._FOLGA_SOBRE_O_TIMEOUT)
+        presas = self.db.fetchall(
+            "SELECT * FROM simulations "
+            " WHERE status = ? "
+            "   AND COALESCE(started_at, queued_at, created_at) < ? "
+            " ORDER BY id LIMIT 10",
+            (Status.PROCESSING, limite),
+        )
+        resolvidas = 0
+        with self._lock:
+            rodando = set(self._active)
+        for linha in presas:
+            row = dict(linha)
+            if row.get("request_id") in rodando:
+                continue   # ainda em execucao de verdade
+            self._log(
+                "WARNING",
+                f"{row.get('request_id')}: presa em processamento há mais de "
+                f"{int(self.job_timeout + self._FOLGA_SOBRE_O_TIMEOUT)}s. "
+                "Encerrando para o consultor não ficar sem resposta.",
+            )
+            self._finalize_interrupted(
+                row, "a simulação travou e não retornou")
+            resolvidas += 1
+        return resolvidas
+
+    def pendencias(self) -> dict:
+        """Quantas solicitacoes esperam, e ha' quanto tempo a mais antiga.
+
+        Existe porque "o bot caiu e ninguem percebeu" e' o pior modo de falha
+        deste sistema: em 15:20 do dia 01/09 entraram cinquenta pedidos, o bot
+        respondeu UM e o WhatsApp caiu. Quarenta e nove consultores ficaram
+        esperando, e nada na tela dizia isso -- a fila estava correta, o banco
+        estava correto, e o painel nao mostrava numero nenhum.
+
+        Conta `queued` E `processing`: uma presa em processamento espera
+        igual, e foi assim que a REQ000037 ficou invisivel.
+        """
+        linha = self.db.fetchone(
+            "SELECT COUNT(*) AS quantas, MIN(COALESCE(queued_at, created_at)) AS mais_antiga "
+            "  FROM simulations WHERE status IN (?, ?)",
+            (Status.QUEUED, Status.PROCESSING),
+        ) or {}
+        quantas = int(linha.get("quantas") or 0)
+        mais_antiga = linha.get("mais_antiga")
+
+        espera = 0.0
+        if mais_antiga:
+            inicio = parse_iso(str(mais_antiga))
+            if inicio:
+                espera = max(0.0, (utc_now() - inicio).total_seconds())
+
+        return {
+            "pendentes": quantas,
+            "espera_maxima_s": round(espera),
+            "desde": mais_antiga or "",
+            "fila_cheia": quantas >= self.alerta_fila,
+            "espera_longa": espera >= self.alerta_espera_s,
+        }
+
+    def _conferir_a_espera(self) -> None:
+        """Grita quando a fila cresce demais ou alguem espera demais.
+
+        Dois limiares, porque sao dois problemas: fila grande e' enxurrada
+        (normal, so' demora), e espera longa e' travamento (nao e' normal).
+        Um WARNING por ciclo, nao um por solicitacao -- cinquenta linhas
+        iguais no log escondem em vez de avisar.
+        """
+        estado = self.pendencias()
+        if not (estado["fila_cheia"] or estado["espera_longa"]):
+            self._ja_avisei_da_espera = False
+            return
+        if self._ja_avisei_da_espera:
+            return
+        self._ja_avisei_da_espera = True
+
+        minutos = estado["espera_maxima_s"] / 60
+        self._log(
+            "WARNING",
+            f"{estado['pendentes']} solicitação(ões) esperando; a mais antiga "
+            f"há {minutos:.0f} min. "
+            + ("A fila está maior que o normal. "
+               if estado["fila_cheia"] else "")
+            + ("Alguém pode estar sem resposta há tempo demais."
+               if estado["espera_longa"] else ""),
+        )
+        self.hub.publish("queue_backlog", estado, title="Fila acumulando")
+
+    def stop(self, timeout: float = 10.0) -> None:
+        self._stop.set()
+        # Cancela as reenfileiragens agendadas: sem isso um timer pendente
+        # acordaria depois do desligamento e empurraria trabalho numa fila morta.
+        with self._lock:
+            timers, self._timers = list(self._timers), set()
+        for timer in timers:
+            timer.cancel()
+        for _ in self._threads:
+            self._pending.put(None)
+        for thread in self._threads:
+            thread.join(timeout=timeout / max(1, len(self._threads)))
+        self._threads.clear()
+
+    def _log(self, level: str, message: str, **extra) -> None:
+        if self._on_log:
+            try:
+                self._on_log(level, "fila", message, **extra)
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------ estado
+    @property
+    def active(self) -> dict[str, dict]:
+        with self._lock:
+            return {k: dict(v) for k, v in self._active.items()}
+
+    def depth(self) -> int:
+        return int(
+            self.db.scalar(
+                "SELECT COUNT(*) FROM simulations WHERE status IN (?,?)",
+                (Status.QUEUED, Status.PROCESSING),
+            )
+        )
+
+    def position_of(self, request_id: str) -> int:
+        row = self.db.fetchone(
+            "SELECT created_at FROM simulations WHERE request_id=?", (request_id,)
+        )
+        if not row:
+            return 0
+        ahead = self.db.scalar(
+            "SELECT COUNT(*) FROM simulations WHERE status IN (?,?) AND created_at < ?",
+            (Status.QUEUED, Status.PROCESSING, row["created_at"]),
+        )
+        return int(ahead) + 1
+
+    def snapshot(self, limit: int = 100) -> list[dict]:
+        rows = self.db.fetchall(
+            "SELECT id, request_id, consultant_name, cpf, bank, contract, customer_name, "
+            "       status, stage, attempts, max_attempts, error_message, "
+            "       created_at, queued_at, started_at, finished_at, processing_seconds "
+            "FROM simulations WHERE status IN (?,?,?) "
+            "ORDER BY CASE status WHEN ? THEN 0 ELSE 1 END, created_at ASC LIMIT ?",
+            (Status.QUEUED, Status.PROCESSING, Status.INTERRUPTED, Status.PROCESSING, limit),
+        )
+        active = self.active
+        items = []
+        for position, row in enumerate(rows, start=1):
+            live = active.get(row["request_id"], {})
+            items.append(
+                {
+                    **row,
+                    "position": position,
+                    "stage_label": STAGE_LABELS.get(row["stage"], row["stage"]),
+                    "elapsed_seconds": (
+                        round(time.monotonic() - live["started_monotonic"], 1)
+                        if live.get("started_monotonic")
+                        else None
+                    ),
+                }
+            )
+        return items
+
+    # -------------------------------------------------------------- enfileirar
+    def submit(self, job: SimulationJob) -> int:
+        position = self.position_of(job.request_id)
+        self.db.update(
+            "simulations",
+            {
+                "status": Status.QUEUED,
+                "stage": Stage.QUEUED,
+                "queued_at": now_iso(),
+                "updated_at": now_iso(),
+            },
+            {"id": job.simulation_id},
+        )
+        self._pending.put(job)
+        self.hub.publish(
+            "job_queued",
+            {
+                "request_id": job.request_id,
+                "simulation_id": job.simulation_id,
+                "consultant": job.request.consultant_name,
+                "bank": job.request.bank,
+                "contract": job.request.contract,
+                "position": position,
+                "attempt": job.attempt,
+            },
+            stage=Stage.QUEUED,
+            title="Na fila",
+            detail=f"{job.request.consultant_name} · posição {position}",
+            request_id=job.request_id,
+            simulation_id=job.simulation_id,
+            consultant_name=job.request.consultant_name,
+            chat_id=job.message.chat_id,
+        )
+        return position
+
+    # --------------------------------------------------------------- recuperar
+    def recover(self) -> int:
+        """Devolve a fila ao estado correto depois de um reinicio."""
+        rows = self.db.fetchall(
+            "SELECT * FROM simulations WHERE status IN (?,?) ORDER BY created_at ASC",
+            (Status.QUEUED, Status.PROCESSING),
+        )
+        recovered = 0
+        for row in rows:
+            attempts = int(row.get("attempts") or 0)
+            limit = int(row.get("max_attempts") or self.max_attempts)
+            if attempts >= limit:
+                self._finalize_interrupted(row, "reinício do sistema durante o processamento")
+                continue
+            job = self._job_from_row(row, attempt=attempts + 1)
+            self.db.update(
+                "simulations",
+                {
+                    "status": Status.QUEUED,
+                    "stage": Stage.QUEUED,
+                    "queued_at": now_iso(),
+                    "updated_at": now_iso(),
+                },
+                {"id": row["id"]},
+            )
+            self._pending.put(job)
+            recovered += 1
+        if recovered:
+            self._log("WARNING", f"{recovered} solicitação(ões) retomadas após reinício.")
+            self.hub.publish(
+                "queue_recovered",
+                {"count": recovered},
+                level="warning",
+                title="Fila retomada",
+                detail=f"{recovered} solicitação(ões) voltaram para a fila após reinício.",
+            )
+        return recovered
+
+    def _finalize_interrupted(self, row: dict, reason: str) -> None:
+        self.db.update(
+            "simulations",
+            {
+                "status": Status.INTERRUPTED,
+                "stage": Stage.INTERRUPTED,
+                "error_message": reason,
+                "finished_at": now_iso(),
+                "updated_at": now_iso(),
+            },
+            {"id": row["id"]},
+        )
+        self.hub.publish(
+            "job_interrupted",
+            {"request_id": row["request_id"], "simulation_id": row["id"], "reason": reason},
+            stage=Stage.INTERRUPTED,
+            level="warning",
+            title="Interrompido",
+            detail=reason,
+            request_id=row["request_id"] or "",
+            simulation_id=row["id"],
+            consultant_name=row.get("consultant_name") or "",
+        )
+
+    @staticmethod
+    def _job_from_row(row: dict, attempt: int) -> SimulationJob:
+        request = ParsedRequest(
+            consultant_name=row.get("consultant_name") or "Consultor",
+            cpf=row.get("cpf") or "",
+            bank=row.get("bank") or "",
+            contract=row.get("contract") or "",
+            simulation_type=row.get("simulation_type") or "consignado",
+            customer_name=row.get("customer_name") or "Lead",
+            origin=row.get("origin") or "",
+            phone=row.get("phone") or "",
+        )
+        message = IncomingMessage(
+            message_id=row.get("source_message_id") or "",
+            chat_id=row.get("chat_id") or "",
+            chat_name="",
+            sender_id=row.get("sender_id") or "",
+            sender_name=row.get("sender_name") or "",
+            text=row.get("raw_message") or "",
+        )
+        return SimulationJob(
+            request=request,
+            message=message,
+            request_id=row["request_id"],
+            simulation_id=row["id"],
+            consultant_id=row.get("consultant_id"),
+            attempt=attempt,
+        )
+
+    # ----------------------------------------------------------------- despacho
+    def _dispatch_loop(self, simulator: SimulatorService) -> None:
+        while not self._stop.is_set():
+            job = self._pending.get()
+            if job is None:
+                return
+            try:
+                self._process(job, simulator)
+            except Exception as exc:  # nunca deixar a thread morrer
+                self._log(
+                    "ERROR",
+                    f"Falha inesperada ao processar {job.request_id}: {exc}",
+                    request_id=job.request_id,
+                )
+
+    def _process(self, job: SimulationJob, simulator: SimulatorService) -> None:
+        started_iso = now_iso()
+        started_monotonic = time.monotonic()
+
+        with self._lock:
+            self._active[job.request_id] = {
+                "consultant": job.request.consultant_name,
+                "simulation_id": job.simulation_id,
+                "stage": Stage.PROCESSING,
+                "attempt": job.attempt,
+                "started_monotonic": started_monotonic,
+                "started_at": started_iso,
+                "simulator": simulator.name,
+            }
+
+        self.db.update(
+            "simulations",
+            {
+                "status": Status.PROCESSING,
+                "stage": Stage.PROCESSING,
+                "started_at": started_iso,
+                "attempts": job.attempt,
+                "updated_at": started_iso,
+            },
+            {"id": job.simulation_id},
+        )
+        self._emit_stage(job, Stage.PROCESSING)
+
+        def on_stage(stage: str) -> None:
+            with self._lock:
+                if job.request_id in self._active:
+                    self._active[job.request_id]["stage"] = stage
+            self.db.update(
+                "simulations",
+                {"stage": stage, "updated_at": now_iso()},
+                {"id": job.simulation_id},
+            )
+            self._emit_stage(job, stage)
+
+        try:
+            result = simulator.execute(job, on_stage, timeout=self.job_timeout)
+        except ActorTimeout:
+            result = SimulationResult(
+                job=job,
+                ok=False,
+                status="Timeout",
+                error=f"a simulação passou de {int(self.job_timeout)}s sem responder",
+                retryable=True,
+            )
+            self._log(
+                "ERROR",
+                f"{job.request_id}: tempo limite de {int(self.job_timeout)}s excedido.",
+                request_id=job.request_id,
+            )
+        except Exception as exc:
+            result = SimulationResult(
+                job=job, ok=False, status="Erro", error=str(exc)[:240], retryable=False
+            )
+
+        elapsed = round(time.monotonic() - started_monotonic, 1)
+        with self._lock:
+            self._active.pop(job.request_id, None)
+
+        if not result.ok and result.retryable and job.attempt < self.max_attempts:
+            self._retry(job, result, elapsed)
+            return
+
+        self._finish(job, result, elapsed)
+
+    def _retry(self, job: SimulationJob, result: SimulationResult, elapsed: float) -> None:
+        self.db.update(
+            "simulations",
+            {
+                "status": Status.QUEUED,
+                "stage": Stage.QUEUED,
+                "error_message": result.error,
+                "updated_at": now_iso(),
+            },
+            {"id": job.simulation_id},
+        )
+        self.hub.publish(
+            "job_retry",
+            {
+                "request_id": job.request_id,
+                "simulation_id": job.simulation_id,
+                "attempt": job.attempt,
+                "max_attempts": self.max_attempts,
+                "error": result.error,
+                "elapsed_seconds": elapsed,
+            },
+            stage=Stage.QUEUED,
+            level="warning",
+            title="Nova tentativa",
+            detail=f"tentativa {job.attempt}/{self.max_attempts} falhou: {result.error}",
+            request_id=job.request_id,
+            simulation_id=job.simulation_id,
+            consultant_name=job.request.consultant_name,
+        )
+        self._log(
+            "WARNING",
+            f"{job.request_id}: tentativa {job.attempt} falhou ({result.error}). Reenfileirando.",
+            request_id=job.request_id,
+            consultant=job.request.consultant_name,
+        )
+        retry_job = SimulationJob(
+            request=job.request,
+            message=job.message,
+            request_id=job.request_id,
+            simulation_id=job.simulation_id,
+            consultant_id=job.consultant_id,
+            attempt=job.attempt + 1,
+        )
+        # A espera acontece num timer, NÃO nesta thread. Antes era um
+        # time.sleep() no despachante: com um worker, a fila inteira congelava
+        # por 8s a cada falha recuperável e outros consultores esperavam à toa.
+        atraso = threading.Timer(RETRY_BACKOFF_SECONDS, self._pending.put, args=(retry_job,))
+        atraso.daemon = True
+        with self._lock:
+            self._timers.add(atraso)
+        atraso.start()
+
+    def _finish(self, job: SimulationJob, result: SimulationResult, elapsed: float) -> None:
+        import json
+
+        finished = now_iso()
+        if result.ok:
+            payload = {
+                "status": Status.COMPLETED,
+                "stage": Stage.COMPLETED,
+                "error_message": "",
+                "refin": result.status,
+                "reduction_value": result.reduction_value,
+                "margin": result.margin,
+                "installment_sum": result.installment_sum,
+                "installment_count": result.installment_count,
+                "debt_sum": result.debt_sum,
+                "contracts_count": len(result.contracts),
+                "contracts_json": json.dumps(list(result.contracts), ensure_ascii=False, default=str),
+                # O que o portal disse, literal. Guardado para o painel e
+                # para o reenvio poderem repetir o MOTIVO em vez da frase
+                # generica -- o consultor age diferente conforme ele.
+                "motivos_portal": json.dumps(list(result.motivos or ()),
+                                             ensure_ascii=False, default=str),
+                "finished_at": finished,
+                "processing_seconds": elapsed,
+                "updated_at": finished,
+            }
+        else:
+            payload = {
+                "status": Status.ERROR,
+                "stage": Stage.ERROR,
+                "error_message": result.error or result.status,
+                "finished_at": finished,
+                "processing_seconds": elapsed,
+                "updated_at": finished,
+            }
+        self.db.update("simulations", payload, {"id": job.simulation_id})
+
+        common = {
+            "request_id": job.request_id,
+            "simulation_id": job.simulation_id,
+            "consultant": job.request.consultant_name,
+            "elapsed_seconds": elapsed,
+            "attempt": job.attempt,
+        }
+        if result.ok:
+            self.hub.publish(
+                "job_done",
+                {
+                    **common,
+                    "refin": result.status,
+                    "reduction_value": result.reduction_value,
+                    "margin": result.margin,
+                    "contracts": len(result.contracts),
+                },
+                stage=Stage.COMPLETED,
+                level="success",
+                title="Simulação concluída",
+                detail=f"{job.request.consultant_name} · refin: {result.status} · {elapsed}s",
+                request_id=job.request_id,
+                simulation_id=job.simulation_id,
+                consultant_name=job.request.consultant_name,
+                chat_id=job.message.chat_id,
+            )
+        else:
+            self.hub.publish(
+                "job_error",
+                {**common, "error": result.error},
+                stage=Stage.ERROR,
+                level="error",
+                title="Erro na simulação",
+                detail=f"{job.request.consultant_name} · {result.error}",
+                request_id=job.request_id,
+                simulation_id=job.simulation_id,
+                consultant_name=job.request.consultant_name,
+                chat_id=job.message.chat_id,
+            )
+
+        if self._on_result:
+            try:
+                self._on_result(result)
+            except Exception as exc:
+                self._log(
+                    "ERROR",
+                    f"{job.request_id}: falha ao entregar o resultado: {exc}",
+                    request_id=job.request_id,
+                )
+
+    def _emit_stage(self, job: SimulationJob, stage: str) -> None:
+        self.hub.publish(
+            "job_progress",
+            {
+                "request_id": job.request_id,
+                "simulation_id": job.simulation_id,
+                "consultant": job.request.consultant_name,
+                "stage": stage,
+                "label": STAGE_LABELS.get(stage, stage),
+                "attempt": job.attempt,
+            },
+            stage=stage,
+            title=STAGE_LABELS.get(stage, stage),
+            detail=job.request.consultant_name,
+            request_id=job.request_id,
+            simulation_id=job.simulation_id,
+            consultant_name=job.request.consultant_name,
+            chat_id=job.message.chat_id,
+        )

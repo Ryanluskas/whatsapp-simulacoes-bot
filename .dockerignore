@@ -1,0 +1,30 @@
+# Segredos e dados — nunca vão para a imagem
+.env
+*.db
+*.db-wal
+*.db-shm
+state.json
+comprovantes/
+logs/
+
+# Perfis de navegador (sessão do WhatsApp e do banco)
+.whatsapp-profile/
+.simulator-profile*/
+
+# Ambiente e caches locais
+.venv/
+venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Não fazem parte da imagem
+tests/
+_legado/
+.git/
+.github/
+*.md
+!README.md
+iniciar.bat
+iniciar-agente.bat

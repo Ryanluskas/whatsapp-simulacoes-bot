@@ -1,0 +1,94 @@
+# Segredos e dados — nunca versionar
+.env
+*.db
+*.db-wal
+*.db-shm
+state.json
+logs/
+# Imagens enviadas ao grupo — contêm dados de cliente
+comprovantes/
+
+# Perfis de navegador (contêm a sessão do WhatsApp e do banco)
+.whatsapp-profile/
+.whatsapp-profile.bak-*/
+.simulator-profile*/
+*.bak-*/
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Código da versão anterior, guardado só para consulta
+_legado/
+
+# Sistema operacional
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ===== Bloco de seguranca adicionado automaticamente =====
+# Segredos / credenciais
+.env
+.env.*
+!.env.example
+*.env
+credenciais.ini
+client_secret*.json
+*secret*.json
+serviceAccount*.json
+*.pem
+*.key
+
+# Dados de clientes / pessoais
+*.csv
+*.xlsx
+*.xls
+contatos*
+contacts.dat
+*.vcf
+comprovantes/
+
+# Logs / debug
+*.log
+bot_log.txt
+_debug_*
+debug_*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node / Next / build
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# Perfis de navegador / sessao
+chrome_profile*/
+*.whatsapp-profile*/
+*.simulator-profile*/
+.locks/
+
+# Arquivos pesados compactados
+*.rar
+*.7z
+*.zip
+
+# OS / editor
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/

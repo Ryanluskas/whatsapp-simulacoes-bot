@@ -1,0 +1,173 @@
+/* ==========================================================================
+   ALLANA — tokens do sistema de design
+   --------------------------------------------------------------------------
+   Sistema white-label: a base é neutra fria e serve a qualquer empresa; toda
+   a identidade vive numa ÚNICA rampa de marca. Trocar de cliente = trocar os
+   nove valores de --brand-*, e nada mais.
+
+   As cores não foram escolhidas por gosto — passaram pelo validador do método
+   de visualização (banda de luminosidade OKLCH, piso de croma, separação sob
+   protanopia/deuteranopia e contraste contra a superfície real #131519):
+
+     rampa de marca (índigo, hue 278) .. ótimo medido: é o ponto da roda de
+        cores com MAIOR distância das 5 cores de estado (ΔE 13,7 visão normal
+        / 10,8 sob daltonismo). Nenhum outro tom se afasta mais.
+     estados (5 slots, nesta ordem) .... TODAS as checagens passam
+        pior par adjacente ΔE 15,9 (deutan) — alvo ≥ 8
+        pior par visão normal ΔE 24,1 — piso ≥ 15
+     rampa de gráficos (ordinal) ....... TODAS as checagens passam
+     tinta sobre superfície ............ 16,6:1 / 10,0:1 / 5,9:1
+
+   REGRA: a cor de marca é CROMO (logo, trilho ativo, botão, foco). Ela nunca
+   codifica dado. Quem codifica estado são os tokens --st-*, e quem codifica
+   magnitude é a rampa --chart-*. Misturar os três quebra a leitura.
+
+   A ORDEM dos slots de estado é o mecanismo de segurança para daltonismo.
+   Não reordene sem rodar o validador de novo.
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* ---------------------------------------------------------- superfícies */
+  --plane:        #0B0C0E;   /* fundo da página */
+  --surface:      #131519;   /* card e superfície dos gráficos (validada) */
+  --surface-2:    #1A1D22;   /* elevado: modal, hover, cabeçalho de tabela */
+  --surface-3:    #22262D;   /* campos de formulário */
+  --surface-sunk: #0E1013;   /* console, áreas recuadas */
+
+  --line:         #262A31;   /* fio de 1px */
+  --line-2:       #333842;   /* fio mais presente */
+  --grid:         #202429;   /* linhas de grade dos gráficos */
+
+  /* ----------------------------------------------------------------- tinta */
+  --ink:          #F2F4F7;   /* 16,6:1 */
+  --ink-2:        #B9C0CB;   /* 10,0:1 */
+  --ink-3:        #8A93A1;   /*  5,9:1 — eixos, legendas, texto secundário */
+
+  /* ============================ MARCA ====================================
+     Para outra empresa, troque só estes nove valores e rode o validador:
+       python scripts/validate_palette.py "<600>,<500>,<300>" --mode dark \
+              --surface "#131519"
+     O passo 600 precisa de ≥ 3:1 (fundo de botão) e o 300 de ≥ 4,5:1 (texto).
+     ===================================================================== */
+  --brand-900: #2C287E;
+  --brand-800: #3D3BA1;
+  --brand-700: #4E4CC3;
+  --brand-600: #5D5FD7;   /* fundo de botão primário — 3,6:1 */
+  --brand-500: #6E74E6;   /* acento, trilho ativo, foco — 4,6:1 */
+  --brand-400: #848CF3;
+  --brand-300: #9FA9FC;   /* texto e links sobre superfície — 8,3:1 */
+  --brand-200: #C1C9FF;
+  --brand-100: #DCE2FF;
+
+  /* Papéis semânticos: o resto do CSS usa ESTES, nunca os números acima. */
+  --brand:       var(--brand-500);
+  --brand-solid: var(--brand-600);
+  --brand-text:  var(--brand-300);
+  --brand-wash:  rgba(110, 116, 230, 0.12);
+  --brand-ring:  rgba(110, 116, 230, 0.42);
+
+  /* ------------------------------------------------- estados (validados) */
+  /* ordem de slot: erro > processando > aguardando > consultando > concluído */
+  --st-error:      #E05A5A;
+  --st-processing: #4C93D6;
+  --st-queued:     #B5871F;
+  --st-consulting: #9C4F96;
+  --st-done:       #3FAA6C;
+  --st-idle:       #7B828F;
+
+  /* Fundos tênues para chips e faixas — a cor pura fica na marca, não no bloco */
+  --st-error-bg:      rgba(224, 90, 90, 0.13);
+  --st-processing-bg: rgba(76, 147, 214, 0.13);
+  --st-queued-bg:     rgba(181, 135, 31, 0.14);
+  --st-consulting-bg: rgba(156, 79, 150, 0.15);
+  --st-done-bg:       rgba(63, 170, 108, 0.13);
+  --st-idle-bg:       rgba(123, 130, 143, 0.13);
+
+  /* ------------------------- rampa ordinal de gráficos (validada) ------- */
+  /* Uma cor só, do escuro ao claro. A ordem se lê na própria luminosidade. */
+  --chart-1: #4E4CC3;
+  --chart-2: #6568E1;
+  --chart-3: #8088F5;
+  --chart-4: #9FA9FC;
+  --chart-5: #C1C9FF;
+
+  /* -------------------------------------------------------------- espaço */
+  --s-1:  4px;
+  --s-2:  8px;
+  --s-3:  12px;
+  --s-4:  16px;
+  --s-5:  20px;
+  --s-6:  24px;
+  --s-8:  32px;
+  --s-10: 40px;
+  --s-12: 48px;
+
+  --r-sm:   6px;
+  --r:      10px;
+  --r-lg:   14px;
+  --r-full: 999px;
+
+  /* ---------------------------------------------------------- tipografia */
+  /* Sans do sistema em tudo, inclusive nos números grandes. A hierarquia vem
+     de peso e entreletras, não de uma segunda família — é o que separa um
+     painel financeiro sério de um enfeitado. */
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas,
+               "Liberation Mono", monospace;
+
+  --t-xs:  11px;
+  --t-sm:  12px;
+  --t-md:  13px;
+  --t-base:14px;
+  --t-lg:  16px;
+  --t-xl:  19px;
+  --t-2xl: 24px;
+  --t-3xl: 32px;
+  --t-hero:48px;
+
+  --track-tight: -0.02em;
+  --track-wide:   0.08em;
+  --track-caps:   0.12em;
+
+  /* ------------------------------------------------------------- sombras */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 8px 24px -8px rgba(0, 0, 0, 0.7);
+  --shadow-3: 0 24px 60px -16px rgba(0, 0, 0, 0.8);
+
+  /* ----------------------------------------------------------- movimento */
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 280ms;
+  --ease: cubic-bezier(0.32, 0.08, 0.24, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* --------------------------------------------------------------- camadas */
+  --z-sticky: 20;
+  --z-drawer: 60;
+  --z-modal:  80;
+  --z-toast:  100;
+
+  --sidebar-w: 240px;
+  --topbar-h:  62px;
+}
+
+/* Quem pediu menos movimento recebe menos movimento — inclusive nas
+   transições de rota e nos pulsos de status. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 0ms;
+    --dur-2: 0ms;
+    --dur-3: 0ms;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

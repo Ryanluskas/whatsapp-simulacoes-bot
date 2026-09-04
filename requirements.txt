@@ -1,0 +1,29 @@
+# --- Painel web -------------------------------------------------------------
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9      # formulario de login
+python-dotenv>=1.0.0
+
+# --- Automacao (WhatsApp Web + portal do banco) ------------------------------
+# A versao e' PRESA de proposito: a imagem base do Docker
+# (mcr.microsoft.com/playwright/python:v1.62.0-noble) traz os navegadores ja'
+# instalados num caminho que muda a cada versao. Um playwright mais novo aqui
+# procuraria navegador onde nao existe e o container subiria quebrado com
+# "Executable doesn't exist at /ms-playwright/chromium-XXXX".
+# Ao subir esta versao, suba TAMBEM a tag no Dockerfile.
+playwright==1.62.0
+playwright-stealth>=1.0.6
+pandas>=2.0.0                # exigido pelo bot.py do Arqueiro (importado, nao reescrito)
+
+# --- Relatorios --------------------------------------------------------------
+openpyxl>=3.1.0              # export .xlsx
+reportlab>=4.0.0             # export .pdf
+
+# --- Testes ------------------------------------------------------------------
+pytest>=8.0.0
+httpx>=0.27.0                # cliente do fastapi.testclient
+pyyaml>=6.0                  # testes leem o docker-compose.yml
+
+# Nao ha' dependencia de tempo real: o painel usa Server-Sent Events, que e'
+# nativo do navegador. Nenhum javascript e' carregado de CDN, entao o sistema
+# funciona sem internet.
