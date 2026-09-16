@@ -1377,6 +1377,31 @@ class TestReancorarAntesDeCadaClique:
         finally:
             pagina.close()
 
+    def test_texto_parecido_em_duas_mensagens_nao_vira_citacao(self, navegador):
+        """Citar "a última parecida" respondia o pedido de OUTRO consultor.
+
+        Sem o data-id, a reserva pelo texto só vale se apontar UMA linha.
+        """
+        from app.whatsapp import GEOMETRIA_DA_LINHA_JS
+
+        pagina = navegador.new_page()
+        try:
+            pagina.set_content("""<!doctype html><html><body><div id="main">
+              <div role="row"><div data-id="2AOUTRO" style="display:block;width:200px;height:40px">
+                <span class="selectable-text">Maria Tabaré 11144477735</span></div></div>
+              <div role="row"><div data-id="2ANOVO" style="display:block;width:200px;height:40px">
+                <span class="selectable-text">Maria Tabaré 52998224725</span></div></div>
+              </div></body></html>""")
+            r = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, ["id-que-mudou", "Maria Tabaré"])
+            assert r["achou"] is False, "citou por aproximação"
+            assert "2" in r["motivo"]
+
+            unica = pagina.evaluate(GEOMETRIA_DA_LINHA_JS,
+                                    ["id-que-mudou", "Maria Tabaré 52998224725"])
+            assert unica["achou"] is True and unica["via"] == "texto"
+        finally:
+            pagina.close()
+
     def test_mensagem_que_sumiu_nao_vira_clique_no_vazio(self, navegador):
         """O menu do GRUPO abrindo foi o sintoma disso."""
         from app.whatsapp import GEOMETRIA_DA_LINHA_JS

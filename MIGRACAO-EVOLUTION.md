@@ -162,6 +162,64 @@ Só aponte para o grupo real depois de passar nos seis:
 
 ---
 
+## Como a entrega funciona na camada Evolution
+
+Estas regras valem a partir desta versão e estão travadas por
+`tests/test_producao.py` (unidade) e `ferramentas/e2e_simulado.py` (processo
+real com Evolution e agente falsos).
+
+**Idempotência.** O webhook grava a mensagem no banco (`messages`,
+`direction='in'`) ANTES de responder 200. A gravação é a trava: a mesma
+`key.id` no mesmo chat nunca vira segunda solicitação — nem em paralelo, nem
+depois de reiniciar. Se o processo cair entre o 200 e a criação do `REQ`, o
+boot retoma a mensagem (`status='received'`).
+
+**Citação.** O `quoted` é montado com o que ficou gravado da mensagem
+original: `key.id`, `remoteJid`, `participant` (o autor, como chegou — pode
+ser `@lid`) e o texto. Nada vem de memória em RAM. A resposta da Evolution é
+conferida: `contextInfo.stanzaId` igual ao id pedido = citação confirmada.
+
+**Citação recusada (400/422/500).** A resposta sai de novo SEM `quoted`, com a
+versão que termina em `↩ <consultor>`. Falha de citação não é falha de
+resposta. Timeout, 429, 502/503/504 não disparam isso (a mensagem pode ter
+saído).
+
+**Imagem.** Renderizada num arquivo provisório, validada (PNG legível:
+assinatura, CRC, dados descomprimidos batendo com as dimensões) e só então
+movida para `comprovantes/<REQ>.png`. Falhou render, validação ou envio → a
+resposta sai em texto.
+
+**2xx sem `key.id`.** Não é tratado como entregue (`delivery_status =
+unconfirmed`) e NÃO é reenviado sozinho — a mensagem pode ter chegado, e
+reenviar duplicaria. Aparece no log como WARNING e no painel.
+
+**Falha transitória** (timeout, conexão, 429, 5xx): `delivery_status =
+retrying`, etapa `delivery_retry`. O laço de reenvio tenta de novo na MESMA
+solicitação (30 s, 60 s, 120 s… até 5 vezes), citando a mesma mensagem.
+**Falha permanente** (401/403/404, licença, sem `chat_id`): `failed`, sem
+repetir.
+
+**`completed` só depois da entrega.** Enquanto a resposta sobe, a solicitação
+fica `processing/replying`. Um reinício nesse meio NÃO simula de novo no
+Santander: o resultado já gravado vai para o reenvio.
+
+**Evidência.** Cada tentativa de envio vira uma linha em `messages`
+(`direction='out'`) com `provider`, `attempt`, `origin_message_id`,
+`quoted_message_id`, `quote_status`, `wa_message_id` (id devolvido),
+`http_status`, `media_id` e `error`. A solicitação guarda o resumo:
+`delivery_status`, `quote_status`, `media_status`, `sent_message_id`.
+
+### O que ainda precisa ser validado com a Evolution de verdade
+
+O servidor falso responde no formato da v2, mas não é a Evolution. No grupo
+de teste, confira em especial:
+
+1. se a Evolution aceita `quoted.key.participant` (se recusar, o fallback
+   manda sem citação e o log mostra `A Evolution recusou a citação`);
+2. se a resposta de `sendText`/`sendMedia` traz `message.*.contextInfo.stanzaId`
+   (se não trouxer, `quote_status` fica `unverified` em vez de `ok`);
+3. se a citação aparece no celular apontando para o consultor certo.
+
 ## O que fazer se der errado
 
 Volte para `WHATSAPP_MODE=dom` no `.env` e reinicie. O código antigo continua
@@ -173,11 +231,13 @@ propósito.
 | Arquivo | O que faz |
 |---|---|
 | `app/whatsapp_port.py` | o contrato que as duas camadas cumprem |
-| `app/evolution.py` | envio pela API (HTTP puro) |
+| `app/evolution.py` | envio pela API (HTTP puro), citação conferida e fallback |
 | `app/evolution_webhook.py` | leitura do que a Evolution entrega |
 | `app/evolution_check.py` | diagnóstico (`python -m app.evolution_check`) |
-| `app/renderer.py` | gera o PNG sem depender do navegador do WhatsApp |
-| `app/whatsapp.py` | a camada antiga, intocada |
+| `app/renderer.py` | gera e VALIDA o PNG, sem depender do navegador do WhatsApp |
+| `app/manager.py` | registro da entrada, entrega com evidência, reenvio |
+| `app/whatsapp.py` | a camada antiga (legado); só ganhou a assinatura comum |
+| `ferramentas/e2e_simulado.py` | E2E com o `main.py` real, Evolution e agente falsos |
 
 A automação do Santander (`app/simulator.py`, `app/actor.py`, o Arqueiro)
 **não muda em nada**. Ela continua no Playwright, no Brave, com thread dona.

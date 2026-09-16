@@ -26,7 +26,6 @@ sendo do ``parser``, que nao muda. Aqui so' se decide o que e' ruido.
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
 
 from .models import IncomingMessage
@@ -107,22 +106,39 @@ def identificar_remetente(key: dict, data: dict) -> tuple[str, str]:
 
 
 def interpretar(payload: dict, group_jid: str, group_name: str = "") -> Leitura:
-    """Aplica os filtros, na ordem, e monta a mensagem quando sobra algo."""
+    """Aplica os filtros, na ordem, e monta a mensagem quando sobra algo.
+
+    Devolve a PRIMEIRA leitura. Quem precisa de todas (a rota do webhook)
+    usa ``interpretar_todos``.
+    """
+    return interpretar_todos(payload, group_jid, group_name)[0]
+
+
+def interpretar_todos(payload: dict, group_jid: str, group_name: str = "") -> list[Leitura]:
+    """Uma leitura por mensagem do payload -- sempre ao menos uma.
+
+    Algumas versoes da Evolution mandam um LOTE em ``data``. Tratar so' o
+    primeiro item, como antes, descartava as demais mensagens em silencio:
+    o webhook respondia 200, a Evolution nao reentregava, e o pedido sumia.
+    """
     if not isinstance(payload, dict):
-        return Leitura(motivo="payload não é um objeto")
+        return [Leitura(motivo="payload não é um objeto")]
 
     evento = (payload.get("event") or "").strip().lower()
     if evento and evento not in EVENTOS_ATENDIDOS:
-        return Leitura(motivo=f"evento ignorado: {evento}")
+        return [Leitura(motivo=f"evento ignorado: {evento}")]
     if evento == "connection.update":
-        return Leitura(motivo="connection.update")
+        return [Leitura(motivo="connection.update")]
 
     data = payload.get("data")
-    # Algumas versoes mandam um lote em ``data``. Tratar so' o primeiro item
-    # e' suficiente porque o webhook e' chamado uma vez por mensagem; um lote
-    # inesperado ainda rende a primeira em vez de render nada.
     if isinstance(data, list):
-        data = data[0] if data else {}
+        if not data:
+            return [Leitura(motivo="payload sem data")]
+        return [_interpretar_uma(item, group_jid, group_name) for item in data]
+    return [_interpretar_uma(data, group_jid, group_name)]
+
+
+def _interpretar_uma(data, group_jid: str, group_name: str) -> Leitura:
     if not isinstance(data, dict):
         return Leitura(motivo="payload sem data")
 
@@ -162,42 +178,10 @@ def interpretar(payload: dict, group_jid: str, group_name: str = "") -> Leitura:
             sender_name=(data.get("pushName") or "").strip(),
             text=texto,
             timestamp=str(carimbo),
+            # O autor COMO CHEGOU, para a citacao. A identidade resolvida
+            # (telefone no lugar do LID) fica em `sender_id`.
+            participant=(key.get("participant") or "").strip() or remoto,
         ),
         motivo="ok",
         aviso=aviso,
     )
-
-
-class MemoriaDeIds:
-    """Lembra quais ``key.id`` ja' foram processados.
-
-    A Evolution reentrega o evento quando nao recebe 200 a tempo. Sem esta
-    trava, um webhook reentregue vira uma segunda simulacao do mesmo CPF e
-    uma segunda resposta no grupo -- o consultor pensa que simulamos duas
-    vezes, e o portal do banco leva o dobro de carga a toa.
-
-    Limitada de proposito: e' uma trava contra reentrega imediata, nao um
-    historico. O banco ja' guarda o historico.
-    """
-
-    def __init__(self, limite: int = 2000) -> None:
-        self.limite = limite
-        self._vistos: dict[str, None] = {}
-        self._lock = threading.Lock()
-
-    def ja_visto(self, message_id: str) -> bool:
-        """Marca como visto e diz se JA' estava. Uma operacao so', de proposito.
-
-        Consultar e marcar em chamadas separadas abriria uma janela entre as
-        duas -- e duas entregas simultaneas do mesmo evento passariam pelas
-        duas antes de qualquer uma marcar.
-        """
-        if not message_id:
-            return False
-        with self._lock:
-            if message_id in self._vistos:
-                return True
-            self._vistos[message_id] = None
-            while len(self._vistos) > self.limite:
-                self._vistos.pop(next(iter(self._vistos)))
-            return False

@@ -36,7 +36,7 @@ from playwright.sync_api import sync_playwright
 
 from .actor import ThreadActor
 from .clock import now_iso
-from .models import IncomingMessage, ResultadoEnvio
+from .models import IncomingMessage, QuoteStatus, ResultadoEnvio
 from .navegador_zumbi import encerrar_orfaos
 from .state_store import StateStore
 
@@ -830,16 +830,26 @@ GEOMETRIA_DA_LINHA_JS = r"""
 
   // Reserva: pelo texto. O data-id muda de formato entre versoes do
   // WhatsApp, o texto do pedido nao.
+  //
+  // So' vale se o texto apontar UMA linha. Antes pegava a ultima parecida:
+  // dois pedidos com o mesmo cliente (ou o mesmo comeco de texto) faziam a
+  // resposta citar a mensagem de OUTRO consultor. Na duvida, nao cita -- a
+  // resposta sai sem citacao e com o nome de quem pediu.
+  let ambigua = 0;
   if (!linha && textoAlvo) {
     const alvo = norm(textoAlvo).slice(0, 24);
     if (alvo) {
-      const linhas = [...document.querySelectorAll('div[role="row"]')];
-      for (let i = linhas.length - 1; i >= 0; i--) {
-        if (norm(linhas[i].innerText).includes(alvo)) { linha = linhas[i]; via = 'texto'; break; }
-      }
+      const parecidas = [...document.querySelectorAll('div[role="row"]')]
+        .filter((el) => norm(el.innerText).includes(alvo));
+      if (parecidas.length === 1) { linha = parecidas[0]; via = 'texto'; }
+      else ambigua = parecidas.length;
     }
   }
 
+  if (!linha && ambigua > 1) {
+    return { achou: false, via: '',
+             motivo: `o texto casa com ${ambigua} mensagens; nao cito por aproximacao` };
+  }
   if (!linha) return { achou: false, via: '', motivo: 'a mensagem nao esta na tela' };
 
   linha.setAttribute('data-allana-linha', '1');
@@ -1518,7 +1528,8 @@ class WhatsAppService(ThreadActor):
             return False
 
     def send(self, chat_id: str, chat_name: str, text: str, quote_message_id: str = "",
-             timeout: float = 90.0, texto_sem_citacao: str = "") -> ResultadoEnvio:
+             timeout: float = 90.0, texto_sem_citacao: str = "", quote_text: str = "",
+             quote_participant: str = "") -> ResultadoEnvio:
         """Envia texto para um chat especifico. Executado na thread dona.
 
         ``texto_sem_citacao`` e' a MESMA resposta escrita para se sustentar
@@ -1526,6 +1537,9 @@ class WhatsAppService(ThreadActor):
         e' ``mensagens.py``; aqui so' se escolhe qual sai, e a escolha so'
         pode ser feita DEPOIS de tentar citar. Sem isso o manager teria de
         adivinhar antes do envio se a citacao ia funcionar.
+
+        ``quote_text``/``quote_participant`` existem pelo contrato comum com a
+        camada Evolution. Aqui (legado) a citacao e' feita na tela pelo id.
         """
         return self.call(self._do_send, chat_id, chat_name, text, quote_message_id,
                          texto_sem_citacao, timeout=timeout)
@@ -1539,6 +1553,8 @@ class WhatsAppService(ThreadActor):
         quote_message_id: str = "",
         timeout: float = 120.0,
         caption_sem_citacao: str = "",
+        quote_text: str = "",
+        quote_participant: str = "",
     ) -> ResultadoEnvio:
         """Envia uma imagem com legenda. Levanta excecao se nao conseguir.
 
@@ -2294,7 +2310,15 @@ class WhatsAppService(ThreadActor):
         self._page.wait_for_timeout(450)
         self._lembrar_do_que_enviamos(text)
         return ResultadoEnvio(ok=True, via="texto", quoted_ok=citou,
-                              tipo_midia="nenhum")
+                              tipo_midia="nenhum", provider="dom",
+                              quote_status=self._situacao_da_citacao(quote_message_id, citou))
+
+    def _situacao_da_citacao(self, quote_message_id: str, citou: bool) -> str:
+        """Traduz o ``citou`` da tela para o vocabulario comum de evidencia."""
+        if not (self.reply_quote and quote_message_id):
+            return QuoteStatus.NONE
+        # Aqui "citou" ja' e' a barra de citacao CONFIRMADA no rodape.
+        return QuoteStatus.OK if citou else QuoteStatus.FALLBACK
 
     def _citar(self, message_id: str, tipo: str) -> bool:
         """Cita a mensagem e REGISTRA quando nao consegue.
@@ -2999,7 +3023,8 @@ class WhatsAppService(ThreadActor):
                 )
         return ResultadoEnvio(ok=True, via=self._ultima_via_de_envio or "imagem",
                               quoted_ok=citou, tipo_midia="imagem",
-                              legenda_ok=legenda_ok)
+                              legenda_ok=legenda_ok, provider="dom",
+                              quote_status=self._situacao_da_citacao(quote_message_id, citou))
 
     #: O rotulo do campo de legenda, sem o sufixo do compositor.
     _ROTULOS_DA_LEGENDA = ("Digite uma mensagem", "Type a message",

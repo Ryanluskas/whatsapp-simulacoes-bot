@@ -31,6 +31,29 @@ CONSULTORES = ["Ryan", "João", "Pedro", "Ana", "Marcos"]
 
 
 # ------------------------------------------------------------------- dubles
+def png_valido(largura: int = 4, altura: int = 3, semente: bytes = b"") -> bytes:
+    """Um PNG de verdade, pequeno, que passa em `renderer.validar_png`.
+
+    Os dublês gravavam só a assinatura seguida de lixo ("basta existir").
+    Com a validação real do PNG isso deixou de passar -- e é bom que não
+    passe: um PNG truncado chegava ao grupo como imagem quebrada.
+    `semente` muda os pixels para cada imagem ser distinguível.
+    """
+    import struct
+    import zlib
+
+    def bloco(tipo: bytes, dados: bytes) -> bytes:
+        return (struct.pack(">I", len(dados)) + tipo + dados
+                + struct.pack(">I", zlib.crc32(tipo + dados) & 0xFFFFFFFF))
+
+    cor = (semente or b"\x10\x20\x30")[:3].ljust(3, b"\x00")
+    linhas = b"".join(b"\x00" + cor * largura for _ in range(altura))
+    return (b"\x89PNG\r\n\x1a\n"
+            + bloco(b"IHDR", struct.pack(">IIBBBBB", largura, altura, 8, 2, 0, 0, 0))
+            + bloco(b"IDAT", zlib.compress(linhas))
+            + bloco(b"IEND", b""))
+
+
 class FakeWhatsApp:
     """Substitui o servico real. Registra tudo que foi enviado, com o destino."""
 
@@ -57,12 +80,13 @@ class FakeWhatsApp:
             raise RuntimeError("navegador indisponível para renderizar")
         destino = Path(path)
         destino.parent.mkdir(parents=True, exist_ok=True)
-        # PNG mínimo válido — basta existir; o conteúdo é testado em outro lugar.
-        destino.write_bytes(b"\x89PNG\r\n\x1a\n" + html.encode("utf-8")[:64])
+        # PNG real e pequeno: a validação do manager lê o arquivo de verdade.
+        destino.write_bytes(png_valido(semente=html.encode("utf-8")[-3:]))
         return str(destino)
 
     def send_image(self, chat_id, chat_name, image_path, caption="",
-                   quote_message_id="", timeout=120.0, caption_sem_citacao=""):
+                   quote_message_id="", timeout=120.0, caption_sem_citacao="",
+                   quote_text="", quote_participant=""):
         # O dublê acompanha a assinatura real de propósito. Quando ele fica
         # para trás, o erro aparece como "resultado pronto mas não entregue"
         # em dezenas de testes — e o motivo real (`unexpected keyword
@@ -75,11 +99,12 @@ class FakeWhatsApp:
             self.images.append({
                 "chat_id": chat_id, "chat_name": chat_name,
                 "path": str(image_path), "caption": caption, "quote": quote_message_id,
+                "quote_text": quote_text, "quote_participant": quote_participant,
             })
         return True
 
     def send(self, chat_id, chat_name, text, quote_message_id="", timeout=90.0,
-             texto_sem_citacao=""):
+             texto_sem_citacao="", quote_text="", quote_participant=""):
         if texto_sem_citacao and not self._cita:
             text = texto_sem_citacao
         if self._delay:
@@ -94,6 +119,8 @@ class FakeWhatsApp:
                     "chat_name": chat_name,
                     "text": text,
                     "quote": quote_message_id,
+                    "quote_text": quote_text,
+                    "quote_participant": quote_participant,
                 }
             )
         return True

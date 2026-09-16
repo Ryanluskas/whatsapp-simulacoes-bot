@@ -34,8 +34,8 @@ from pathlib import Path
 import httpx
 
 from .clock import now_iso
-from .models import IncomingMessage, ResultadoEnvio
-from .renderer import PngRenderer
+from .models import IncomingMessage, QuoteStatus, ResultadoEnvio
+from .renderer import PngInvalido, PngRenderer, validar_png
 from .whatsapp import CONNECTED, DISCONNECTED, STARTING, WhatsAppStatus
 
 #: Pausa antes de cada envio, em milissegundos. Ver a nota sobre banimento.
@@ -45,14 +45,85 @@ DELAY_HUMANO_MS = 1200
 #: Reenviar nao resolve -- so' um humano abrindo ``/manager`` resolve.
 LICENCA_PENDENTE = "LICENSE_REQUIRED"
 
+#: Respostas em que a CITACAO pode ser a culpada, e vale repetir sem ela.
+#:
+#: A Evolution transforma quase toda excecao interna em 400 (inclusive
+#: "mensagem citada nao encontrada"), e algumas em 500. Nesses casos a
+#: mensagem nao saiu, e mandar de novo sem ``quoted`` e' seguro. Ja' 401/403
+#: (chave), 404 (instancia) e 429/502/503/504/timeout nao tem nada a ver com
+#: a citacao -- repetir sem ela so' duplicaria a falha, ou pior, a mensagem.
+_CITACAO_PODE_SER_A_CAUSA = {400, 422, 500}
+
 
 class ErroDeEnvio(Exception):
     """Falha na entrega, ja' classificada em transitoria ou permanente."""
 
-    def __init__(self, mensagem: str, *, transitorio: bool, corpo: str = "") -> None:
+    def __init__(self, mensagem: str, *, transitorio: bool, corpo: str = "",
+                 status_http: int = 0) -> None:
         super().__init__(mensagem)
         self.transitorio = transitorio
         self.corpo = corpo
+        self.status_http = status_http
+
+
+def _procurar_stanza(no, profundidade: int = 0) -> str | None:
+    """O ``contextInfo.stanzaId`` em qualquer lugar da mensagem devolvida.
+
+    A citacao fica dentro do tipo da mensagem (``extendedTextMessage``,
+    ``imageMessage``...), e o tipo muda conforme o conteudo. Procurar pela
+    chave evita manter uma lista de tipos que o WhatsApp amplia sem avisar.
+    """
+    if profundidade > 6:
+        return None
+    if isinstance(no, dict):
+        contexto = no.get("contextInfo")
+        if isinstance(contexto, dict) and contexto.get("stanzaId"):
+            return str(contexto["stanzaId"])
+        for valor in no.values():
+            achado = _procurar_stanza(valor, profundidade + 1)
+            if achado:
+                return achado
+    return None
+
+
+def conferir_citacao(corpo: dict, quote_message_id: str) -> str:
+    """Le' a resposta da API e diz o que aconteceu com a citacao.
+
+    * ``ok``          -- a mensagem criada aponta para o id pedido.
+    * ``not_applied`` -- a mensagem veio, mas sem citacao (a Evolution nao
+      achou o original e mandou solta) ou citando OUTRA mensagem.
+    * ``unverified``  -- a resposta nao traz a mensagem; nao da' para afirmar
+      nem negar. Nao e' inventado como sucesso: fica registrado assim.
+    """
+    if not quote_message_id:
+        return QuoteStatus.NONE
+    mensagem = corpo.get("message") if isinstance(corpo, dict) else None
+    if not isinstance(mensagem, dict) or not mensagem:
+        return QuoteStatus.UNVERIFIED
+    stanza = _procurar_stanza(mensagem)
+    if stanza == quote_message_id:
+        return QuoteStatus.OK
+    return QuoteStatus.NOT_APPLIED
+
+
+def _id_da_midia(corpo: dict) -> str:
+    """Identificador publico do arquivo enviado, quando a API devolve.
+
+    ``fileSha256`` e' o hash do conteudo -- serve de prova e nao e' segredo.
+    ``mediaKey`` NUNCA: e' a chave que decifra a midia.
+    """
+    mensagem = corpo.get("message") if isinstance(corpo, dict) else None
+    if not isinstance(mensagem, dict):
+        return ""
+    for tipo in ("imageMessage", "documentMessage"):
+        midia = mensagem.get(tipo)
+        if isinstance(midia, dict):
+            valor = midia.get("fileSha256")
+            if isinstance(valor, str):
+                return valor[:88]
+            if isinstance(valor, dict):  # Buffer serializado
+                return str(valor.get("data", ""))[:88]
+    return ""
 
 
 def classificar_resposta(status_http: int, corpo: str) -> tuple[bool, str]:
@@ -83,8 +154,6 @@ class EvolutionClient:
 
     #: Quantas mensagens nossas lembrar para o ``ja_enviado``. Ver o metodo.
     _MEMORIA_DE_ENVIOS = 400
-    #: Quantos textos originais guardar para montar a citacao.
-    _MEMORIA_DE_ORIGINAIS = 400
     _INTERVALO_DO_STATUS = 20.0
 
     def __init__(
@@ -118,9 +187,8 @@ class EvolutionClient:
         self._status = WhatsAppStatus(chat_id=group_jid, chat_name=self.group_name)
         self._status_lock = threading.Lock()
 
-        # Ver ``ja_enviado`` e ``lembrar_original``.
+        # Ver ``ja_enviado``.
         self._marcas_enviadas: list[str] = []
-        self._textos_originais: dict[str, str] = {}
         self._memoria_lock = threading.Lock()
 
         self._parar = threading.Event()
@@ -181,12 +249,17 @@ class EvolutionClient:
             # recusou, e essa explicacao e' a diferenca entre consertar em um
             # minuto ou passar a noite adivinhando payload.
             self._log("ERROR", f"Envio recusado pela Evolution: {motivo}")
-            raise ErroDeEnvio(motivo, transitorio=transitorio, corpo=corpo)
+            raise ErroDeEnvio(motivo, transitorio=transitorio, corpo=corpo,
+                              status_http=resposta.status_code)
 
         try:
-            return resposta.json()
+            dados = resposta.json()
         except ValueError:
-            return {}
+            dados = {}
+        if not isinstance(dados, dict):
+            dados = {}
+        dados.setdefault("_http_status", resposta.status_code)
+        return dados
 
     # ------------------------------------------------------------ ciclo de vida
     def start(self) -> None:
@@ -272,20 +345,6 @@ class EvolutionClient:
         return base64_qr
 
     # ------------------------------------------------------------------ memoria
-    def lembrar_original(self, message_id: str, texto: str) -> None:
-        """Guarda o texto do pedido para poder cita-lo depois.
-
-        A Evolution monta a citacao com ``key.id`` **e** o conteudo original.
-        Como o ``manager`` so' repassa o id, o texto precisa vir daqui -- e
-        quem o tem e' o webhook, no momento em que a mensagem chega.
-        """
-        if not message_id:
-            return
-        with self._memoria_lock:
-            self._textos_originais[message_id] = texto or ""
-            while len(self._textos_originais) > self._MEMORIA_DE_ORIGINAIS:
-                self._textos_originais.pop(next(iter(self._textos_originais)))
-
     def _lembrar_envio(self, texto: str) -> None:
         with self._memoria_lock:
             self._marcas_enviadas.append(texto or "")
@@ -306,78 +365,169 @@ class EvolutionClient:
         with self._memoria_lock:
             return any(marca in texto for texto in self._marcas_enviadas)
 
-    def _citacao(self, quote_message_id: str) -> dict | None:
+    @staticmethod
+    def _citacao(quote_message_id: str, chat_id: str, quote_text: str = "",
+                 quote_participant: str = "") -> dict | None:
+        """Monta ``quoted`` SO' com o que o chamador entregou.
+
+        Esta camada nao descobre nada: nao procura a mensagem, nao lembra
+        texto, nao olha conversa aberta. O id, o texto e o autor vem da
+        solicitacao gravada no banco -- e por isso a citacao sobrevive a
+        reinicio, o que a memoria em RAM que existia aqui nao garantia.
+
+        ``participant`` e' o autor dentro do grupo. Sem ele o Baileys usa o
+        proprio grupo como autor, e a citacao aparece atribuida a ninguem.
+        """
         if not quote_message_id:
             return None
-        with self._memoria_lock:
-            original = self._textos_originais.get(quote_message_id, "")
-        return {"key": {"id": quote_message_id},
-                "message": {"conversation": original}}
+        chave: dict = {"id": quote_message_id, "fromMe": False}
+        if chat_id:
+            chave["remoteJid"] = chat_id
+        if quote_participant and quote_participant != chat_id:
+            chave["participant"] = quote_participant
+        return {"key": chave, "message": {"conversation": quote_text or ""}}
+
+    def _enviar(self, rota: str, payload: dict, *, via: str, tipo_midia: str,
+                citacao: dict | None, alternativa: tuple[str, str],
+                quote_message_id: str) -> ResultadoEnvio:
+        """Um envio com a regra da citacao: FALHA DE QUOTE NAO E' FALHA DE RESPOSTA.
+
+        1. tenta com ``quoted``;
+        2. se a API recusar de um jeito em que a citacao pode ser a causa,
+           manda de novo SEM ela, com a versao que leva o nome do consultor
+           (``alternativa`` = campo e texto);
+        3. confere na resposta se a citacao realmente pegou.
+
+        Timeout, 429 e 5xx de indisponibilidade NAO disparam o passo 2: a
+        mensagem pode ter saido, e a mesma falha se repetiria sem citacao.
+        """
+        campo, texto_alternativo = alternativa
+        if citacao:
+            payload = {**payload, "quoted": citacao}
+
+        quote_status = QuoteStatus.NONE
+        motivo_citacao = ""
+        try:
+            corpo = self._post(rota, payload)
+            if citacao:
+                quote_status = conferir_citacao(corpo, quote_message_id)
+        except ErroDeEnvio as exc:
+            if not (citacao and exc.status_http in _CITACAO_PODE_SER_A_CAUSA):
+                return self._falha(exc, via=via, citacao=bool(citacao))
+            motivo_citacao = str(exc)
+            self._log("WARNING",
+                      f"A Evolution recusou a citação de {quote_message_id} "
+                      f"(HTTP {exc.status_http}). Enviando sem citação, com o "
+                      "nome do consultor.")
+            sem = {k: v for k, v in payload.items() if k != "quoted"}
+            if texto_alternativo:
+                sem[campo] = texto_alternativo
+            try:
+                corpo = self._post(rota, sem)
+            except ErroDeEnvio as exc2:
+                return self._falha(exc2, via=via, citacao=False)
+            payload = sem
+            quote_status = QuoteStatus.FALLBACK
+
+        http_status = int(corpo.pop("_http_status", 0) or 0)
+        enviado_id = str(((corpo.get("key") or {}).get("id") or ""))
+        texto_enviado = payload.get(campo, "")
+        evidencia = {"http_status": http_status,
+                     "corpo": _resumo(corpo),
+                     "quote_status": quote_status}
+        if motivo_citacao:
+            evidencia["motivo_citacao"] = motivo_citacao[:300]
+
+        if not enviado_id:
+            # 2xx sem id nao e' prova de entrega -- e tambem nao e' prova de
+            # que NAO saiu. Nao inventar confirmacao, e nao reenviar sozinho:
+            # quem chama registra como entrega sem evidencia.
+            return ResultadoEnvio(
+                ok=False, via=via, tipo_midia="nenhum",
+                motivo=f"a Evolution respondeu {http_status} sem key.id",
+                provider="evolution", quote_status=quote_status,
+                http_status=http_status, sem_prova=True,
+                evidencia={**evidencia, "transitorio": False, "sem_prova": True})
+
+        self._lembrar_envio(texto_enviado)
+        return ResultadoEnvio(
+            ok=True, via=via, tipo_midia=tipo_midia,
+            quoted_ok=quote_status in (QuoteStatus.OK, QuoteStatus.UNVERIFIED),
+            provider="evolution", quote_status=quote_status,
+            enviado_id=enviado_id, http_status=http_status,
+            media_id=_id_da_midia(corpo) if tipo_midia == "imagem" else "",
+            evidencia={**evidencia, "key_id": enviado_id})
+
+    @staticmethod
+    def _falha(exc: ErroDeEnvio, *, via: str, citacao: bool) -> ResultadoEnvio:
+        return ResultadoEnvio(
+            ok=False, via=via, tipo_midia="nenhum", motivo=str(exc),
+            provider="evolution", transitorio=exc.transitorio,
+            http_status=exc.status_http,
+            quote_status=QuoteStatus.NONE if not citacao else "",
+            evidencia={"transitorio": exc.transitorio, "corpo": exc.corpo[:400],
+                       "http_status": exc.status_http})
 
     # -------------------------------------------------------------------- envio
     def send(self, chat_id: str, chat_name: str, text: str,
              quote_message_id: str = "", timeout: float = 90.0,
-             texto_sem_citacao: str = "") -> ResultadoEnvio:
-        """Texto. O ``chat_id`` vindo do ``manager`` ja' e' o JID do grupo.
+             texto_sem_citacao: str = "", quote_text: str = "",
+             quote_participant: str = "") -> ResultadoEnvio:
+        """Texto para ``chat_id``, citando ``quote_message_id`` quando houver.
 
         ``texto_sem_citacao``: a versao que se sustenta sozinha, com o nome
-        do consultor. Aqui a decisao e' mais simples que na camada do
-        navegador -- sem id para citar, nao ha' citacao -- mas a assinatura
-        e' a mesma nas duas, porque o ``manager`` nao pode saber qual esta'
-        no ar.
+        do consultor. Sai quando nao ha' o que citar ou quando a citacao e'
+        recusada. ``quote_text``/``quote_participant``: o texto e o autor da
+        mensagem citada, vindos da solicitacao -- esta camada nao os procura.
         """
-        citacao = self._citacao(quote_message_id)
+        if not chat_id:
+            # Sem destino nao ha' "responder no grupo configurado": a
+            # correlacao se perdeu antes daqui, e adivinhar o chat seria
+            # exatamente o defeito que esta camada existe para encerrar.
+            return ResultadoEnvio(ok=False, via="texto", provider="evolution",
+                                  motivo="envio sem chat_id: a origem da solicitação se perdeu",
+                                  evidencia={"transitorio": False})
+
+        citacao = self._citacao(quote_message_id, chat_id, quote_text, quote_participant)
         if not citacao and texto_sem_citacao:
             text = texto_sem_citacao
 
-        payload = {
-            "number": chat_id or self.group_jid,
-            "text": text,
-            "delay": DELAY_HUMANO_MS,
-        }
-        if citacao:
-            payload["quoted"] = citacao
-
-        try:
-            corpo = self._post(f"/message/sendText/{self.instance}", payload)
-        except ErroDeEnvio as exc:
-            return ResultadoEnvio(
-                ok=False, via="texto", motivo=str(exc),
-                evidencia={"transitorio": exc.transitorio, "corpo": exc.corpo[:400]})
-
-        enviado_id = ((corpo.get("key") or {}).get("id") or "")
-        if not enviado_id:
-            # 2xx sem id nao e' prova de entrega. Etapa sem prova falhou.
-            return ResultadoEnvio(ok=False, via="texto",
-                                  motivo="a Evolution respondeu sem key.id",
-                                  evidencia={"transitorio": True,
-                                             "corpo": str(corpo)[:400]})
-
-        self._lembrar_envio(text)
-        return ResultadoEnvio(ok=True, via="texto", tipo_midia="nenhum",
-                              quoted_ok=bool(citacao),
-                              evidencia={"key_id": enviado_id})
+        payload = {"number": chat_id, "text": text, "delay": DELAY_HUMANO_MS}
+        return self._enviar(
+            f"/message/sendText/{self.instance}", payload, via="texto",
+            tipo_midia="nenhum", citacao=citacao,
+            alternativa=("text", texto_sem_citacao),
+            quote_message_id=quote_message_id)
 
     def send_image(self, chat_id: str, chat_name: str, image_path: str | Path,
                    caption: str = "", quote_message_id: str = "",
                    timeout: float = 120.0,
-                   caption_sem_citacao: str = "") -> ResultadoEnvio:
+                   caption_sem_citacao: str = "", quote_text: str = "",
+                   quote_participant: str = "") -> ResultadoEnvio:
         """Imagem com legenda -- inline, nunca documento."""
-        citacao = self._citacao(quote_message_id)
-        if not citacao and caption_sem_citacao:
-            caption = caption_sem_citacao
+        if not chat_id:
+            return ResultadoEnvio(ok=False, via="imagem", provider="evolution",
+                                  motivo="envio sem chat_id: a origem da solicitação se perdeu",
+                                  evidencia={"transitorio": False})
 
         caminho = Path(image_path)
-        if not caminho.exists() or caminho.stat().st_size == 0:
+        try:
+            validar_png(caminho)
+        except PngInvalido as exc:
             return ResultadoEnvio(ok=False, via="imagem", tipo_midia="nenhum",
-                                  motivo=f"o PNG nao existe ou esta vazio: {caminho}")
+                                  provider="evolution", motivo=str(exc),
+                                  evidencia={"transitorio": False})
+
+        citacao = self._citacao(quote_message_id, chat_id, quote_text, quote_participant)
+        if not citacao and caption_sem_citacao:
+            caption = caption_sem_citacao
 
         # base64 PURO. Com o prefixo ``data:image/png;base64,`` a Evolution
         # recusa -- e' o erro mais comum de quem integra.
         bruto = base64.b64encode(caminho.read_bytes()).decode("ascii")
 
         payload = {
-            "number": chat_id or self.group_jid,
+            "number": chat_id,
             # Literal, e testado: "document" faria a imagem chegar como
             # arquivo, que e' exatamente o defeito que esta migracao encerra.
             "mediatype": "image",
@@ -387,29 +537,31 @@ class EvolutionClient:
             "caption": caption,
             "delay": DELAY_HUMANO_MS,
         }
-        if citacao:
-            payload["quoted"] = citacao
-
-        try:
-            corpo = self._post(f"/message/sendMedia/{self.instance}", payload)
-        except ErroDeEnvio as exc:
-            return ResultadoEnvio(
-                ok=False, via="imagem", tipo_midia="nenhum", motivo=str(exc),
-                evidencia={"transitorio": exc.transitorio, "corpo": exc.corpo[:400]})
-
-        enviado_id = ((corpo.get("key") or {}).get("id") or "")
-        if not enviado_id:
-            return ResultadoEnvio(ok=False, via="imagem", tipo_midia="nenhum",
-                                  motivo="a Evolution respondeu sem key.id",
-                                  evidencia={"transitorio": True,
-                                             "corpo": str(corpo)[:400]})
-
-        self._lembrar_envio(caption)
-        return ResultadoEnvio(ok=True, via="imagem", tipo_midia="imagem",
-                              quoted_ok=bool(citacao),
-                              evidencia={"key_id": enviado_id})
+        return self._enviar(
+            f"/message/sendMedia/{self.instance}", payload, via="imagem",
+            tipo_midia="imagem", citacao=citacao,
+            alternativa=("caption", caption_sem_citacao),
+            quote_message_id=quote_message_id)
 
     # ------------------------------------------------------------------- imagem
     def render_png(self, html: str, path: str | Path, width: int = 900,
                    timeout: float = 60.0) -> str:
         return self._renderer.render_png(html, path, width=width, timeout=timeout)
+
+
+def _resumo(corpo: dict) -> str:
+    """Resposta da API resumida para o registro: ids e tipo, nunca a midia.
+
+    O corpo de ``sendMedia`` pode trazer a imagem inteira em base64 e a
+    ``mediaKey`` (que decifra o arquivo). Nenhum dos dois vai para o banco.
+    """
+    if not isinstance(corpo, dict):
+        return ""
+    chave = corpo.get("key") or {}
+    resumo = {
+        "key": {k: chave.get(k) for k in ("id", "remoteJid", "fromMe") if k in chave},
+        "status": corpo.get("status"),
+        "messageType": corpo.get("messageType"),
+        "stanzaId": _procurar_stanza(corpo.get("message")),
+    }
+    return str({k: v for k, v in resumo.items() if v})[:400]

@@ -23,7 +23,8 @@ histórico leem a mesma fonte, então painel e banco nunca discordam.
 | **Enfileira** | Vários consultores podem pedir ao mesmo tempo; cada pedido é isolado e recebe um `REQ000000`. |
 | **Simula** | Abre o portal do Santander no Brave, com a sessão do operador, e usa a lógica do projeto Arqueiro (nada é reimplementado aqui). |
 | **Responde** | Manda uma **imagem** com os cards dos contratos e quanto libera, mais um resumo em texto. Se a imagem falhar, o texto sai assim mesmo. |
-| **Reenvia** | Se a entrega falhar, tenta de novo por até 5 vezes. Um resultado que não chega vale o mesmo que não ter simulado. |
+| **Reenvia** | Se a entrega falhar por motivo passageiro (queda, 429, 5xx), tenta de novo por até 5 vezes **na mesma solicitação**, citando a mesma mensagem. Erro permanente não é repetido; resposta aceita sem id não é reenviada (duplicaria). |
+| **Não duplica** | A mensagem recebida é gravada antes de qualquer coisa. O mesmo `message_id` nunca vira segunda solicitação — nem com webhook reentregue, nem depois de reiniciar. |
 | **Explica os erros** | Traduz o que o portal disse: "não foi possível contatar a averbadora", "matrícula inválida". Erros passageiros geram nova tentativa; erros de cadastro, não. |
 | **Registra tudo** | Banco SQLite com mensagens, simulações, consultores e logs. O painel lê daí. |
 
@@ -356,7 +357,17 @@ Nada do cálculo foi reescrito, e nenhum arquivo do projeto Arqueiro é alterado
 .venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
-São **414 testes**. Cobrem, entre outros: identificação do consultor pelo
+E o E2E de processo real (o `main.py` de verdade, com Evolution e agente do
+Santander falsos, incluindo matar o processo no meio da fila):
+
+```bash
+.venv\Scripts\python.exe ferramentas/e2e_simulado.py
+```
+
+Ele **não** substitui validar no grupo de teste com a Evolution de verdade —
+ver [MIGRACAO-EVOLUTION.md](MIGRACAO-EVOLUTION.md).
+
+São **mais de 940 testes**. Cobrem, entre outros: identificação do consultor pelo
 telefone, isolamento de thread do Playwright, execução de 1/2/5 solicitações
 simultâneas sem cruzar resultados, tentativas e erros permanentes, recuperação
 da fila após reinício, migração do banco antigo, fusos horários, autenticação,
@@ -366,6 +377,7 @@ Os que valem destaque, porque nasceram de defeitos reais em produção:
 
 | Arquivo | O que trava |
 |---|---|
+| `test_producao.py` | O fluxo de produção na camada Evolution: um `message_id` = uma solicitação, citação com o id/autor/texto gravados, fallback sem citação, PNG validado e do pedido certo, 429/503 com reenvio no mesmo `REQ`, 2xx sem id não contado como entregue, reinício sem re-simular, dois consultores simultâneos sem cruzar |
 | `test_leitura_dom.py` | Roda o JS num **Chromium de verdade** contra as gerações de HTML que o WhatsApp já serviu: leitura de mensagens, escolha do grupo, menu de contexto, anexo de foto, e a garantia de que o bot **nunca lê nem encaminha as próprias mensagens** |
 | `test_abas.py` | A aba certa do navegador. Uma `about:blank` restaurada pelo perfil já fez o bot pilotar uma página vazia a sessão inteira |
 | `test_reenvio.py` | Entrega que falhou é reenviada, e o reenvio **não atropela** a entrega em curso |
@@ -409,7 +421,11 @@ causa. Estas são as principais, no painel em **Logs**:
 | `Ignorando uma mensagem com o formato das nossas respostas` | O bot quase leu a si mesmo | A segunda camada funcionou; avise para investigar a primeira |
 | `perfil já está aberto em outro navegador` | Sobrou `brave.exe` de uma execução anterior | Feche todas as janelas do Brave e os `brave.exe` no Gerenciador de Tarefas |
 | `O Santander está na tela de login` | A sessão do portal caiu | Faça login na janela do simulador, ou preencha o `credenciais.ini` do Arqueiro |
-| `resultado pronto mas não entregue` | A resposta falhou | Ele reenvia sozinho em até 3 min, 5 vezes |
+| `resultado pronto mas não entregue` | A resposta falhou por motivo passageiro | Ele reenvia sozinho (30 s, 60 s, 120 s…), até 5 vezes, na mesma solicitação |
+| `A Evolution recusou a citação` | O `quoted` foi recusado | Nada: a resposta saiu sem citação, com `↩ consultor`. Se repetir sempre, a mensagem original não está no histórico da instância |
+| `aceitou a resposta mas não devolveu o id` | 2xx sem `key.id` | Confira o grupo. Não é reenviado sozinho para não duplicar |
+| `a entrega falhou de um jeito que repetir não resolve` | 401/403/404, licença, sem `chat_id` | Corrija a configuração da Evolution; o resultado está no painel |
+| `já recebida antes ... Reentrega ignorada` | Webhook reentregue | Nada: a trava de duplicidade funcionou |
 
 ### Consultando o banco direto
 

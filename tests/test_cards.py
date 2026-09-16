@@ -211,7 +211,14 @@ class TestEnvioNoFluxoReal:
             resultado = whatsapp.sent[-1]["text"]
             assert "Libera" in resultado or "Não libera" in resultado
             assert "REQ000001" in resultado
-            assert db.scalar("SELECT COUNT(*) FROM messages WHERE kind='image'") == 0
+            # Nenhuma imagem consta como ENTREGUE -- o painel não pode mostrar
+            # um comprovante que o consultor não recebeu. A tentativa que
+            # falhou fica gravada como evidência, marcada como falha.
+            assert db.scalar("SELECT COUNT(*) FROM messages WHERE kind='image' "
+                             "AND status NOT IN ('failed', 'unconfirmed')") == 0
+            falha = db.fetchone("SELECT * FROM messages WHERE kind='image'")
+            assert falha["status"] == "failed"
+            assert "anexo" in falha["error"]
         finally:
             manager.queue.stop()
 

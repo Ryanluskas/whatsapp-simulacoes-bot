@@ -24,6 +24,7 @@ from app import mensagens
 from app.evolution import (DELAY_HUMANO_MS, EvolutionClient, LICENCA_PENDENTE,
                            classificar_resposta)
 from app.whatsapp_port import METODOS_DO_CONTRATO
+from tests.test_concurrency import png_valido
 
 GRUPO = "120363111222333@g.us"
 ID_ORIGINAL = "3EB0C5A277F7F9B6C599"
@@ -149,11 +150,19 @@ class TestCitacao:
     """Defeito histórico: não citava a mensagem do consultor."""
 
     def test_cita_usando_o_id_que_chegou_no_webhook(self, cliente, espiao):
-        cliente.lembrar_original(ID_ORIGINAL, "Ivone Teste\n42888832453")
-        r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL)
+        """O chamador entrega id, texto e autor; a camada não lembra nada sozinha.
+
+        Antes o texto citado vinha de um dicionário em RAM preenchido pelo
+        webhook -- depois de reiniciar, a citação saía vazia.
+        """
+        r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL,
+                         quote_text="Ivone Teste\n42888832453",
+                         quote_participant="5562999990000@s.whatsapp.net")
         assert r.ok and r.quoted_ok
         citada = espiao.ultimo["quoted"]
         assert citada["key"]["id"] == ID_ORIGINAL
+        assert citada["key"]["remoteJid"] == GRUPO
+        assert citada["key"]["participant"] == "5562999990000@s.whatsapp.net"
         assert citada["message"]["conversation"] == "Ivone Teste\n42888832453"
 
     def test_sem_id_nao_manda_campo_quoted(self, cliente, espiao):
@@ -416,7 +425,7 @@ class TestAQuedaParaTextoFuncionaNasDuasCamadas:
             def render_png(self, html, path, width=900, timeout=60.0):
                 destino = Path(path)
                 destino.parent.mkdir(parents=True, exist_ok=True)
-                destino.write_bytes(b"\x89PNG\r\n\x1a\n")
+                destino.write_bytes(png_valido())
                 return str(destino)
 
             def send_image(self, *a, **k):
@@ -433,7 +442,7 @@ class TestAQuedaParaTextoFuncionaNasDuasCamadas:
             def render_png(self, html, path, width=900, timeout=60.0):
                 destino = Path(path)
                 destino.parent.mkdir(parents=True, exist_ok=True)
-                destino.write_bytes(b"\x89PNG\r\n\x1a\n")
+                destino.write_bytes(png_valido())
                 return str(destino)
 
             def send_image(self, *a, **k):
@@ -450,7 +459,7 @@ class TestAQuedaParaTextoFuncionaNasDuasCamadas:
             def render_png(self, html, path, width=900, timeout=60.0):
                 destino = Path(path)
                 destino.parent.mkdir(parents=True, exist_ok=True)
-                destino.write_bytes(b"\x89PNG\r\n\x1a\n")
+                destino.write_bytes(png_valido())
                 return str(destino)
 
             def send_image(self, *a, **k):

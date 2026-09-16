@@ -144,14 +144,23 @@ def mask_phone(phone: str | None) -> str:
     return f"+{d[:2]} {d[2:4]} *****-{d[-4:]}" if len(d) >= 12 else f"({d[:2]}) *****-{d[-4:]}"
 
 
+_CPF_EM_TEXTO = None
+
+
 def redact(text: str | None) -> str:
-    """Remove CPFs de textos livres antes de gravar em log."""
+    """Remove CPFs de textos livres antes de gravar em log.
+
+    Aceita os separadores que o grupo realmente usa -- ``529.982.247-25``,
+    ``182.841.754.87``, ``118 902 594 97``, ``31611176034``. A versao anterior
+    so' reconhecia ``-`` antes dos dois ultimos digitos, e o formato com ponto
+    (o mais comum no grupo) ia inteiro para o log.
+    """
     import re
 
+    global _CPF_EM_TEXTO
     if not text:
         return ""
-    return re.sub(
-        r"\b(\d{3})\.?\d{3}\.?\d{3}-?(\d{2})\b",
-        lambda m: f"{m.group(1)}.***.***-{m.group(2)}",
-        text,
-    )
+    if _CPF_EM_TEXTO is None:
+        _CPF_EM_TEXTO = re.compile(
+            r"(?<![\d.])(\d{3})[.\s]?\d{3}[.\s]?\d{3}[-.\s]?(\d{2})(?![\d])")
+    return _CPF_EM_TEXTO.sub(lambda m: f"{m.group(1)}.***.***-{m.group(2)}", text)

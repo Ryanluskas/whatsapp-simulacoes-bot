@@ -220,9 +220,27 @@ class RemoteSimulator:
         if not pendente or pendente.pronto.is_set():
             return False
 
+        # O request_id sozinho nao basta como identidade: se o banco for
+        # recriado, a numeracao recomeca, e o resultado atrasado de um
+        # agente cairia num pedido NOVO com o mesmo REQ -- o resultado de um
+        # cliente respondendo o pedido de outro. O simulation_id amarra.
+        # (Agentes antigos nao mandam o campo; nesse caso vale o request_id.)
+        informado = payload.get("simulation_id")
+        if informado not in (None, "") and str(informado) != str(pendente.job.simulation_id):
+            self._log("WARNING",
+                      f"{request_id}: resultado recusado -- veio para a simulação "
+                      f"{informado}, mas a pendente é {pendente.job.simulation_id}.")
+            return False
+
         contratos = payload.get("contracts") or []
         if not isinstance(contratos, list):
             contratos = []
+        # O que o portal disse, literal. Sem isto uma recusa pelo modo remoto
+        # chegava ao consultor como "nenhum contrato encontrado" -- a frase
+        # generica que so' vale quando o portal nao disse nada.
+        motivos = payload.get("motivos") or []
+        if not isinstance(motivos, list):
+            motivos = []
 
         pendente.resultado = SimulationResult(
             job=pendente.job,
@@ -236,6 +254,7 @@ class RemoteSimulator:
             installment_sum=_float(payload.get("installment_sum")),
             installment_count=int(_float(payload.get("installment_count"))),
             debt_sum=_float(payload.get("debt_sum")),
+            motivos=tuple(m for m in motivos if isinstance(m, dict)),
         )
         pendente.pronto.set()
         return True

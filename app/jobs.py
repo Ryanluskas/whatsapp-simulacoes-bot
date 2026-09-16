@@ -24,11 +24,12 @@ import time
 from typing import Callable
 
 from .actor import ActorTimeout
-from .clock import iso_atras, now_iso, parse_iso, utc_now
+from .clock import iso_atras, now_iso, parse_iso, to_iso, utc_now
 from .db import Database
 from .events import EventHub
 from .models import (
     STAGE_LABELS,
+    Delivery,
     IncomingMessage,
     ParsedRequest,
     SimulationJob,
@@ -39,6 +40,20 @@ from .models import (
 from .simulator import SimulatorService
 
 RETRY_BACKOFF_SECONDS = 8.0
+
+#: Primeira espera antes de reenviar uma resposta que nao saiu.
+PRIMEIRO_REENVIO_SEGUNDOS = 30.0
+
+
+def depois_de(segundos: float) -> str:
+    from datetime import timedelta
+    return to_iso(utc_now() + timedelta(seconds=segundos))
+
+
+def estado_final(result_ok: bool) -> tuple[str, str]:
+    """(status, stage) de uma solicitacao cuja entrega se resolveu."""
+    return ((Status.COMPLETED, Stage.COMPLETED) if result_ok
+            else (Status.ERROR, Stage.ERROR))
 
 
 class QueueService:
@@ -134,6 +149,13 @@ class QueueService:
             row = dict(linha)
             if row.get("request_id") in rodando:
                 continue   # ainda em execucao de verdade
+            if row.get("result_ok") is not None:
+                # A simulacao TERMINOU; o que travou foi a entrega. Dizer ao
+                # consultor "a simulacao travou" seria mentira, e o resultado
+                # existe: vai para o reenvio.
+                self._agendar_reenvio(row, "a entrega travou e não retornou")
+                resolvidas += 1
+                continue
             self._log(
                 "WARNING",
                 f"{row.get('request_id')}: presa em processamento há mais de "
@@ -157,10 +179,11 @@ class QueueService:
         Conta `queued` E `processing`: uma presa em processamento espera
         igual, e foi assim que a REQ000037 ficou invisivel.
         """
+        # Resultado pronto e nao entregue tambem e' consultor esperando.
         linha = self.db.fetchone(
             "SELECT COUNT(*) AS quantas, MIN(COALESCE(queued_at, created_at)) AS mais_antiga "
-            "  FROM simulations WHERE status IN (?, ?)",
-            (Status.QUEUED, Status.PROCESSING),
+            "  FROM simulations WHERE status IN (?, ?) OR delivery_status = ?",
+            (Status.QUEUED, Status.PROCESSING, Delivery.RETRYING),
         ) or {}
         quantas = int(linha.get("quantas") or 0)
         mais_antiga = linha.get("mais_antiga")
@@ -258,10 +281,12 @@ class QueueService:
         rows = self.db.fetchall(
             "SELECT id, request_id, consultant_name, cpf, bank, contract, customer_name, "
             "       status, stage, attempts, max_attempts, error_message, "
+            "       delivery_status, reply_attempts, delivery_error, "
             "       created_at, queued_at, started_at, finished_at, processing_seconds "
-            "FROM simulations WHERE status IN (?,?,?) "
+            "FROM simulations WHERE status IN (?,?,?) OR delivery_status = ? "
             "ORDER BY CASE status WHEN ? THEN 0 ELSE 1 END, created_at ASC LIMIT ?",
-            (Status.QUEUED, Status.PROCESSING, Status.INTERRUPTED, Status.PROCESSING, limit),
+            (Status.QUEUED, Status.PROCESSING, Status.INTERRUPTED, Delivery.RETRYING,
+             Status.PROCESSING, limit),
         )
         active = self.active
         items = []
@@ -325,6 +350,13 @@ class QueueService:
         )
         recovered = 0
         for row in rows:
+            if row.get("result_ok") is not None:
+                # Caiu no meio da ENTREGA: o portal ja' respondeu. Simular de
+                # novo gastaria o Santander e poderia mandar dois resultados;
+                # o que falta e' so' entregar este.
+                self._agendar_reenvio(row, "reinício do sistema durante a entrega",
+                                      imediato=True)
+                continue
             attempts = int(row.get("attempts") or 0)
             limit = int(row.get("max_attempts") or self.max_attempts)
             if attempts >= limit:
@@ -343,6 +375,7 @@ class QueueService:
             )
             self._pending.put(job)
             recovered += 1
+        self._retomar_reenvios_interrompidos()
         if recovered:
             self._log("WARNING", f"{recovered} solicitação(ões) retomadas após reinício.")
             self.hub.publish(
@@ -378,6 +411,58 @@ class QueueService:
             consultant_name=row.get("consultant_name") or "",
         )
 
+    def _retomar_reenvios_interrompidos(self) -> int:
+        """Reenvio que estava `pending` quando o processo caiu.
+
+        O laco de reenvio marca a linha como `pending` antes de enviar (para
+        duas varreduras nao mandarem a mesma resposta). Se o processo cai
+        nesse meio, a linha ja' tem status final e ninguem mais a pegaria.
+        Status e etapa ficam como estao -- uma interrompida continua
+        interrompida; so' a entrega volta a ser reenviavel.
+        """
+        with self.db.write() as conn:
+            cur = conn.execute(
+                "UPDATE simulations SET delivery_status=?, next_delivery_at=?, updated_at=? "
+                " WHERE delivery_status=? AND status NOT IN (?, ?) AND replied_at IS NULL",
+                (Delivery.RETRYING, now_iso(), now_iso(), Delivery.PENDING,
+                 Status.QUEUED, Status.PROCESSING),
+            )
+            quantas = cur.rowcount
+        if quantas:
+            self._log("WARNING", f"{quantas} reenvio(s) interrompido(s) pelo reinício "
+                                 "voltaram para a fila de reenvio.")
+        return quantas
+
+    def _agendar_reenvio(self, row: dict, motivo: str, imediato: bool = False) -> None:
+        """Resultado pronto, entrega pendente: entrega na mao do laco de reenvio."""
+        status, _stage = estado_final(bool(row.get("result_ok")))
+        agora = now_iso()
+        self.db.update(
+            "simulations",
+            {
+                "status": status,
+                "stage": Stage.DELIVERY_RETRY,
+                "delivery_status": Delivery.RETRYING,
+                "delivery_error": motivo,
+                "next_delivery_at": agora if imediato else depois_de(PRIMEIRO_REENVIO_SEGUNDOS),
+                "updated_at": agora,
+            },
+            {"id": row["id"]},
+        )
+        self._log("WARNING",
+                  f"{row.get('request_id')}: resultado pronto e não entregue "
+                  f"({motivo}). Vai para o reenvio, sem simular de novo.",
+                  request_id=row.get("request_id") or "")
+        self.hub.publish(
+            "delivery_retry",
+            {"request_id": row.get("request_id"), "simulation_id": row["id"],
+             "reason": motivo},
+            stage=Stage.DELIVERY_RETRY, level="warning", title="Reenvio pendente",
+            detail=motivo, request_id=row.get("request_id") or "",
+            simulation_id=row["id"], consultant_name=row.get("consultant_name") or "",
+            chat_id=row.get("chat_id") or "",
+        )
+
     @staticmethod
     def _job_from_row(row: dict, attempt: int) -> SimulationJob:
         request = ParsedRequest(
@@ -390,13 +475,17 @@ class QueueService:
             origin=row.get("origin") or "",
             phone=row.get("phone") or "",
         )
+        # A origem vem INTEIRA do banco: id, chat, autor e o texto citado.
+        # Nada aqui e' reconstruido a partir do que esta' na tela.
         message = IncomingMessage(
             message_id=row.get("source_message_id") or "",
             chat_id=row.get("chat_id") or "",
-            chat_name="",
+            chat_name=row.get("chat_name") or "",
             sender_id=row.get("sender_id") or "",
             sender_name=row.get("sender_name") or "",
             text=row.get("raw_message") or "",
+            timestamp=row.get("source_timestamp") or "",
+            participant=row.get("participant") or "",
         )
         return SimulationJob(
             request=request,
@@ -451,15 +540,7 @@ class QueueService:
         self._emit_stage(job, Stage.PROCESSING)
 
         def on_stage(stage: str) -> None:
-            with self._lock:
-                if job.request_id in self._active:
-                    self._active[job.request_id]["stage"] = stage
-            self.db.update(
-                "simulations",
-                {"stage": stage, "updated_at": now_iso()},
-                {"id": job.simulation_id},
-            )
-            self._emit_stage(job, stage)
+            self.atualizar_etapa(job, stage)
 
         try:
             result = simulator.execute(job, on_stage, timeout=self.job_timeout)
@@ -482,14 +563,32 @@ class QueueService:
             )
 
         elapsed = round(time.monotonic() - started_monotonic, 1)
-        with self._lock:
-            self._active.pop(job.request_id, None)
 
         if not result.ok and result.retryable and job.attempt < self.max_attempts:
+            with self._lock:
+                self._active.pop(job.request_id, None)
             self._retry(job, result, elapsed)
             return
 
-        self._finish(job, result, elapsed)
+        try:
+            self._finish(job, result, elapsed)
+        finally:
+            # So' sai de "ativo" depois da ENTREGA: enquanto a resposta sobe,
+            # o vigia nao pode tomar esta solicitacao por presa.
+            with self._lock:
+                self._active.pop(job.request_id, None)
+
+    def atualizar_etapa(self, job: SimulationJob, stage: str) -> None:
+        """Grava e publica a etapa atual. Usado pelo simulador e pela entrega."""
+        with self._lock:
+            if job.request_id in self._active:
+                self._active[job.request_id]["stage"] = stage
+        self.db.update(
+            "simulations",
+            {"stage": stage, "updated_at": now_iso()},
+            {"id": job.simulation_id},
+        )
+        self._emit_stage(job, stage)
 
     def _retry(self, job: SimulationJob, result: SimulationResult, elapsed: float) -> None:
         self.db.update(
@@ -547,10 +646,12 @@ class QueueService:
         import json
 
         finished = now_iso()
+        entrega_pendente = self._on_result is not None
         if result.ok:
             payload = {
                 "status": Status.COMPLETED,
                 "stage": Stage.COMPLETED,
+                "result_ok": 1,
                 "error_message": "",
                 "refin": result.status,
                 "reduction_value": result.reduction_value,
@@ -573,12 +674,30 @@ class QueueService:
             payload = {
                 "status": Status.ERROR,
                 "stage": Stage.ERROR,
+                "result_ok": 0,
                 "error_message": result.error or result.status,
                 "finished_at": finished,
                 "processing_seconds": elapsed,
                 "updated_at": finished,
             }
+        if entrega_pendente:
+            # NAO e' concluida ainda: o resultado existe, mas o consultor nao
+            # o recebeu. Gravar `completed` aqui era o que fazia o reenvio
+            # atropelar a entrega em curso e o painel mentir.
+            payload.update({
+                "status": Status.PROCESSING,
+                "stage": Stage.REPLYING,
+                "delivery_status": Delivery.PENDING,
+            })
         self.db.update("simulations", payload, {"id": job.simulation_id})
+        with self._lock:
+            if job.request_id in self._active:
+                self._active[job.request_id]["stage"] = Stage.REPLYING
+
+        # A simulacao acabou; a solicitacao so' acaba com a entrega. O evento
+        # de fim de simulacao nao leva a etapa `completed` quando ainda ha'
+        # resposta por enviar -- a timeline mostraria "concluido" antes dela.
+        etapa_ok, etapa_erro = ("", "") if entrega_pendente else (Stage.COMPLETED, Stage.ERROR)
 
         common = {
             "request_id": job.request_id,
@@ -597,7 +716,7 @@ class QueueService:
                     "margin": result.margin,
                     "contracts": len(result.contracts),
                 },
-                stage=Stage.COMPLETED,
+                stage=etapa_ok,
                 level="success",
                 title="Simulação concluída",
                 detail=f"{job.request.consultant_name} · refin: {result.status} · {elapsed}s",
@@ -610,7 +729,7 @@ class QueueService:
             self.hub.publish(
                 "job_error",
                 {**common, "error": result.error},
-                stage=Stage.ERROR,
+                stage=etapa_erro,
                 level="error",
                 title="Erro na simulação",
                 detail=f"{job.request.consultant_name} · {result.error}",
@@ -620,15 +739,45 @@ class QueueService:
                 chat_id=job.message.chat_id,
             )
 
-        if self._on_result:
-            try:
-                self._on_result(result)
-            except Exception as exc:
-                self._log(
-                    "ERROR",
-                    f"{job.request_id}: falha ao entregar o resultado: {exc}",
-                    request_id=job.request_id,
-                )
+        if not entrega_pendente:
+            return
+
+        falha = ""
+        try:
+            self._on_result(result)
+        except Exception as exc:
+            falha = str(exc)[:240] or exc.__class__.__name__
+            self._log(
+                "ERROR",
+                f"{job.request_id}: falha ao entregar o resultado: {falha}",
+                request_id=job.request_id,
+            )
+        self._garantir_desfecho_da_entrega(job, result, falha)
+
+    def _garantir_desfecho_da_entrega(self, job: SimulationJob,
+                                      result: SimulationResult, falha: str) -> None:
+        """Nenhuma solicitacao pode ficar `pending` depois que a entrega voltou.
+
+        Quem entrega (o manager) grava o desfecho com a evidencia. Se ele
+        levantou excecao, ou se o callback nao grava nada (dubles, integracoes
+        antigas), a linha ficaria em processamento para sempre -- invisivel
+        para o reenvio. Aqui ela ganha um desfecho coerente.
+        """
+        linha = self.db.fetchone(
+            "SELECT id, request_id, consultant_name, chat_id, result_ok, delivery_status "
+            "  FROM simulations WHERE id=?", (job.simulation_id,))
+        if not linha or linha.get("delivery_status") != Delivery.PENDING:
+            return
+        if falha:
+            self._agendar_reenvio(dict(linha), f"falha ao entregar: {falha}")
+            return
+        status, stage = estado_final(result.ok)
+        self.db.update(
+            "simulations",
+            {"status": status, "stage": stage, "delivery_status": "",
+             "updated_at": now_iso()},
+            {"id": job.simulation_id},
+        )
 
     def _emit_stage(self, job: SimulationJob, stage: str) -> None:
         self.hub.publish(
