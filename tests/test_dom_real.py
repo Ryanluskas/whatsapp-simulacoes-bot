@@ -975,12 +975,30 @@ class TestABarraDeCitacaoEhADoCompositor:
     `[data-testid="quoted-message"]` existe em dois lugares: na barra acima do
     campo de digitação (a citação armada) e dentro de **mensagens da conversa
     que citam outras**. Pegar a primeira do documento lia uma citação de dias
-    atrás e a tratava como estado atual — o log dizia "havia uma citação
-    pendurada" apontando uma mensagem antiga, e não havia botão de cancelar
-    porque não havia barra nenhuma.
+    atrás e a tratava como estado atual.
 
     O que separa as duas: a barra do compositor não fica dentro de
     `div[role="row"]`.
+
+    A FIXTURE DESTE ARQUIVO ESCONDIA UM DEFEITO
+    -------------------------------------------
+    A versão anterior escrevia a barra assim::
+
+        Ryan LUCIANGELA TESTADO 72845554753
+
+    ou seja, o corpo inteiro dentro dela. **A barra real não é assim.**
+    `diagnostico/barra_citacao.png`, colhido com a barra armada de verdade,
+    mostra três linhas::
+
+        Ryan
+        LUCIÂNGELA TESTADO
+        ...
+
+    O CPF não aparece: o WhatsApp encerra a prévia em reticências. Com a
+    fixture inventada, a conferência (que comparava 18 caracteres do corpo)
+    passava no teste e reprovava na tela — 69 dos 116 pedidos multi-linha
+    gravados no banco cairiam. A fixture confirmava o código em vez de
+    confrontá-lo.
     """
 
     HISTORICO = """
@@ -993,45 +1011,179 @@ class TestABarraDeCitacaoEhADoCompositor:
       </div>
     </div>"""
 
+    #: A barra REAL: autor, começo da mensagem, reticências. Sem o CPF.
     COMPOSITOR = """
     <footer>
-      <div data-testid="quoted-message" style="width:400px;height:60px">
-        Ryan LUCIANGELA TESTADO 72845554753
-      </div>
+      <div data-testid="quoted-message" style="width:400px;height:60px">Ryan
+LUCIANGELA TESTADO
+...</div>
       <button aria-label="Cancelar" style="width:20px;height:20px"></button>
       <div contenteditable="true" aria-label="Digite uma mensagem para o grupo X"></div>
     </footer>"""
 
-    def _ativa(self, navegador, corpo: str, trecho: str) -> dict:
+    #: Como o pedido chega de verdade: NOME / CPF / ESTADO.
+    MARCAS = {"achou": True, "autor": "Ryan",
+              "primeiraLinha": "LUCIANGELA TESTADO",
+              "corpo": "LUCIANGELA TESTADO\n72845554753\nAMAPA"}
+
+    def _ativa(self, navegador, corpo: str, marcas) -> dict:
         from app.whatsapp import CITACAO_ATIVA_JS
 
         pagina = navegador.new_page()
         try:
             pagina.set_content(f"<!doctype html><html><body>{corpo}</body></html>")
-            return pagina.evaluate(CITACAO_ATIVA_JS, trecho)
+            return pagina.evaluate(CITACAO_ATIVA_JS, marcas)
         finally:
             pagina.close()
 
     def test_citacao_do_historico_nao_e_a_barra(self, navegador):
-        r = self._ativa(navegador, self.HISTORICO, "Victor Medeiros")
+        r = self._ativa(navegador, self.HISTORICO, self.MARCAS)
         assert r["ativa"] is False, "leu uma citação da conversa como barra armada"
         assert r["temBarra"] is False
 
     def test_a_barra_do_compositor_e_reconhecida(self, navegador):
-        r = self._ativa(navegador, self.COMPOSITOR, "Ryan LUCIANGELA TESTADO")
+        r = self._ativa(navegador, self.COMPOSITOR, self.MARCAS)
         assert r["ativa"] is True
         assert r["local"] == "barra"
 
+    def test_a_previa_cortada_nao_reprova(self, navegador):
+        """O defeito, na forma exata em que ele aparecia.
+
+        A barra mostra só o nome; o CPF e o estado ficam de fora. Quem exigir
+        mais que isso descarta uma citação que funcionou.
+        """
+        assert "72845554753" not in self.COMPOSITOR, (
+            "a fixture voltou a inventar uma barra que mostra o corpo inteiro")
+        assert self._ativa(navegador, self.COMPOSITOR, self.MARCAS)["ativa"] is True
+
+    @pytest.mark.parametrize("nome", [
+        "Roseane",                      # 7 caracteres
+        "JOSETE DUARTE",
+        "JOSIANE CRISTINA",
+        "LUCIANGELA TESTADO",           # 17 sem espaços — reprovava por um
+        "MARCELA DE CAMPOS TABARE",
+    ])
+    def test_nomes_de_qualquer_tamanho(self, navegador, nome):
+        """Os nomes curtos eram a maioria das reprovações."""
+        barra = f"""
+        <footer><div data-testid="quoted-message" style="width:400px;height:60px">Ryan
+{nome}
+...</div></footer>"""
+        marcas = {"achou": True, "autor": "Ryan", "primeiraLinha": nome,
+                  "corpo": f"{nome}\n72845554753\nAMAPA"}
+        assert self._ativa(navegador, barra, marcas)["ativa"] is True
+
     def test_barra_de_outra_mensagem_e_recusada(self, navegador):
-        """Citação armada na mensagem errada é pior que nenhuma."""
-        r = self._ativa(navegador, self.COMPOSITOR, "Marcia Testadora 80390002704")
-        assert r["ativa"] is False
+        """Citação armada na mensagem errada é pior que nenhuma.
+
+        É o risco que justifica conferir: o consultor leria o resultado de
+        outro cliente como se fosse o dele.
+        """
+        outra = {"achou": True, "autor": "Ryan",
+                 "primeiraLinha": "MARCIA TESTADORA",
+                 "corpo": "MARCIA TESTADORA\n80390002704\nAMAPA"}
+        assert self._ativa(navegador, self.COMPOSITOR, outra)["ativa"] is False
+
+    def test_prefixo_parecido_nao_engana(self, navegador):
+        """MARIA e MARIANA começam igual; a prévia decide."""
+        barra = """
+        <footer><div data-testid="quoted-message" style="width:400px;height:60px">Ryan
+MARIANA DE SOUZA
+...</div></footer>"""
+        maria = {"achou": True, "autor": "Ryan", "primeiraLinha": "MARIA DE SOUZA",
+                 "corpo": "MARIA DE SOUZA\n11122233344\nAMAPA"}
+        assert self._ativa(navegador, barra, maria)["ativa"] is False
+
+    def test_sem_marcas_nao_confirma(self, navegador):
+        """Sem saber o que esperar, não se afirma que citou."""
+        assert self._ativa(navegador, self.COMPOSITOR, {})["ativa"] is False
 
     def test_historico_e_compositor_juntos(self, navegador):
         """O caso real: os dois na tela ao mesmo tempo."""
-        r = self._ativa(navegador, self.HISTORICO + self.COMPOSITOR,
-                        "Ryan LUCIANGELA TESTADO")
+        r = self._ativa(navegador, self.HISTORICO + self.COMPOSITOR, self.MARCAS)
         assert r["ativa"] is True, "o histórico atrapalhou a leitura da barra"
+
+    def test_o_log_explica_a_recusa(self, navegador):
+        """Dizer só que reprovou custou rodadas de investigação.
+
+        O log não dizia se a barra existia, o que ela mostrava, nem contra o
+        que foi comparada.
+        """
+        outra = {"achou": True, "autor": "Ryan", "primeiraLinha": "OUTRA PESSOA",
+                 "corpo": "OUTRA PESSOA\n1\nX"}
+        r = self._ativa(navegador, self.COMPOSITOR, outra)
+        assert r["temBarra"] is True
+        assert r["rodape"] and "LUCIANGELA" in r["rodape"]
+        assert r["previa"], "não disse o que a barra mostrava"
+        assert r["porque"], "não disse por que recusou"
+
+
+class TestAsMarcasDaMensagem:
+    """Autor e corpo lidos da linha, para reconhecer a barra depois.
+
+    Colhidos no PASSO 1 de propósito: no PASSO 5 a linha já pode ter saído do
+    DOM — numa enxurrada de cinquenta mensagens ela sai. Lendo só lá, a
+    conferência recebia vazio e reprovava uma citação perfeita.
+    """
+
+    #: Estrutura real, tirada de `diagnostico/01b_grupo_aberto.html`.
+    LINHA = """
+    <div role="row">
+      <div class="copyable-text" data-pre-plain-text="[20:14, 30/08/2026] Ryan: "
+           data-id="2A0E5CDB2622616E3E02">
+        <span data-testid="selectable-text" class="selectable-text copyable-text"
+              style="white-space: pre-wrap">Ivone Teste
+42888832453
+Amapa</span>
+        <span aria-hidden="true">20:14</span>
+      </div>
+    </div>"""
+
+    def _marcas(self, navegador, data_id: str, corpo: str = "") -> dict:
+        from app.whatsapp import MARCAS_DA_MENSAGEM_JS
+
+        pagina = navegador.new_page()
+        try:
+            pagina.set_content(
+                f"<!doctype html><html><body>{corpo or self.LINHA}</body></html>")
+            return pagina.evaluate(MARCAS_DA_MENSAGEM_JS, data_id)
+        finally:
+            pagina.close()
+
+    def test_le_o_autor_do_pre_plain_text(self, navegador):
+        assert self._marcas(navegador, "2A0E5CDB2622616E3E02")["autor"] == "Ryan"
+
+    def test_le_a_primeira_linha(self, navegador):
+        assert self._marcas(
+            navegador, "2A0E5CDB2622616E3E02")["primeiraLinha"] == "Ivone Teste"
+
+    def test_le_o_corpo_inteiro(self, navegador):
+        r = self._marcas(navegador, "2A0E5CDB2622616E3E02")
+        assert "42888832453" in r["corpo"] and "Amapa" in r["corpo"]
+
+    def test_o_horario_nao_entra_no_corpo(self, navegador):
+        assert "20:14" not in self._marcas(navegador, "2A0E5CDB2622616E3E02")["corpo"]
+
+    def test_mensagem_ausente_nao_estoura(self, navegador):
+        r = self._marcas(navegador, "NAO_EXISTE")
+        assert r["achou"] is False and r["autor"] == "" and r["corpo"] == ""
+
+    def test_as_marcas_confirmam_a_barra_real(self, navegador):
+        """As duas metades juntas: o que se lê da linha reconhece a barra."""
+        from app.whatsapp import CITACAO_ATIVA_JS, MARCAS_DA_MENSAGEM_JS
+
+        barra = """
+        <footer><div data-testid="quoted-message" style="width:400px;height:60px">Ryan
+Ivone Teste
+...</div></footer>"""
+        pagina = navegador.new_page()
+        try:
+            pagina.set_content(
+                f"<!doctype html><html><body>{self.LINHA}{barra}</body></html>")
+            marcas = pagina.evaluate(MARCAS_DA_MENSAGEM_JS, "2A0E5CDB2622616E3E02")
+            assert pagina.evaluate(CITACAO_ATIVA_JS, marcas)["ativa"] is True
+        finally:
+            pagina.close()
 
 
 class TestCancelarCitacaoOrfa:

@@ -43,6 +43,7 @@ from app.whatsapp import WhatsAppService  # noqa: E402
 from app.whatsapp import (  # noqa: E402
     BOTAO_DE_OPCOES_JS,
     CITACAO_ATIVA_JS,
+    MARCAS_DA_MENSAGEM_JS,
     GEOMETRIA_DA_LINHA_JS,
     ITEM_RESPONDER_JS,
     MENU_ABERTO_JS,
@@ -245,6 +246,14 @@ def rodar(pagina, config) -> int:
     texto_original = (pagina.evaluate(TEXTO_DA_MENSAGEM_JS, message_id) or "").strip()
     diga(f"corpo    {texto_original!r}")
 
+    # As MARCAS (autor + corpo) sao colhidas AQUI, antes de o menu abrir.
+    # No PASSO 5 a linha pode ja' ter saido do DOM, e a conferencia ficaria
+    # sem nada com que comparar -- foi assim que citacoes boas eram jogadas
+    # fora em producao.
+    marcas = pagina.evaluate(MARCAS_DA_MENSAGEM_JS, message_id) or {}
+    diga(f"autor    {marcas.get('autor')!r}")
+    diga(f"1a linha {marcas.get('primeiraLinha')!r}  <- e' isto que a barra mostra")
+
     # ------------------------------------------------- PASSO 1: a linha
     titulo("PASSO 1 — achar a linha")
     linha = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, [message_id, texto_original]) or {}
@@ -336,7 +345,7 @@ def rodar(pagina, config) -> int:
     limite = time.monotonic() + 2.5
     estado: dict = {}
     while True:
-        estado = pagina.evaluate(CITACAO_ATIVA_JS, texto_original) or {}
+        estado = pagina.evaluate(CITACAO_ATIVA_JS, marcas) or {}
         if estado.get("ativa") or time.monotonic() >= limite:
             break
         pagina.wait_for_timeout(150)
@@ -391,7 +400,7 @@ def rodar(pagina, config) -> int:
     foto(pagina, "preview_com_citacao")
 
     titulo("A CITAÇÃO SOBREVIVEU AO PASTE?")
-    depois = pagina.evaluate(CITACAO_ATIVA_JS, texto_original) or {}
+    depois = pagina.evaluate(CITACAO_ATIVA_JS, marcas) or {}
     diga(f"ativa={depois.get('ativa')}   local={depois.get('local')!r}")
     if not depois.get("ativa"):
         diga(f"procurei em: {depois.get('procurouEm')}")
@@ -423,7 +432,7 @@ def rodar(pagina, config) -> int:
     foto(pagina, "legenda_digitada")
 
     titulo("A CITAÇÃO AINDA ESTÁ LÁ, ANTES DO ENTER?")
-    antes_do_enter = pagina.evaluate(CITACAO_ATIVA_JS, texto_original) or {}
+    antes_do_enter = pagina.evaluate(CITACAO_ATIVA_JS, marcas) or {}
     diga(f"ativa={antes_do_enter.get('ativa')}   "
          f"local={antes_do_enter.get('local')!r}")
     diga(f"texto ao redor: {antes_do_enter.get('rodape')!r}")

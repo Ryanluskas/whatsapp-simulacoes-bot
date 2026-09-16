@@ -523,15 +523,52 @@ ULTIMA_SAIDA_JS = r"""
 #
 # Devolve ONDE encontrou, para o diagnostico distinguir "caiu" de "mudou de
 # lugar".
+# A barra de citacao esta' armada, e e' a da mensagem CERTA?
+#
+# O DEFEITO QUE ESTE BLOCO CONSERTA
+# ---------------------------------
+# A versao anterior comparava os 18 primeiros caracteres do CORPO INTEIRO da
+# mensagem com o texto da barra. A barra nao mostra o corpo inteiro: mostra o
+# autor e a PRIMEIRA LINHA, e encerra em reticencias.
+#
+# `diagnostico/barra_citacao.png`, com a barra armada de verdade:
+#
+#     Ryan
+#     LUCIANGELA TESTADO
+#     ...
+#
+# O corpo era "LUCIANGELA TESTADO / 72845554753 / AMAPA". Normalizado sem
+# espacos, "luciangelatestado" tem 17 caracteres -- um a menos que os 18
+# comparados. O 18o caractere procurado era o primeiro digito do CPF, que a
+# barra nunca mostra. A conferencia reprovava por UM caractere.
+#
+# O formato do pedido e' sempre NOME / CPF / ESTADO, entao isso acontecia
+# em qualquer nome curto. Rodando a conta sobre os 116 pedidos multi-linha
+# gravados no banco: **69 reprovariam**. E o log de 01/09 as 12:20 mostra o
+# desfecho -- a barra ESTAVA la', com autor e previa, e foi descartada:
+#
+#     INFO     Rodape sem a citacao esperada: 'Allana testando 2.274'
+#     WARNING  Cliquei em 'responder' mas a barra de citacao nao apareceu
+#
+# Ou seja: a citacao funcionava. Quem a jogava fora era esta conferencia.
+#
+# O teste que deixou passar tinha uma barra de mentira, com o corpo inteiro
+# dentro dela ("Ryan LUCIANGELA TESTADO 72845554753"). A fixture inventada
+# confirmava o codigo em vez de confrontar a tela.
+#
+# COMO ELA JULGA AGORA
+# --------------------
+# Pelo caminho inverso: pega o que a barra MOSTRA e confere se aquilo e' o
+# COMECO da mensagem. Assim ninguem precisa adivinhar onde o WhatsApp corta.
+# Continua recusando a barra de outra mensagem -- que e' o perigo real: o
+# consultor leria o resultado de outro cliente como se fosse o dele.
 CITACAO_ATIVA_JS = r"""
-(trecho) => {
+(esperado) => {
   // A barra de citacao DO COMPOSITOR -- nao uma citacao do historico.
   //
   // `[data-testid="quoted-message"]` tambem existe em MENSAGENS da conversa
   // que citam outras. Pegar a primeira do documento lia a citacao de uma
-  // mensagem antiga do grupo e a tratava como se fosse a barra armada: o log
-  // dizia "havia uma citacao pendurada" apontando uma mensagem de dias atras,
-  // e nao havia botao de cancelar porque nao havia barra nenhuma.
+  // mensagem antiga do grupo e a tratava como se fosse a barra armada.
   //
   // O que separa as duas: a barra do compositor NAO fica dentro de uma linha
   // de mensagem (`div[role="row"]`).
@@ -546,40 +583,51 @@ CITACAO_ATIVA_JS = r"""
   const norm = (s) => (s || '').normalize('NFC').replace(/\s+/g, '').toLowerCase();
   const limpar = (s) => (s || '').replace(/\s+/g, ' ').trim();
 
-  // O ELEMENTO da citacao, e nao texto solto no rodape.
-  //
-  // Observado com a barra armada: o footer ganha
-  //   data-testid="quoted-message" (e dentro dele "author")
-  //   um botao aria-label="Mensagem citada"
-  //   um botao aria-label="Cancelar"
-  //
-  // A versao anterior procurava o trecho no innerText do <footer> inteiro.
-  // Funcionava, mas dava falso positivo quando o mesmo texto estivesse no
-  // campo de digitacao -- e nao sabia dizer se a barra existia ou se era
-  // outra coisa parecida.
+  const marcas = esperado || {};
+  const autor = norm(marcas.autor);
+  const corpo = norm(marcas.corpo || marcas.primeiraLinha);
+
   const barra = barraDoCompositor();
-
-  if (!trecho) {
-    return { ativa: false, local: '', temBarra: !!barra,
-             rodape: barra ? limpar(barra.innerText).slice(0, 120) : null };
-  }
-  const alvo = norm(trecho).slice(0, 18);
-
-  if (barra) {
-    const dentro = norm(barra.innerText);
-    return { ativa: !!alvo && dentro.includes(alvo), local: 'barra',
-             temBarra: true, rodape: limpar(barra.innerText).slice(0, 120) };
+  if (!barra) {
+    const rodape = document.querySelector('footer');
+    return { ativa: false, local: '', temBarra: false, previa: '',
+             rodape: rodape ? limpar(rodape.innerText).slice(0, 120) : null };
   }
 
-  // Sem o elemento conhecido: cair para a busca por texto, que ainda cobre
-  // uma mudanca de data-testid do WhatsApp.
-  const rodape = document.querySelector('footer');
-  if (rodape && alvo && norm(rodape.innerText).includes(alvo)) {
-    return { ativa: true, local: 'footer(texto)', temBarra: false,
-             rodape: limpar(rodape.innerText).slice(0, 120) };
+  const dentro = norm(barra.innerText);
+  const visto = limpar(barra.innerText).slice(0, 120);
+
+  // A COMPARACAO E' AO CONTRARIO DA ANTERIOR, e e' por isso que ela funciona.
+  //
+  // Nao se pergunta "quanto da mensagem a barra deveria mostrar?" -- essa
+  // pergunta nao tem resposta estavel, e chuta-la em 18 caracteres foi o
+  // defeito. Pergunta-se: "o que a barra mostra e' o COMECO desta mensagem?"
+  //
+  // A previa e' sempre um prefixo do corpo, entao a conta e exata para nome
+  // curto e para nome longo, com uma linha ou com tres, sem depender de onde
+  // o WhatsApp corta.
+  let previa = dentro;
+  if (autor && previa.startsWith(autor)) previa = previa.slice(autor.length);
+  previa = previa.replace(/[.\u2026]+$/, '');       // as reticencias do fim
+
+  let ativa = false;
+  let porque = '';
+  if (previa.length >= 4 && corpo) {
+    // Com o autor no comeco (o normal) e sem ele (caso a barra mude de
+    // ordem): as duas leituras valem, e nenhuma delas aceita outra mensagem.
+    ativa = corpo.startsWith(previa) || (autor + corpo).startsWith(dentro.replace(/[.\u2026]+$/, ''));
+    porque = ativa ? 'a previa e o comeco da mensagem'
+                   : 'a previa nao e o comeco desta mensagem';
+  } else if (autor.length >= 3) {
+    // Previa curta demais para decidir ("ok", "sim"): o autor responde.
+    ativa = dentro.includes(autor);
+    porque = ativa ? 'autor' : 'a previa nao traz o autor';
+  } else {
+    porque = 'nao sei o que esperar desta mensagem';
   }
-  return { ativa: false, local: '', temBarra: false,
-           rodape: rodape ? limpar(rodape.innerText).slice(0, 120) : null };
+
+  return { ativa, local: 'barra', temBarra: true, rodape: visto,
+           previa, autor, porque };
 }
 """
 
@@ -800,6 +848,8 @@ MARCA_LINHA = "data-allana-linha"
 MARCA_SETINHA = "data-allana-setinha"
 #: Marca o BALAO da mensagem, para o botao direito mirar no elemento.
 MARCA_BALAO = "data-allana-balao"
+#: Marca o item "Responder" do menu aberto, para o clique mirar NELE.
+MARCA_RESPONDER = "data-allana-responder"
 
 # ---------------------------------------------------------------- PASSO 1
 # Acha a linha da mensagem, rola ela para o centro e devolve a geometria.
@@ -1039,6 +1089,17 @@ ITEM_RESPONDER_JS = r"""
     return { achou: false, motivo: 'o item existe mas esta invisivel',
              rotulos: [...new Set(rotulos)].slice(0, 20) };
   }
+
+  // MARCAR o item, para o clique mirar NELE e nao numa coordenada.
+  //
+  // O menu entra animado (escala e opacidade). O retangulo medido aqui vale
+  // para o instante desta medicao; o clique acontece um pouco depois, e ate'
+  // la' o item ja' se moveu. Foi o mesmo defeito da setinha, e a setinha ja'
+  // tinha sido consertada assim -- este clique ficou para tras.
+  document.querySelectorAll('[data-allana-responder]').forEach(
+    (el) => el.removeAttribute('data-allana-responder'));
+  alvo.setAttribute('data-allana-responder', '1');
+
   return { achou: true, x: r.x + r.width / 2, y: r.y + r.height / 2,
            rotulo: escolhido, rotulos: [...new Set(rotulos)].slice(0, 20) };
 }
@@ -1095,6 +1156,56 @@ TEXTO_DA_MENSAGEM_JS = r"""
   // Sem o span (imagem com legenda, por exemplo): tira o horario do fim.
   return (linha.innerText || '').replace(/\s+/g, ' ').trim()
                                 .replace(/\s*\d{1,2}:\d{2}\s*$/, '');
+}
+"""
+
+# O que a BARRA DE CITACAO mostra da mensagem original: o autor e a PRIMEIRA
+# LINHA. Nada mais.
+#
+# Isto nao e' teoria: `diagnostico/barra_citacao.png`, colhido com a barra
+# armada de verdade, mostra tres linhas --
+#
+#     Ryan
+#     LUCIANGELA TESTADO
+#     ...
+#
+# O corpo da mensagem era "LUCIANGELA TESTADO / 72845554753 / AMAPA". O CPF
+# e o estado NAO aparecem: o WhatsApp encerra a previa em reticencias.
+#
+# Por que isto tem um JS proprio: a conferencia da citacao precisa das duas
+# marcas ANTES de o menu abrir. Depois do clique em "Responder" a conversa
+# pode ter rolado e a linha saido do DOM -- e ai' nao ha' com o que comparar.
+MARCAS_DA_MENSAGEM_JS = r"""
+(dataId) => {
+  let linha = null;
+  for (const el of document.querySelectorAll('[data-id]')) {
+    if (el.getAttribute('data-id') === dataId) {
+      linha = el.closest('div[role="row"]') || el;
+      break;
+    }
+  }
+  if (!linha) return { achou: false, autor: '', primeiraLinha: '', corpo: '' };
+
+  // O autor vem do `data-pre-plain-text`: "[12:20, 01/09/2026] Allana: "
+  let autor = '';
+  const dono = linha.querySelector('[data-pre-plain-text]')
+            || (linha.hasAttribute('data-pre-plain-text') ? linha : null);
+  if (dono) {
+    const meta = dono.getAttribute('data-pre-plain-text') || '';
+    const m = meta.match(/^\[[^\]]*\]\s*(.*?):\s*$/);
+    if (m) autor = m[1].trim();
+  }
+
+  const corpoEl = linha.querySelector('span.selectable-text');
+  let corpo = corpoEl && (corpoEl.innerText || '').trim()
+    ? corpoEl.innerText.trim()
+    : (linha.innerText || '').trim().replace(/\s*\d{1,2}:\d{2}\s*$/, '');
+
+  // A primeira linha NAO VAZIA. Numa mensagem encaminhada ou com legenda a
+  // quebra as vezes vem antes do texto.
+  const primeira = corpo.split(/\r?\n/).map((t) => t.trim()).find((t) => t) || '';
+
+  return { achou: true, autor, primeiraLinha: primeira, corpo };
 }
 """
 
@@ -1429,6 +1540,9 @@ class WhatsAppService(ThreadActor):
         # Estado da bolha colhido no hover, quando os icones existem.
         # Fotografia da tela no ponto exato onde a citacao falhou.
         self._estado_da_citacao: dict | None = None
+        #: Autor e corpo da mensagem que estamos citando, colhidos no
+        #: PASSO 1. No PASSO 5 a linha pode ter saido do DOM.
+        self._marcas_da_citacao: dict = {}
         # Qual via armou a citacao. Vai para o log de entrega.
         self._ultima_via_de_citacao = ""
         self._anexo_diagnosticado = False
@@ -2379,8 +2493,24 @@ class WhatsAppService(ThreadActor):
         except (PlaywrightTimeout, PlaywrightError):
             return False
 
+    def _marcas_da_mensagem(self, message_id: str) -> dict:
+        """Autor e corpo da mensagem original, para reconhecer a barra.
+
+        Colhidas ANTES de o menu abrir e guardadas. No PASSO 5 a linha ja'
+        pode ter saido do DOM -- numa enxurrada de cinquenta mensagens ela
+        sai -- e ai' nao haveria com o que comparar. A versao anterior lia
+        neste ponto: quando a leitura vinha vazia, a conferencia respondia
+        "nao ativa" a uma citacao perfeita.
+        """
+        if self._page is None:
+            return {}
+        try:
+            return self._page.evaluate(MARCAS_DA_MENSAGEM_JS, message_id) or {}
+        except (PlaywrightTimeout, PlaywrightError):
+            return {}
+
     def _citacao_confirmada(self, message_id: str, espera: float = 2.0) -> bool:
-        """A barra de citacao esta' no rodape, com o texto DAQUELA mensagem?
+        """A barra de citacao esta' no rodape, e e' a DAQUELA mensagem?
 
         Confere o conteudo, nao so' a presenca: uma citacao armada na mensagem
         errada e' pior que nenhuma -- o consultor leria o resultado de outro
@@ -2388,19 +2518,31 @@ class WhatsAppService(ThreadActor):
         """
         if self._page is None:
             return False
-        trecho = self._texto_da_mensagem(message_id)
+        marcas = self._marcas_da_citacao or self._marcas_da_mensagem(message_id)
+        if marcas.get("achou"):
+            self._marcas_da_citacao = marcas
         limite = time.monotonic() + espera
         ultimo: dict = {}
         while time.monotonic() < limite:
             try:
-                ultimo = self._page.evaluate(CITACAO_ATIVA_JS, trecho) or {}
+                ultimo = self._page.evaluate(CITACAO_ATIVA_JS, marcas) or {}
             except (PlaywrightTimeout, PlaywrightError):
                 return False
             if ultimo.get("ativa"):
                 return True
             self._page.wait_for_timeout(150)
         if ultimo:
-            self._log("INFO", f"Rodapé sem a citação esperada: {ultimo.get('rodape')!r}")
+            # O PORQUE, e nao so' o fato. "Rodape sem a citacao esperada"
+            # sozinho custou rodadas de investigacao: ele nao dizia se a
+            # barra existia, o que ela mostrava, nem contra o que foi
+            # comparada.
+            self._log(
+                "INFO",
+                f"Rodapé sem a citação esperada: barra={ultimo.get('temBarra')} "
+                f"mostra={ultimo.get('rodape')!r} "
+                f"prévia={ultimo.get('previa')!r} "
+                f"esperado={(marcas.get('corpo') or '')[:40]!r} "
+                f"({ultimo.get('porque')})")
         return False
 
     def _texto_da_mensagem(self, message_id: str) -> str:
@@ -2452,6 +2594,7 @@ class WhatsAppService(ThreadActor):
             pass
 
         self._estado_da_citacao = None
+        self._marcas_da_citacao = {}
         try:
             return self._passos_da_citacao(message_id)
         except (PlaywrightTimeout, PlaywrightError) as exc:
@@ -2487,6 +2630,15 @@ class WhatsAppService(ThreadActor):
         if not linha.get("achou"):
             self._diagnosticar_citacao_uma_vez(message_id, "a linha sumiu ao rolar")
             return False
+
+        # AQUI, com a linha na mao: guardar autor e corpo para o PASSO 5.
+        #
+        # Depois do clique em "Responder" a conversa pode ter rolado e a linha
+        # ter saido do DOM. Ler as marcas la' devolvia vazio, e a conferencia
+        # reprovava uma citacao que tinha funcionado.
+        marcas = self._marcas_da_mensagem(message_id)
+        if marcas.get("achou"):
+            self._marcas_da_citacao = marcas
 
         # ------------------------------------ PASSO 2: hover, e nao sair dali
         #
@@ -2525,7 +2677,11 @@ class WhatsAppService(ThreadActor):
             self._limpar_ui()
             return False
 
-        pagina.mouse.click(item["x"], item["y"])
+        # Clicar no ELEMENTO marcado; a coordenada e' o ultimo recurso.
+        try:
+            pagina.locator(f"[{MARCA_RESPONDER}]").first.click(timeout=4_000)
+        except (PlaywrightTimeout, PlaywrightError):
+            pagina.mouse.click(item["x"], item["y"])
 
         # -------------------------------------- PASSO 5: CONFERIR, sempre
         #

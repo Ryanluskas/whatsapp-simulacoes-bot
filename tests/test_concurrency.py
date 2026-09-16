@@ -164,7 +164,8 @@ def _config(tmp_path, workers=1, max_attempts=2, timeout=30.0,
             require_trigger=False, whatsapp_mode="dom",
             evolution_group_jid="120363000000000000@g.us",
             evolution_webhook_token="", alerta_fila=10,
-            alerta_espera_minutos=5.0) -> Config:
+            alerta_espera_minutos=5.0,
+            imagem_da_resposta="portal") -> Config:
     return Config(
         sim_bot_path=tmp_path / "arqueiro",
         simulator_profile_dir=tmp_path / "sim-profile",
@@ -185,6 +186,7 @@ def _config(tmp_path, workers=1, max_attempts=2, timeout=30.0,
         reply_quote=True,
         send_result_image=send_image,
         image_show_client_data=True,
+        imagem_da_resposta=imagem_da_resposta,
         whatsapp_mode=whatsapp_mode,
         evolution_url="http://evolution-de-teste:8080",
         evolution_api_key="chave-de-teste",

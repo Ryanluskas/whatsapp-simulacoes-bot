@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from dataclasses import replace
 from typing import Any, NamedTuple
 
@@ -834,23 +835,35 @@ class BotManager:
         """
         job = result.job
         consultant = job.request.consultant_name
-        destino = COMPROVANTES_DIR / f"{job.request_id}.png"
 
-        try:
-            html = build_result_html(
-                result,
-                job.request_id,
-                show_client_data=self.config.image_show_client_data,
-                tz=self.config.tz,
-            )
-            self.whatsapp.render_png(html, destino)
-        except Exception as exc:
-            self.log(
-                "WARNING", "whatsapp",
-                f"Não consegui gerar a imagem do resultado ({_curto(exc)}). Respondendo em texto.",
-                request_id=job.request_id, consultant=consultant,
-            )
-            return False
+        # O PRINT DO PORTAL vem na frente do card quando ele existe.
+        #
+        # O consultor confia no que ele mesmo veria na tela do banco. O card e'
+        # a nossa transcricao dela: se a leitura errar um campo, o erro chega
+        # bonito e indistinguivel de um acerto. O recorte se descarta sozinho
+        # quando pega o topo da pagina (nome do operador, empresa), e ai' cai
+        # para o card -- ver `app/tela_do_portal.py`.
+        do_portal = Path(result.portal_png) if result.portal_png else None
+        if (self.config.imagem_da_resposta == "portal"
+                and do_portal and do_portal.exists()):
+            destino = do_portal
+        else:
+            destino = COMPROVANTES_DIR / f"{job.request_id}.png"
+            try:
+                html = build_result_html(
+                    result,
+                    job.request_id,
+                    show_client_data=self.config.image_show_client_data,
+                    tz=self.config.tz,
+                )
+                self.whatsapp.render_png(html, destino)
+            except Exception as exc:
+                self.log(
+                    "WARNING", "whatsapp",
+                    f"Não consegui gerar a imagem do resultado ({_curto(exc)}). Respondendo em texto.",
+                    request_id=job.request_id, consultant=consultant,
+                )
+                return False
 
         # As duas camadas avisam de falha de jeitos diferentes: a do navegador
         # LEVANTA excecao, a da Evolution DEVOLVE ok=False (ela tem a resposta

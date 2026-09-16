@@ -35,7 +35,7 @@ from playwright.sync_api import sync_playwright
 
 from .actor import ThreadActor
 from .config import ROOT, Config
-from . import motivos
+from . import motivos, tela_do_portal
 from .models import SimulationJob, SimulationResult, Stage
 
 # ``os.chdir`` e ``sys.path`` sao globais do processo: um unico import por vez.
@@ -451,8 +451,12 @@ class SimulatorService(ThreadActor):
 
                 notify(Stage.EXTRACTING)
                 status, _reducao, contratos, margem = self._bot.verificar_refinanciamento(self._page)
+                # A FOTO VEM ANTES de voltar ao formulario: `voltar_ao_formulario`
+                # navega, e a tela do resultado deixa de existir. Foi o mesmo
+                # cuidado que ja' se toma com o texto do erro do portal.
+                foto = self._fotografar_o_resultado(job)
                 self._safe_return_to_form()
-                return self._build_result(job, status, contratos, margem)
+                return self._build_result(job, status, contratos, margem, portal_png=foto)
 
             except PlaywrightTimeout as exc:
                 # Ler o banner ANTES de voltar ao formulario: a navegacao
@@ -490,6 +494,25 @@ class SimulatorService(ThreadActor):
                 )
         finally:
             self._busy_since = 0.0
+
+    def _fotografar_o_resultado(self, job: SimulationJob) -> str:
+        """O print da tela do Santander. Caminho do PNG, ou "" .
+
+        Acessorio de proposito: nunca levanta e nunca atrasa a resposta. Sem
+        o print o consultor recebe o card montado por nos; sem a resposta ele
+        nao recebe nada.
+
+        A recusa e' registrada em INFO com o motivo. Ela e' esperada -- o
+        recorte se descarta sozinho quando pega o topo da pagina, que traz a
+        identificacao do operador e da empresa no portal do banco.
+        """
+        if self._page is None:
+            return ""
+        destino = ROOT / "comprovantes" / f"{job.request_id}_portal.png"
+        caminho, motivo = tela_do_portal.capturar(self._page, destino)
+        if motivo:
+            self._log("INFO", f"{job.request_id}: sem print do portal — {motivo}")
+        return caminho
 
     def _ler_motivos_do_portal(self) -> list[dict]:
         """Tudo que o portal disse, LITERAL, na ordem em que apareceu.
@@ -532,7 +555,8 @@ class SimulatorService(ThreadActor):
             return "", False
         return achados[0]["texto"], motivos.vale_repetir(achados)
 
-    def _build_result(self, job, status, contratos, margem) -> SimulationResult:
+    def _build_result(self, job, status, contratos, margem,
+                      portal_png: str = "") -> SimulationResult:
         contratos = list(contratos or [])
         # Ler os motivos SEMPRE, nao so' quando da' erro: uma recusa vem com
         # `ok=True` e `status="Nao"`, e e' justamente nela que o motivo e' a
@@ -567,6 +591,7 @@ class SimulatorService(ThreadActor):
             installment_count=total_parcelas,
             debt_sum=soma_saldo,
             motivos=tuple(achados),
+            portal_png=portal_png,
         )
 
     def _safe_return_to_form(self) -> None:

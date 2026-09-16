@@ -309,7 +309,7 @@ def main() -> int:
         disparos: list[str] = []
 
         def nao_disparar():
-            estado = servico._page.evaluate(CITACAO_ATIVA_JS, alvo["texto"]) or {}
+            estado = servico._page.evaluate(CITACAO_ATIVA_JS, servico._marcas_da_citacao) or {}
             disparos.append(
                 f"NÃO DISPAREI. citação ativa={estado.get('ativa')} "
                 f"local={estado.get('local')!r}")

@@ -71,6 +71,10 @@ class Config:
     reply_quote: bool
     send_result_image: bool
     image_show_client_data: bool
+    #: "portal" manda o print da tela do Santander; "card" manda
+    #: a imagem que montamos. O print e' a tela que o consultor
+    #: veria; o card e' a nossa transcricao dela.
+    imagem_da_resposta: str
 
     # --- Camada de WhatsApp: 'dom' (navegador) ou 'evolution' (API) ---
     #
@@ -221,6 +225,8 @@ def load_config(env_file: str | Path | None = None) -> Config:
         # E' uma chave separada de MASK_CPF_IN_UI de proposito: o painel e a
         # imagem sao publicos diferentes, e a decisao aqui e' do operador.
         image_show_client_data=_flag("IMAGE_SHOW_CLIENT_DATA", "true"),
+        imagem_da_resposta=(os.getenv("IMAGEM_DA_RESPOSTA", "portal")
+                            .strip().lower() or "portal"),
         alerta_fila=_int("ALERTA_FILA", 10, minimum=1, maximum=500),
         alerta_espera_minutos=_float("ALERTA_ESPERA_MINUTOS", 5.0, minimum=0.5),
         supported_banks=banks,

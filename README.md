@@ -301,7 +301,7 @@ Dockerfile              imagem do painel + bot do WhatsApp
 docker-compose.yml      volumes, portas e variáveis
 
 dashboard/static/       painel (sem build, sem CDN, funciona offline)
-tests/                  175 testes
+tests/                  947 testes
 ```
 
 ### O caminho de uma mensagem
@@ -356,7 +356,7 @@ Nada do cálculo foi reescrito, e nenhum arquivo do projeto Arqueiro é alterado
 .venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
-São **414 testes**. Cobrem, entre outros: identificação do consultor pelo
+São **947 testes**. Cobrem, entre outros: identificação do consultor pelo
 telefone, isolamento de thread do Playwright, execução de 1/2/5 solicitações
 simultâneas sem cruzar resultados, tentativas e erros permanentes, recuperação
 da fila após reinício, migração do banco antigo, fusos horários, autenticação,
@@ -444,6 +444,7 @@ atualize esta seção.
 | Compositor da conversa | `aria-label="Digite uma mensagem para o grupo <nome>"`, `data-tab="10"`, dentro do `footer` |
 | Barra de citação armada | `[data-testid="quoted-message"]` **fora** de `div[role="row"]` + botão `aria-label="Cancelar"` |
 | Citação no histórico | mesmo `data-testid`, mas **dentro** de `div[role="row"]` — não confundir |
+| O que a barra de citação **mostra** | O autor e o **começo** da mensagem, encerrado em reticências. `diagnostico/barra_citacao.png`: `Ryan` / `LUCIÂNGELA TESTADO` / `...` — o corpo era `LUCIÂNGELA TESTADO / 72845554753 / AMAPÁ`. O CPF **não** aparece |
 | Fechar a pré-visualização | Escape **não** fecha: abre `"Deseja descartar a seleção?"` (Cancelar / **Descartar**) |
 | `img[src^="blob:"]` | **Não** indica preview aberto — imagens já enviadas na conversa também são blob |
 
@@ -482,6 +483,81 @@ a lista de conversas da lateral.
 **Validar a citação** com `ferramentas/testar_citacao.py`: ele roda os seis
 passos contra o WhatsApp real, importando o JS de `app/whatsapp.py` (não uma
 cópia), e imprime cada passo com screenshot.
+
+### A citação funcionava; quem a descartava era a conferência
+
+Durante semanas o log dizia `Resposta enviada SEM citação`, e a leitura óbvia
+disso — "o menu do WhatsApp mudou" — estava errada. O que o log de 01/09 às
+12:20 registrou, em três linhas seguidas:
+
+```
+INFO     Rodapé sem a citação esperada: 'Allana testando 2.274'
+WARNING  Cliquei em 'responder' mas a barra de citação não apareceu no rodapé
+INFO     Havia uma citação pendurada no compositor; cancelando antes de citar
+```
+
+A barra **estava lá**, com autor e prévia — e a linha seguinte confirma, ao
+encontrá-la pendurada. O menu abriu, "Responder" foi clicado, a citação
+armou. A conferência é que reprovou.
+
+Ela comparava os **18 primeiros caracteres do corpo inteiro** com o texto da
+barra. A barra não mostra o corpo inteiro: mostra o autor e o começo da
+mensagem, e encerra em reticências. Como o pedido é sempre NOME / CPF /
+ESTADO, o 18º caractere procurado caía no CPF — que a barra nunca mostra.
+`LUCIÂNGELA TESTADO` tem 17 caracteres sem espaços: reprovava por um.
+
+Rodando a conta sobre os 116 pedidos multi-linha gravados no banco,
+**69 reprovariam**.
+
+O teste que devia pegar isso tinha uma barra inventada, com o corpo inteiro
+dentro dela. A fixture confirmava o código em vez de confrontar a tela — e a
+foto da tela real (`diagnostico/barra_citacao.png`) estava no repositório o
+tempo todo.
+
+**Como ela julga agora:** pelo caminho inverso. Pega o que a barra mostra e
+confere se aquilo é o **começo** da mensagem. Ninguém precisa adivinhar onde
+o WhatsApp corta. Continua recusando a barra de outra mensagem, que é o
+perigo real — o consultor leria o resultado de outro cliente como se fosse o
+dele.
+
+Duas correções vieram junto, do mesmo log:
+
+* **as marcas da mensagem (autor e corpo) são colhidas no PASSO 1**, antes de
+  o menu abrir. No PASSO 5 a linha já pode ter saído do DOM — numa enxurrada
+  de cinquenta mensagens ela sai (`linha_no_dom=False` no diagnóstico das
+  12:21) — e a conferência ficava sem nada com que comparar;
+* **o clique em "Responder" mira no elemento marcado**, não numa coordenada.
+  O menu entra animado; a setinha já tinha sido corrigida assim, e este
+  clique tinha ficado para trás.
+
+### O print da tela do Santander
+
+A imagem que acompanha a resposta passou a ser, por padrão, um **recorte da
+tela do portal** (`IMAGEM_DA_RESPOSTA=portal`). O card montado por nós é uma
+transcrição: se a leitura errar um campo, o erro chega bonito e
+indistinguível de um acerto.
+
+O risco mora no recorte. A página inteira carrega, no topo, quem está logado:
+`Parceiro Santander`, o nome do operador, a empresa. Num grupo com dezenas de
+consultores isso é um vazamento. Por isso:
+
+* não existe `full_page=True` em lugar nenhum;
+* o recorte é achado pelo **texto** da tela (`Selecione os contratos que
+  deseja refinanciar`, `Saldo devedor`), colhido do portal de verdade em
+  `debug_cards.txt` — nunca por classe CSS, que muda a cada build e quebraria
+  calado;
+* ele sobe do título até o **primeiro** ancestral que já contenha os cards, e
+  para ali: cada nível a mais aproxima o recorte do topo;
+* antes de virar arquivo, o texto do recorte é conferido. Achou marca do topo
+  ou um CPF à vista, o print é descartado e o card entra no lugar.
+
+`app/tela_do_portal.py`, testes em `tests/test_tela_do_portal.py`.
+
+> **Ainda não rodou contra o portal.** Exige uma sessão logada do Santander,
+> que não havia quando isto foi escrito. Os testes montam a página com o
+> texto real de `debug_cards.txt`, topo do operador incluído, para exercitar
+> a recusa. Enquanto não for confirmado numa execução, a falha é segura: sem
+> recorte, nenhum print é enviado, e a resposta sai com o card.
 
 ### Clicar em coordenada não funciona neste app
 

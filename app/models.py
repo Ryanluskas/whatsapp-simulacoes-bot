@@ -143,6 +143,10 @@ class SimulationResult:
     installment_sum: float = 0.0
     installment_count: int = 0
     debt_sum: float = 0.0
+    #: PNG da tela do Santander, recortado na area do resultado.
+    #: Vazio quando o recorte nao pode ser feito com seguranca -- e ai'
+    #: a resposta sai com o card montado por nos. Ver `tela_do_portal`.
+    portal_png: str = ""
 
     @property
     def has_refin(self) -> bool:
