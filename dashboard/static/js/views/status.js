@@ -143,6 +143,7 @@ export function render(root) {
         row("Mascarar CPF", system.mask_cpf ? "sim" : "não"),
         row("Caminho do simulador", h("span.mono", { style: { fontSize: "12px" } }, system.simulator_path)),
         row("Sistema no ar desde", fmt.dateTime(system.started_at)),
+        ...evolutionRows((system.whatsapp || {}).evolution, (system.whatsapp || {}).last_webhook_at),
       ),
     );
   }
@@ -174,6 +175,36 @@ export function render(root) {
 }
 
 const row = (label, value) => h("div", h("span.k", label), h("span.v", value));
+
+// --- diagnóstico da Evolution -------------------------------------------
+// Responde, em ordem, o que trava o fluxo: a API responde? a chave vale? a
+// instância existe e está conectada? o webhook aponta para cá? Nenhum segredo
+// aparece — só os booleanos que o servidor calcula.
+const SIM_NAO = (valor) => (valor === true ? "sim" : valor === false ? "NÃO" : "não sei");
+
+const ESTADO_EVOLUTION = {
+  open: "conectada", connecting: "conectando", close: "desconectada",
+  unreachable: "inacessível", unauthorized: "chave recusada",
+  not_found: "instância não existe", license_required: "licença não ativada",
+  unknown: "desconhecido",
+};
+
+function evolutionRows(diagnostico, ultimoWebhook) {
+  if (!diagnostico) return [];
+  const estado = diagnostico.evolution_state || "unknown";
+  return [
+    row("Evolution responde", SIM_NAO(diagnostico.evolution_api_reachable)),
+    row("Chave aceita", SIM_NAO(diagnostico.api_key_valid)),
+    row("Instância encontrada", SIM_NAO(diagnostico.instance_found)),
+    row("Instância", `${diagnostico.evolution_instance || "—"} · ${ESTADO_EVOLUTION[estado] || estado}`),
+    row("Grupo configurado", SIM_NAO(diagnostico.group_configured)),
+    row("Webhook na instância", SIM_NAO(diagnostico.webhook_configured)),
+    row("Webhook aponta para o bot", SIM_NAO(diagnostico.webhook_points_to_bot)),
+    row("Token do webhook", SIM_NAO(diagnostico.webhook_token_configured)),
+    row("Último webhook recebido", ultimoWebhook ? fmt.dateTime(ultimoWebhook) : "nenhum"),
+    row("Diagnóstico atualizado em", diagnostico.checked_at ? fmt.dateTime(diagnostico.checked_at) : "—"),
+  ];
+}
 
 function simStateOf(sim) {
   if (!sim.running) return "error";

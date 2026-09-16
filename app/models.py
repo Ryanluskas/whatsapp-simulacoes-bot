@@ -35,7 +35,7 @@ class Stage:
     # Antes estes casos eram gravados como `completed`, e o painel dizia
     # "concluido" para um resultado que ninguem tinha recebido.
     DELIVERY_RETRY = "delivery_retry"              # vai tentar de novo sozinho
-    DELIVERY_UNCONFIRMED = "delivery_unconfirmed"  # a API aceitou, sem provar
+    DELIVERY_UNCONFIRMED = "delivery_unconfirmed"  # pode ter saido; nao da' para provar
     DELIVERY_FAILED = "delivery_failed"            # desistiu; precisa de gente
 
 
@@ -69,7 +69,7 @@ STAGE_LABELS = {
     Stage.CANCELLED: "Cancelado",
     Stage.INTERRUPTED: "Interrompido",
     Stage.DELIVERY_RETRY: "Reenvio pendente",
-    Stage.DELIVERY_UNCONFIRMED: "Entrega sem confirmação",
+    Stage.DELIVERY_UNCONFIRMED: "Entrega incerta — verificar WhatsApp",
     Stage.DELIVERY_FAILED: "Entrega falhou",
 }
 
@@ -111,7 +111,7 @@ class Delivery:
 
     PENDING = "pending"          # em curso agora; ninguem mais pode tocar
     DELIVERED = "delivered"      # a camada devolveu prova (ou o modo dom confirmou)
-    UNCONFIRMED = "unconfirmed"  # 2xx sem id: nao reenvia sozinho (duplicaria)
+    UNCONFIRMED = "unconfirmed"  # pode ter saido (500, timeout, 2xx sem id): nao reenvia sozinho
     RETRYING = "retrying"        # falha transitoria; o laco de reenvio tenta
     FAILED = "failed"            # falha permanente ou tentativas esgotadas
 
@@ -120,13 +120,49 @@ class Delivery:
 
 
 class QuoteStatus:
-    """O que aconteceu com a citacao da mensagem original."""
+    """O que aconteceu com a CITACAO -- independente de a mensagem ter chegado.
+
+    Citacao e entrega sao perguntas diferentes, e cada uma tem o seu campo
+    (``quote_status`` e ``delivery_status``). Uma citacao recusada nao e'
+    entrega falha; uma entrega incerta nao diz nada sobre a citacao.
+
+    Vazio (``""``) = a citacao nao chegou a ser avaliada (a requisicao nao
+    foi processada: 429, 503, conexao recusada...).
+    """
 
     NONE = "none"                # nao havia o que citar
-    OK = "ok"                    # a API devolveu a mensagem com stanzaId certo
-    UNVERIFIED = "unverified"    # enviada com quoted, resposta sem como conferir
-    NOT_APPLIED = "not_applied"  # a API devolveu a mensagem SEM a citacao
-    FALLBACK = "fallback"        # citacao recusada; saiu sem ela, com o nome
+    #: A resposta da API traz ``contextInfo.stanzaId`` IGUAL ao id pedido.
+    OK = "ok"
+    #: A mensagem pode ter saido com a citacao, mas a resposta nao permitiu
+    #: provar (sem ``stanzaId``, sem ``key.id``, 500, timeout). Nunca vira OK.
+    UNVERIFIED = "unverified"
+    #: A API provou que a mensagem saiu citando OUTRA coisa (``stanzaId``
+    #: diferente). A mensagem chegou; NAO se manda uma segunda.
+    NOT_APPLIED = "not_applied"
+    #: A API RECUSOU explicitamente a citacao (400/422 que aponta o quoted);
+    #: a resposta foi mandada de novo SEM citacao, com o nome do consultor.
+    FALLBACK = "fallback"
+
+
+class Desfecho:
+    """Como terminou UMA requisicao a API do WhatsApp.
+
+    A pergunta que decide tudo e': **a mensagem pode ter saido?**
+
+    * so' ``RECUSADA``, ``CITACAO_RECUSADA``, ``PERMANENTE`` e ``TRANSITORIA``
+      garantem que NAO saiu -- e so' nelas e' seguro mandar de novo (sem
+      citacao, em texto, ou mais tarde);
+    * ``INCERTA`` = a API nao deixou provar nem uma coisa nem outra (500,
+      timeout depois de enviar, conexao caida no meio, 2xx sem ``key.id``).
+      Mandar de novo pode duplicar a resposta no grupo; nao se manda.
+    """
+
+    ENTREGUE = "entregue"                  # 2xx com key.id
+    CITACAO_RECUSADA = "citacao_recusada"  # 400/422 apontando o quoted
+    RECUSADA = "recusada"                  # 4xx de validacao: nada saiu
+    PERMANENTE = "permanente"              # 401/403/404, licenca: nada saiu
+    TRANSITORIA = "transitoria"            # 429/502/503/504, nao conectou: nada saiu
+    INCERTA = "incerta"                    # pode ter saido
 
 
 @dataclass(frozen=True)
@@ -232,12 +268,21 @@ class ResultadoEnvio:
     #: O id que o WhatsApp deu a mensagem que SAIU. E' a prova de entrega.
     enviado_id: str = ""
     http_status: int = 0
-    #: Falhou por algo que passa sozinho (timeout, 429, 5xx)?
+    #: Ver ``Desfecho``. Vazio = camada que nao classifica (dom, dublês).
+    desfecho: str = ""
+    #: NADA saiu e repetir a MESMA requisicao depois pode dar certo
+    #: (429, 502/503/504, conexao recusada). E' ``desfecho == TRANSITORIA``.
     transitorio: bool = False
-    #: A API respondeu 2xx mas sem id: nao ha' como afirmar que saiu, e
-    #: reenviar pode duplicar. Nao e' sucesso nem falha comum.
+    #: A mensagem PODE ter saido e nao ha' como provar (500, timeout depois
+    #: de enviar, 2xx sem id). Reenviar pode duplicar. E' ``desfecho == INCERTA``.
     sem_prova: bool = False
     media_id: str = ""
+    #: O id citado na requisicao que produziu este desfecho ("" se ela foi
+    #: sem citacao, inclusive no fallback).
+    quoted_message_id: str = ""
+    #: Por que a citacao foi recusada, quando foi. Separado de ``motivo``,
+    #: que e' sobre a ENTREGA.
+    quote_error: str = ""
 
     def __bool__(self) -> bool:
         """Compatibilidade: o codigo antigo tratava o retorno como booleano."""
@@ -264,6 +309,10 @@ class Entrega:
     media_status: str = ""        # "ok" | "disabled" | "render_failed" | "invalid" | "send_failed" | "unconfirmed"
     kind: str = ""                # "image" | "text"
     tentativa: int = 1
+    desfecho: str = ""
+    http_status: int = 0
+    quoted_message_id: str = ""
+    quote_error: str = ""
 
     def __bool__(self) -> bool:
         return self.status == Delivery.DELIVERED

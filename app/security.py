@@ -118,6 +118,65 @@ class RateLimiter:
             return max(0, int(self._window - (now - hits[0])))
 
 
+# ------------------------------------------------------- configuracao exposta
+#: Senhas que nao protegem nada. Qualquer uma delas com o painel na rede e' o
+#: mesmo que deixar a porta aberta: o painel tem CPF de cliente.
+SENHAS_OBVIAS = {"admin", "", "senha", "123456", "password", "1234", "12345678",
+                 "admin123", "changeme", "troque", "mudar"}
+
+#: Placeholders do .env.example. Valem tanto quanto vazio.
+SEGREDOS_PLACEHOLDER = {"trocar-este-segredo", "troque-por-um-valor-longo-e-aleatorio",
+                        "troque", "changeme", "segredo"}
+
+LOCAIS = {"127.0.0.1", "localhost", "::1"}
+
+#: Tamanhos minimos para o que fica exposto na rede.
+MINIMO_SENHA = 10
+MINIMO_SEGREDO = 16
+
+
+def esta_exposto(web_host: str) -> bool:
+    """O painel escuta fora do loopback? (Docker publica em 0.0.0.0.)"""
+    return (web_host or "").strip() not in LOCAIS
+
+
+def _fraca(valor: str, minimo: int, proibidos: set[str]) -> bool:
+    limpo = (valor or "").strip()
+    return (not limpo) or limpo.lower() in proibidos or len(limpo) < minimo
+
+
+def problemas_de_seguranca(config) -> tuple[list[str], list[str]]:
+    """Devolve ``(problemas, avisos)`` da configuracao atual.
+
+    A regra, explicita: **em localhost, defaults passam com aviso; exposto na
+    rede, configuracao fraca e' recusa de partida.** Desenvolvimento continua
+    funcionando sem cerimonia; producao nao sobe insegura em silencio.
+    """
+    exposto = esta_exposto(config.web_host)
+    achados: list[str] = []
+
+    if _fraca(config.dashboard_password, MINIMO_SENHA, SENHAS_OBVIAS):
+        achados.append(
+            f"DASHBOARD_PASSWORD é fraca ou padrão (mínimo {MINIMO_SENHA} caracteres). "
+            "O painel mostra CPF de cliente.")
+    if _fraca(config.session_secret, MINIMO_SEGREDO, SEGREDOS_PLACEHOLDER):
+        achados.append(
+            f"SESSION_SECRET vazio, placeholder ou curto (mínimo {MINIMO_SEGREDO}). "
+            "Sem ele qualquer um pode forjar um cookie de sessão.")
+    if getattr(config, "whatsapp_mode", "") == "evolution" and _fraca(
+            config.evolution_webhook_token, MINIMO_SEGREDO, SEGREDOS_PLACEHOLDER):
+        achados.append(
+            f"EVOLUTION_WEBHOOK_TOKEN fraco (mínimo {MINIMO_SEGREDO}). A rota do "
+            "webhook recebe dado de cliente e enfileira trabalho.")
+    if getattr(config, "simulator_mode", "") == "remote" and _fraca(
+            config.agent_token, MINIMO_SEGREDO, SEGREDOS_PLACEHOLDER):
+        achados.append(
+            f"AGENT_TOKEN fraco (mínimo {MINIMO_SEGREDO}). Com ele se reivindica "
+            "simulação e se devolve resultado.")
+
+    return (achados, []) if exposto else ([], achados)
+
+
 # ----------------------------------------------------------------- mascaras
 def digits_only(value: str | None) -> str:
     return "".join(ch for ch in (value or "") if ch.isdigit())

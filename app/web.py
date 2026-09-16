@@ -153,16 +153,28 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
         except Exception:
             whatsapp = "unknown"
         simulators = [s for s in manager.simulators if getattr(s, "running", False)]
-        return {
-            "status": "ok",
-            "services": {
-                "web": True,
-                "whatsapp": whatsapp,
-                "simulators_running": len(simulators),
-                "simulators_total": len(manager.simulators),
-                "queue_depth": manager.queue.depth(),
-            },
+        servicos = {
+            "web": True,
+            "whatsapp": whatsapp,
+            "simulators_running": len(simulators),
+            "simulators_total": len(manager.simulators),
+            "queue_depth": manager.queue.depth(),
         }
+        # Diagnostico da Evolution: so' booleanos e estado, para responder
+        # "por que está ligado e não responde?" sem sessão e sem expor nada.
+        try:
+            diagnostico = manager.diagnostico_do_whatsapp().get("evolution")
+        except Exception:
+            diagnostico = None
+        if diagnostico:
+            servicos["evolution"] = {
+                chave: diagnostico.get(chave) for chave in (
+                    "evolution_api_reachable", "api_key_valid", "instance_found",
+                    "evolution_state", "group_configured", "webhook_configured",
+                    "webhook_points_to_bot", "webhook_token_configured",
+                    "last_webhook_at", "checked_at")
+            }
+        return {"status": "ok", "services": servicos}
 
     @api.get("/api/session")
     async def session(request: Request):
@@ -247,7 +259,7 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
         messages = db.fetchall(
             "SELECT id, direction, kind, text, media_path, status, created_at, consultant_name, "
             "       wa_message_id, provider, attempt, origin_message_id, quoted_message_id, "
-            "       quote_status, http_status, media_id, error "
+            "       quote_status, quote_error, desfecho, http_status, media_id, error "
             "FROM messages WHERE simulation_id=? ORDER BY id ASC",
             (sim_id,),
         )
@@ -379,6 +391,8 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
         except Exception:
             raise HTTPException(status_code=400, detail="corpo não é JSON")
 
+        # A Evolution ALCANCOU o bot: e' o sinal que o diagnostico mostra.
+        manager.registrar_webhook()
         leituras = interpretar_todos(payload, config.evolution_group_jid,
                                      config.whatsapp_group_name)
 

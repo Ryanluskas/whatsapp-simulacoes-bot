@@ -25,7 +25,7 @@ from typing import Callable
 
 from .actor import ActorTimeout
 from .clock import iso_atras, now_iso, parse_iso, to_iso, utc_now
-from .db import Database
+from .db import ENVIO_EM_CURSO, Database
 from .events import EventHub
 from .models import (
     STAGE_LABELS,
@@ -153,7 +153,7 @@ class QueueService:
                 # A simulacao TERMINOU; o que travou foi a entrega. Dizer ao
                 # consultor "a simulacao travou" seria mentira, e o resultado
                 # existe: vai para o reenvio.
-                self._agendar_reenvio(row, "a entrega travou e não retornou")
+                self._resolver_entrega_interrompida(row, "a entrega travou e não retornou")
                 resolvidas += 1
                 continue
             self._log(
@@ -194,8 +194,16 @@ class QueueService:
             if inicio:
                 espera = max(0.0, (utc_now() - inicio).total_seconds())
 
+        # Entrega incerta nao e' fila -- ninguem vai tentar de novo sozinho --
+        # mas e' consultor que pode estar sem resposta. Conta as das ultimas
+        # 24 h, que e' o que ainda vale conferir no grupo.
+        incertas = int(self.db.scalar(
+            "SELECT COUNT(*) FROM simulations WHERE delivery_status=? AND updated_at >= ?",
+            (Delivery.UNCONFIRMED, iso_atras(24 * 3600))) or 0)
+
         return {
             "pendentes": quantas,
+            "entregas_incertas": incertas,
             "espera_maxima_s": round(espera),
             "desde": mais_antiga or "",
             "fila_cheia": quantas >= self.alerta_fila,
@@ -354,8 +362,8 @@ class QueueService:
                 # Caiu no meio da ENTREGA: o portal ja' respondeu. Simular de
                 # novo gastaria o Santander e poderia mandar dois resultados;
                 # o que falta e' so' entregar este.
-                self._agendar_reenvio(row, "reinício do sistema durante a entrega",
-                                      imediato=True)
+                self._resolver_entrega_interrompida(
+                    row, "reinício do sistema durante a entrega", imediato=True)
                 continue
             attempts = int(row.get("attempts") or 0)
             limit = int(row.get("max_attempts") or self.max_attempts)
@@ -418,40 +426,119 @@ class QueueService:
         duas varreduras nao mandarem a mesma resposta). Se o processo cai
         nesse meio, a linha ja' tem status final e ninguem mais a pegaria.
         Status e etapa ficam como estao -- uma interrompida continua
-        interrompida; so' a entrega volta a ser reenviavel.
+        interrompida; so' a ENTREGA e' decidida, pelo que ficou gravado.
         """
-        with self.db.write() as conn:
-            cur = conn.execute(
-                "UPDATE simulations SET delivery_status=?, next_delivery_at=?, updated_at=? "
-                " WHERE delivery_status=? AND status NOT IN (?, ?) AND replied_at IS NULL",
-                (Delivery.RETRYING, now_iso(), now_iso(), Delivery.PENDING,
-                 Status.QUEUED, Status.PROCESSING),
-            )
-            quantas = cur.rowcount
-        if quantas:
-            self._log("WARNING", f"{quantas} reenvio(s) interrompido(s) pelo reinício "
-                                 "voltaram para a fila de reenvio.")
-        return quantas
+        linhas = self.db.fetchall(
+            "SELECT * FROM simulations WHERE delivery_status=? AND status NOT IN (?, ?) "
+            "   AND replied_at IS NULL",
+            (Delivery.PENDING, Status.QUEUED, Status.PROCESSING),
+        )
+        for linha in linhas:
+            self._resolver_entrega_interrompida(dict(linha), "reinício durante o reenvio",
+                                                imediato=True, manter_status=True)
+        if linhas:
+            self._log("WARNING", f"{len(linhas)} reenvio(s) interrompido(s) pelo reinício "
+                                 "foram reavaliados.")
+        return len(linhas)
 
-    def _agendar_reenvio(self, row: dict, motivo: str, imediato: bool = False) -> None:
-        """Resultado pronto, entrega pendente: entrega na mao do laco de reenvio."""
+    def situacao_do_envio(self, simulation_id: int) -> tuple[str, dict | None]:
+        """O que as linhas de SAIDA desta solicitacao provam.
+
+        * ``("entregue", linha)`` -- alguma saida terminou como entregue;
+        * ``("incerta", None)``   -- ha' saida gravada como ``sending``: a chamada
+          a API comecou e nao terminou (queda, excecao). Pode ter saido;
+        * ``("nada", None)``      -- nenhuma tentativa em aberto: nada saiu.
+
+        E' a unica fonte da decisao de reenviar depois de uma interrupcao.
+        Adivinhar "provavelmente nao saiu" e' como se manda a resposta duas
+        vezes.
+        """
+        entregue = self.db.fetchone(
+            "SELECT id, wa_message_id, quote_status FROM messages "
+            " WHERE simulation_id=? AND direction='out' "
+            "   AND COALESCE(status,'') NOT IN ('failed', ?, ?) "
+            " ORDER BY id DESC LIMIT 1",
+            (simulation_id, Delivery.UNCONFIRMED, ENVIO_EM_CURSO),
+        )
+        if entregue:
+            return "entregue", dict(entregue)
+        em_curso = self.db.scalar(
+            "SELECT COUNT(*) FROM messages WHERE simulation_id=? AND direction='out' "
+            "   AND status=?", (simulation_id, ENVIO_EM_CURSO))
+        return ("incerta", None) if em_curso else ("nada", None)
+
+    def _resolver_entrega_interrompida(self, row: dict, motivo: str, *,
+                                       imediato: bool = False,
+                                       manter_status: bool = False) -> str:
+        """A entrega parou no meio. Decide pelo que esta' gravado, nunca por palpite.
+
+        entregue -> fecha como entregue (sem reenviar); incerta -> ``unconfirmed``
+        (sem reenviar: pode ter chegado); nada -> reenvio.
+        """
+        situacao, linha = self.situacao_do_envio(row["id"])
+        agora = now_iso()
+        status, stage = estado_final(bool(row.get("result_ok")))
+        request_id = row.get("request_id") or ""
+        if situacao == "entregue":
+            campos = {"delivery_status": Delivery.DELIVERED, "replied_at": agora,
+                      "sent_message_id": (linha or {}).get("wa_message_id") or "",
+                      "delivery_error": "", "updated_at": agora}
+            if not manter_status:
+                campos.update(status=status, stage=stage)
+            self.db.update("simulations", campos, {"id": row["id"]})
+            self._log("WARNING",
+                      f"{request_id}: {motivo}, mas a resposta JÁ tinha saído "
+                      f"(id {campos['sent_message_id'] or 'sem id'}). Marquei como "
+                      "entregue; nada foi reenviado.", request_id=request_id)
+            return situacao
+        if situacao == "incerta":
+            with self.db.write() as conn:
+                conn.execute(
+                    "UPDATE messages SET status=?, desfecho='incerta', "
+                    "       error=COALESCE(NULLIF(error,''), ?) "
+                    " WHERE simulation_id=? AND direction='out' AND status=?",
+                    (Delivery.UNCONFIRMED, f"interrompido durante o envio ({motivo})",
+                     row["id"], ENVIO_EM_CURSO))
+            erro = f"{motivo}; o envio tinha começado e a mensagem pode ter saído"
+            campos = {"delivery_status": Delivery.UNCONFIRMED, "sent_message_id": "",
+                      "delivery_error": erro, "updated_at": agora}
+            if not manter_status:
+                campos.update(status=status, stage=Stage.DELIVERY_UNCONFIRMED)
+            self.db.update("simulations", campos, {"id": row["id"]})
+            self._log("WARNING",
+                      f"{request_id}: Entrega incerta — verificar WhatsApp. {erro}. "
+                      "Não reenvio sozinho para não duplicar.", request_id=request_id)
+            self.hub.publish(
+                "delivery_unconfirmed",
+                {"request_id": request_id, "simulation_id": row["id"],
+                 "origin_message_id": row.get("source_message_id") or "", "reason": erro},
+                stage=Stage.DELIVERY_UNCONFIRMED, level="warning",
+                title="Entrega incerta — verificar WhatsApp", detail=erro,
+                request_id=request_id, simulation_id=row["id"],
+                consultant_name=row.get("consultant_name") or "",
+                chat_id=row.get("chat_id") or "")
+            return situacao
+        self._agendar_reenvio(row, motivo, imediato=imediato, manter_status=manter_status)
+        return situacao
+
+    def _agendar_reenvio(self, row: dict, motivo: str, imediato: bool = False,
+                         manter_status: bool = False) -> None:
+        """Resultado pronto e NADA saiu: entrega na mao do laco de reenvio."""
         status, _stage = estado_final(bool(row.get("result_ok")))
         agora = now_iso()
-        self.db.update(
-            "simulations",
-            {
-                "status": status,
-                "stage": Stage.DELIVERY_RETRY,
-                "delivery_status": Delivery.RETRYING,
-                "delivery_error": motivo,
-                "next_delivery_at": agora if imediato else depois_de(PRIMEIRO_REENVIO_SEGUNDOS),
-                "updated_at": agora,
-            },
-            {"id": row["id"]},
-        )
+        campos = {
+            "delivery_status": Delivery.RETRYING,
+            "delivery_error": motivo,
+            "next_delivery_at": agora if imediato else depois_de(PRIMEIRO_REENVIO_SEGUNDOS),
+            "updated_at": agora,
+        }
+        if not manter_status:
+            campos.update(status=status, stage=Stage.DELIVERY_RETRY)
+        self.db.update("simulations", campos, {"id": row["id"]})
         self._log("WARNING",
                   f"{row.get('request_id')}: resultado pronto e não entregue "
-                  f"({motivo}). Vai para o reenvio, sem simular de novo.",
+                  f"({motivo}); nenhum envio tinha começado. Vai para o reenvio, sem "
+                  "simular de novo.",
                   request_id=row.get("request_id") or "")
         self.hub.publish(
             "delivery_retry",
@@ -769,7 +856,7 @@ class QueueService:
         if not linha or linha.get("delivery_status") != Delivery.PENDING:
             return
         if falha:
-            self._agendar_reenvio(dict(linha), f"falha ao entregar: {falha}")
+            self._resolver_entrega_interrompida(dict(linha), f"falha ao entregar: {falha}")
             return
         status, stage = estado_final(result.ok)
         self.db.update(

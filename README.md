@@ -23,8 +23,9 @@ histórico leem a mesma fonte, então painel e banco nunca discordam.
 | **Enfileira** | Vários consultores podem pedir ao mesmo tempo; cada pedido é isolado e recebe um `REQ000000`. |
 | **Simula** | Abre o portal do Santander no Brave, com a sessão do operador, e usa a lógica do projeto Arqueiro (nada é reimplementado aqui). |
 | **Responde** | Manda uma **imagem** com os cards dos contratos e quanto libera, mais um resumo em texto. Se a imagem falhar, o texto sai assim mesmo. |
-| **Reenvia** | Se a entrega falhar por motivo passageiro (queda, 429, 5xx), tenta de novo por até 5 vezes **na mesma solicitação**, citando a mesma mensagem. Erro permanente não é repetido; resposta aceita sem id não é reenviada (duplicaria). |
-| **Não duplica** | A mensagem recebida é gravada antes de qualquer coisa. O mesmo `message_id` nunca vira segunda solicitação — nem com webhook reentregue, nem depois de reiniciar. |
+| **Reenvia** | Só quando a API PROVA que nada saiu (429, 502/503/504, conexão recusada): até 5 vezes **na mesma solicitação**, citando a mesma mensagem. |
+| **Não duplica o pedido** | A mensagem recebida é gravada antes de qualquer coisa. O mesmo `message_id` nunca vira segunda solicitação — nem com webhook reentregue, nem depois de reiniciar. |
+| **Não duplica a resposta** | 500, timeout depois de enviar, 2xx sem id, queda no meio do envio: a mensagem pode ter chegado. Vira **"Entrega incerta — verificar WhatsApp"** e ninguém manda uma segunda. |
 | **Explica os erros** | Traduz o que o portal disse: "não foi possível contatar a averbadora", "matrícula inválida". Erros passageiros geram nova tentativa; erros de cadastro, não. |
 | **Registra tudo** | Banco SQLite com mensagens, simulações, consultores e logs. O painel lê daí. |
 
@@ -70,15 +71,17 @@ Na primeira execução, abra a aba **Status** e leia o QR Code com o celular.
 É o formato livre que o grupo já usa — nome, órgão (opcional) e CPF:
 
 ```text
-Paulo Testes
+Jose da Silva
 Amapá
-182.841.754.87
+529.982.247-25
 ```
 
 ```text
-LUIZ FERNANDO TESTE
-31611176034
+MARIA DE SOUZA
+11144477735
 ```
+
+(exemplos com CPFs de teste — este repositório é público)
 
 **O CPF é o gatilho.** Conversa comum não tem CPF; pedido tem. Como a
 validação confere os dígitos verificadores, um telefone ou um número de
@@ -111,7 +114,7 @@ curta:
 
 ```
 ✅ Libera R$ 4.913,52
-Ivone Teste
+Jose da Silva
 ```
 
 Não existe "Simulação recebida", "processando" nem "consulta concluída". O aviso
@@ -367,7 +370,8 @@ Santander falsos, incluindo matar o processo no meio da fila):
 Ele **não** substitui validar no grupo de teste com a Evolution de verdade —
 ver [MIGRACAO-EVOLUTION.md](MIGRACAO-EVOLUTION.md).
 
-São **mais de 940 testes**. Cobrem, entre outros: identificação do consultor pelo
+São **1003 testes** (mais um que só roda com respostas reais da Evolution
+capturadas). Cobrem, entre outros: identificação do consultor pelo
 telefone, isolamento de thread do Playwright, execução de 1/2/5 solicitações
 simultâneas sem cruzar resultados, tentativas e erros permanentes, recuperação
 da fila após reinício, migração do banco antigo, fusos horários, autenticação,
@@ -377,7 +381,8 @@ Os que valem destaque, porque nasceram de defeitos reais em produção:
 
 | Arquivo | O que trava |
 |---|---|
-| `test_producao.py` | O fluxo de produção na camada Evolution: um `message_id` = uma solicitação, citação com o id/autor/texto gravados, fallback sem citação, PNG validado e do pedido certo, 429/503 com reenvio no mesmo `REQ`, 2xx sem id não contado como entregue, reinício sem re-simular, dois consultores simultâneos sem cruzar |
+| `test_producao.py` | O fluxo de produção na camada Evolution, e **a regra de não duplicar**: 500/timeout/2xx-sem-id viram entrega incerta sem segunda mensagem; 400/422 que apontam o `quoted` viram um único envio sem citação; 429/503 repetem COM citação; queda entre o POST e a gravação não vira reenvio; um `message_id` = uma solicitação; PNG validado e do pedido certo; dois consultores simultâneos sem cruzar |
+| `test_contrato_evolution.py` | A leitura da resposta da Evolution: acha `key.id` e `stanzaId` em níveis diferentes, e **nunca inventa um `ok`** quando não acha |
 | `test_leitura_dom.py` | Roda o JS num **Chromium de verdade** contra as gerações de HTML que o WhatsApp já serviu: leitura de mensagens, escolha do grupo, menu de contexto, anexo de foto, e a garantia de que o bot **nunca lê nem encaminha as próprias mensagens** |
 | `test_abas.py` | A aba certa do navegador. Uma `about:blank` restaurada pelo perfil já fez o bot pilotar uma página vazia a sessão inteira |
 | `test_reenvio.py` | Entrega que falhou é reenviada, e o reenvio **não atropela** a entrega em curso |
@@ -395,8 +400,14 @@ Os que valem destaque, porque nasceram de defeitos reais em produção:
 - `MASK_CPF_IN_UI=true` mascara o CPF na API, no painel e nos exports.
 - CPF é removido das mensagens de log.
 - Limite de tentativas de login por IP.
-- `.gitignore` bloqueia `.env`, banco, `state.json` e os perfis de navegador —
-  os perfis contêm a sessão do WhatsApp e do banco.
+- `.gitignore` bloqueia `.env`, banco, `state.json`, `comprovantes/`,
+  `diagnostico/` e os perfis de navegador — os perfis contêm a sessão do
+  WhatsApp e do banco, e as capturas de diagnóstico contêm a conversa real.
+- **Partida recusada com configuração insegura.** Com `WEB_HOST` fora de
+  `127.0.0.1` (o caso do Docker), o sistema não sobe com senha fraca/padrão,
+  `SESSION_SECRET` vazio ou placeholder, nem com `EVOLUTION_WEBHOOK_TOKEN` /
+  `AGENT_TOKEN` curtos. Em localhost os defaults passam, com aviso — e o log
+  diz qual regra está valendo.
 
 ---
 
@@ -422,8 +433,9 @@ causa. Estas são as principais, no painel em **Logs**:
 | `perfil já está aberto em outro navegador` | Sobrou `brave.exe` de uma execução anterior | Feche todas as janelas do Brave e os `brave.exe` no Gerenciador de Tarefas |
 | `O Santander está na tela de login` | A sessão do portal caiu | Faça login na janela do simulador, ou preencha o `credenciais.ini` do Arqueiro |
 | `resultado pronto mas não entregue` | A resposta falhou por motivo passageiro | Ele reenvia sozinho (30 s, 60 s, 120 s…), até 5 vezes, na mesma solicitação |
-| `A Evolution recusou a citação` | O `quoted` foi recusado | Nada: a resposta saiu sem citação, com `↩ consultor`. Se repetir sempre, a mensagem original não está no histórico da instância |
-| `aceitou a resposta mas não devolveu o id` | 2xx sem `key.id` | Confira o grupo. Não é reenviado sozinho para não duplicar |
+| `A Evolution RECUSOU a citação` | 400/422 apontando o `quoted` | Nada: a resposta saiu sem citação, com `↩ consultor`. Se repetir sempre, a mensagem original não está no histórico da instância |
+| `Entrega incerta — verificar WhatsApp` | 500, timeout depois de enviar, 2xx sem id, ou queda no meio do envio | **Olhe o grupo.** A mensagem pode ter chegado; o bot não manda outra de propósito |
+| `envio=texto tentativa=1 provider=… quote_status=…` | Uma linha por envio, com id de origem, id citado, autor, HTTP e id enviado | É o suficiente para reconstruir a entrega sem abrir o banco |
 | `a entrega falhou de um jeito que repetir não resolve` | 401/403/404, licença, sem `chat_id` | Corrija a configuração da Evolution; o resultado está no painel |
 | `já recebida antes ... Reentrega ignorada` | Webhook reentregue | Nada: a trava de duplicidade funcionou |
 

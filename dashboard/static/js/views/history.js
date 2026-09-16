@@ -313,22 +313,25 @@ function nodeColor(event) {
 // --- entrega ------------------------------------------------------------
 // "Enviada" só quando a camada devolveu prova. Uma tentativa que falhou ou
 // que a API aceitou sem id não pode aparecer como resposta que chegou.
-const FAILED_MESSAGE = new Set(["failed", "unconfirmed"]);
+const FAILED_MESSAGE = new Set(["failed", "unconfirmed", "sending"]);
 
 const DELIVERY_LABELS = {
   delivered: "Entregue",
   pending: "Enviando",
   retrying: "Reenvio pendente",
-  unconfirmed: "Sem confirmação da API",
+  // Pode ter chegado: ninguém vai tentar de novo sozinho, porque uma segunda
+  // mensagem duplicaria a resposta no grupo.
+  unconfirmed: "Entrega incerta — verificar WhatsApp",
   failed: "Falhou",
 };
 
 const QUOTE_LABELS = {
   ok: "Citada (confirmada)",
   unverified: "Citada (sem como conferir)",
-  not_applied: "Saiu sem citação",
-  fallback: "Recusada — enviada sem citação",
+  not_applied: "Saiu citando outra mensagem",
+  fallback: "Recusada — reenviada sem citação",
   none: "Sem citação",
+  "": "Não avaliada",
 };
 
 function deliveryLabel(s) {
@@ -340,14 +343,15 @@ function messageTitle(message) {
   if (message.direction === "in") return "Recebida";
   const tipo = message.kind === "image" ? " · imagem" : "";
   if (message.status === "failed") return `Falhou${tipo}`;
-  if (message.status === "unconfirmed") return `Sem confirmação${tipo}`;
+  if (message.status === "sending") return `Enviando${tipo}…`;
+  if (message.status === "unconfirmed") return `Incerta — verificar WhatsApp${tipo}`;
   return `Enviada${tipo}`;
 }
 
 function messageColor(message) {
   if (message.direction === "in") return "var(--st-processing)";
   if (message.status === "failed") return "var(--st-error)";
-  if (message.status === "unconfirmed") return "var(--st-queued)";
+  if (message.status === "unconfirmed" || message.status === "sending") return "var(--st-queued)";
   return "var(--st-done)";
 }
 
@@ -360,6 +364,8 @@ function messageEvidence(message) {
   if (message.quote_status) partes.push(`citação ${message.quote_status}`);
   if (message.wa_message_id) partes.push(`id ${message.wa_message_id}`);
   if (message.http_status) partes.push(`HTTP ${message.http_status}`);
+  if (message.desfecho) partes.push(`desfecho ${message.desfecho}`);
+  if (message.quote_error) partes.push(`citação recusada: ${message.quote_error}`);
   if (message.error) partes.push(message.error);
   return partes.join(" · ");
 }

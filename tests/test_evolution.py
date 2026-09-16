@@ -23,6 +23,7 @@ import pytest
 from app import mensagens
 from app.evolution import (DELAY_HUMANO_MS, EvolutionClient, LICENCA_PENDENTE,
                            classificar_resposta)
+from app.models import Desfecho
 from app.whatsapp_port import METODOS_DO_CONTRATO
 from tests.test_concurrency import png_valido
 
@@ -197,29 +198,42 @@ class TestFalhaNuncaEhSilenciosa:
         assert not r.ok
         assert "key.id" in r.motivo
 
-    @pytest.mark.parametrize("status,transitorio", [
-        (500, True), (502, True), (503, True), (429, True),
-        (400, False), (401, False), (404, False),
+    @pytest.mark.parametrize("status,desfecho", [
+        # nada saiu, repetir a MESMA requisição depois pode dar certo
+        (429, Desfecho.TRANSITORIA), (502, Desfecho.TRANSITORIA),
+        (503, Desfecho.TRANSITORIA), (504, Desfecho.TRANSITORIA),
+        # a mensagem PODE ter saído: não se manda outra
+        (500, Desfecho.INCERTA),
+        # nada saiu e repetir não resolve
+        (401, Desfecho.PERMANENTE), (403, Desfecho.PERMANENTE), (404, Desfecho.PERMANENTE),
     ])
-    def test_classifica_para_saber_se_reenvia(self, status, transitorio):
-        assert classificar_resposta(status, "detalhe")[0] is transitorio
+    def test_classifica_para_saber_se_reenvia(self, status, desfecho):
+        assert classificar_resposta(status, "detalhe").desfecho == desfecho
+
+    def test_400_so_e_recusa_quando_a_evolution_diz_o_que_recusou(self):
+        """Um 400 opaco pode ser erro DEPOIS do envio: não vira "nada saiu"."""
+        assert classificar_resposta(400, 'requires property "number"').desfecho == Desfecho.RECUSADA
+        assert classificar_resposta(400, "Bad Request").desfecho == Desfecho.INCERTA
 
     def test_licenca_pendente_e_nomeada_e_nao_reenvia(self):
         """503 comum é transitório; este 503 específico não adianta repetir."""
-        transitorio, motivo = classificar_resposta(
-            503, json.dumps({"error": LICENCA_PENDENTE}))
-        assert transitorio is False, "reenviar não ativa licença nenhuma"
-        assert "/manager" in motivo, "a mensagem tem de dizer o que fazer"
+        classificacao = classificar_resposta(503, json.dumps({"error": LICENCA_PENDENTE}))
+        assert classificacao.desfecho == Desfecho.PERMANENTE, "reenviar não ativa licença"
+        assert classificacao.transitorio is False
+        assert "/manager" in classificacao.motivo, "a mensagem tem de dizer o que fazer"
 
-    def test_erro_500_volta_marcado_como_transitorio(self, png):
+    def test_erro_500_nao_e_transitorio_e_sim_incerto(self, png):
+        """O defeito que este teste trava: 500 disparava um segundo envio."""
         espiao = Espiao(httpx.Response(500, text="boom"))
         c = EvolutionClient("http://e:8080", "k", "allana", GRUPO,
                             client=httpx.Client(transport=httpx.MockTransport(espiao),
                                                 base_url="http://e:8080"),
                             renderer=None)
-        r = c.send_image(GRUPO, "g", png, caption="x")
+        r = c.send_image(GRUPO, "g", png, caption="x", quote_message_id=ID_ORIGINAL)
         assert not r.ok
-        assert r.evidencia["transitorio"] is True
+        assert r.desfecho == Desfecho.INCERTA
+        assert r.sem_prova is True and r.transitorio is False
+        assert len(espiao.chamadas) == 1, "tentou de novo depois de um 500"
 
     def test_erro_400_registra_o_corpo_inteiro(self):
         """A Evolution explica bem o que recusou -- jogar fora custa uma noite."""

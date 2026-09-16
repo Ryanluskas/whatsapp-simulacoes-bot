@@ -30,11 +30,12 @@ import base64
 import queue
 import threading
 from pathlib import Path
+from typing import NamedTuple
 
 import httpx
 
 from .clock import now_iso
-from .models import IncomingMessage, QuoteStatus, ResultadoEnvio
+from .models import Desfecho, IncomingMessage, QuoteStatus, ResultadoEnvio
 from .renderer import PngInvalido, PngRenderer, validar_png
 from .whatsapp import CONNECTED, DISCONNECTED, STARTING, WhatsAppStatus
 
@@ -45,65 +46,204 @@ DELAY_HUMANO_MS = 1200
 #: Reenviar nao resolve -- so' um humano abrindo ``/manager`` resolve.
 LICENCA_PENDENTE = "LICENSE_REQUIRED"
 
-#: Respostas em que a CITACAO pode ser a culpada, e vale repetir sem ela.
-#:
-#: A Evolution transforma quase toda excecao interna em 400 (inclusive
-#: "mensagem citada nao encontrada"), e algumas em 500. Nesses casos a
-#: mensagem nao saiu, e mandar de novo sem ``quoted`` e' seguro. Ja' 401/403
-#: (chave), 404 (instancia) e 429/502/503/504/timeout nao tem nada a ver com
-#: a citacao -- repetir sem ela so' duplicaria a falha, ou pior, a mensagem.
-_CITACAO_PODE_SER_A_CAUSA = {400, 422, 500}
+# --------------------------------------------------------------- classificacao
+#
+# A regra que manda aqui: **so' se manda de novo quando ha' prova de que a
+# primeira NAO saiu.** Mandar duas vezes o resultado de um cliente no grupo e'
+# pior que uma entrega que precisa ser conferida por uma pessoa.
+#
+# Por que o corpo importa num 400: a Evolution transforma em 400 tanto a
+# validacao do payload (antes de enviar) quanto excecoes DENTRO do envio --
+# inclusive as que acontecem DEPOIS de a mensagem sair (gravar no banco dela,
+# disparar webhook). Um 400 sozinho, sem explicacao, nao prova nada.
+#
+# As marcas abaixo sao heuristicas sobre o TEXTO que a Evolution devolve. Elas
+# so' servem para abrir caminho a um reenvio; na ausencia delas, o desfecho
+# e' o que nao reenvia (INCERTA).
+
+#: O corpo fala da citacao: recusa por causa do ``quoted``.
+_MARCAS_DE_CITACAO = ("quoted", "quote", "stanzaid", "contextinfo")
+
+#: O corpo sugere falha DEPOIS de processar (a mensagem pode ter saido).
+_MARCAS_POS_ENVIO = ("prisma", "database", "unique constraint", "chatwoot",
+                     "timed out", "timeout", "etimedout", "econnreset",
+                     "socket hang up", "connection closed")
+
+#: O corpo sugere validacao ANTES de enviar (nada saiu).
+_MARCAS_DE_VALIDACAO = ('"exists":false', "requires property", "is not of a type",
+                        "is not one of enum", "does not match pattern",
+                        "additionalproperty", "is not allowed", "must be",
+                        "is required", "invalid", "inválid", "malformed", "malformad")
+
+#: Nada foi processado; a MESMA requisicao pode ser repetida depois.
+_HTTP_TRANSITORIO = {408, 429, 502, 503, 504}
+#: Nada foi processado; repetir nao resolve.
+_HTTP_PERMANENTE = {401, 403, 404}
+
+
+class Classificacao(NamedTuple):
+    desfecho: str
+    motivo: str
+
+    @property
+    def transitorio(self) -> bool:
+        return self.desfecho == Desfecho.TRANSITORIA
+
+
+def classificar_resposta(status_http: int, corpo: str,
+                         com_citacao: bool = False) -> Classificacao:
+    """Classifica uma resposta HTTP >= 400 da Evolution.
+
+    ==========================  ===================  ==========================
+    resposta                    desfecho             o que o chamador faz
+    ==========================  ===================  ==========================
+    400/422 apontando o quoted  citacao_recusada     repete SEM citacao
+    400/422 de validacao        recusada             nao repete (imagem -> texto)
+    400/422 sem explicacao      incerta              nao repete, nao cai p/ texto
+    401/403/404, licenca        permanente           nao repete
+    408/429/502/503/504         transitoria          repete igual, depois
+    500 e outros 5xx            incerta              nao repete, nao cai p/ texto
+    ==========================  ===================  ==========================
+
+    Separar isto do envio e' o que permite testar a politica com uma tabela,
+    sem servidor nenhum.
+    """
+    texto = corpo or ""
+    trecho = texto[:400]
+    baixo = texto.lower()
+    compacto = "".join(baixo.split())
+
+    if status_http == 503 and LICENCA_PENDENTE in texto:
+        return Classificacao(Desfecho.PERMANENTE,
+                             "a instancia da Evolution nao esta ativada -- abra "
+                             "/manager e faca a ativacao da licenca")
+    if status_http in _HTTP_PERMANENTE:
+        return Classificacao(Desfecho.PERMANENTE,
+                             f"a Evolution recusou ({status_http}): {trecho}")
+    if status_http in _HTTP_TRANSITORIO:
+        return Classificacao(Desfecho.TRANSITORIA,
+                             f"a Evolution nao processou agora ({status_http}): {trecho}")
+    if status_http >= 500:
+        # 500 NAO prova que nada saiu: pode ser erro depois do envio. Mandar
+        # de novo (com ou sem citacao) pode duplicar a resposta.
+        return Classificacao(Desfecho.INCERTA,
+                             f"a Evolution respondeu {status_http}; a mensagem pode ter "
+                             f"saido: {trecho}")
+    if status_http in (400, 422):
+        if any(marca in baixo for marca in _MARCAS_POS_ENVIO):
+            return Classificacao(Desfecho.INCERTA,
+                                 f"a Evolution respondeu {status_http} com sinal de erro "
+                                 f"depois do envio: {trecho}")
+        if com_citacao and any(marca in compacto for marca in _MARCAS_DE_CITACAO):
+            return Classificacao(Desfecho.CITACAO_RECUSADA,
+                                 f"a Evolution recusou a citacao ({status_http}): {trecho}")
+        if any(marca.replace(" ", "") in compacto for marca in _MARCAS_DE_VALIDACAO):
+            return Classificacao(Desfecho.RECUSADA,
+                                 f"a Evolution recusou o envio ({status_http}): {trecho}")
+        return Classificacao(Desfecho.INCERTA,
+                             f"a Evolution respondeu {status_http} sem dizer o que "
+                             f"recusou; a mensagem pode ter saido: {trecho}")
+    if status_http >= 400:
+        # 405, 409, 413 (payload grande demais para o proxy)...: rejeitado
+        # antes de chegar ao envio.
+        return Classificacao(Desfecho.RECUSADA,
+                             f"a Evolution recusou ({status_http}): {trecho}")
+    return Classificacao(Desfecho.INCERTA, f"resposta inesperada ({status_http}): {trecho}")
+
+
+def classificar_falha_de_transporte(exc: Exception) -> Classificacao:
+    """A requisicao nem teve resposta. Saiu ou nao saiu?
+
+    * nao conectou (conexao recusada, timeout de conexao, pool cheio) ou nao
+      terminou de subir o corpo: a Evolution nao tem a requisicao inteira, nada
+      foi processado -> TRANSITORIA;
+    * a requisicao subiu e a resposta nao veio (timeout de leitura, conexao
+      derrubada depois, protocolo quebrado): a Evolution pode ter enviado ->
+      INCERTA.
+    """
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
+                        httpx.WriteError, httpx.WriteTimeout)):
+        return Classificacao(Desfecho.TRANSITORIA,
+                             f"a requisicao nao chegou a Evolution: {exc!r}"[:300])
+    return Classificacao(Desfecho.INCERTA,
+                         f"a requisicao foi enviada e a resposta nao veio "
+                         f"({exc.__class__.__name__}); a mensagem pode ter saido"[:300])
 
 
 class ErroDeEnvio(Exception):
-    """Falha na entrega, ja' classificada em transitoria ou permanente."""
+    """Falha na entrega, com o desfecho ja' classificado."""
 
-    def __init__(self, mensagem: str, *, transitorio: bool, corpo: str = "",
+    def __init__(self, mensagem: str, *, desfecho: str, corpo: str = "",
                  status_http: int = 0) -> None:
         super().__init__(mensagem)
-        self.transitorio = transitorio
+        self.desfecho = desfecho
         self.corpo = corpo
         self.status_http = status_http
 
+    @property
+    def transitorio(self) -> bool:
+        return self.desfecho == Desfecho.TRANSITORIA
 
-def _procurar_stanza(no, profundidade: int = 0) -> str | None:
-    """O ``contextInfo.stanzaId`` em qualquer lugar da mensagem devolvida.
+
+def _stanzas(no, profundidade: int = 0, achados: list | None = None) -> list[tuple[int, str]]:
+    """Todos os ``contextInfo.stanzaId`` da resposta, com a profundidade.
 
     A citacao fica dentro do tipo da mensagem (``extendedTextMessage``,
-    ``imageMessage``...), e o tipo muda conforme o conteudo. Procurar pela
-    chave evita manter uma lista de tipos que o WhatsApp amplia sem avisar.
+    ``imageMessage``...) e versoes da Evolution devolvem a mensagem em niveis
+    diferentes. Procurar pela chave, em qualquer nivel, evita presumir a
+    estrutura. O mais raso e' o da mensagem enviada; os mais fundos sao de
+    mensagens que ela cita.
     """
-    if profundidade > 6:
-        return None
+    achados = [] if achados is None else achados
+    if profundidade > 8:
+        return achados
     if isinstance(no, dict):
         contexto = no.get("contextInfo")
         if isinstance(contexto, dict) and contexto.get("stanzaId"):
-            return str(contexto["stanzaId"])
+            achados.append((profundidade, str(contexto["stanzaId"])))
         for valor in no.values():
-            achado = _procurar_stanza(valor, profundidade + 1)
-            if achado:
-                return achado
-    return None
+            _stanzas(valor, profundidade + 1, achados)
+    elif isinstance(no, list):
+        for valor in no:
+            _stanzas(valor, profundidade + 1, achados)
+    return achados
+
+
+def _procurar_stanza(no) -> str | None:
+    achados = _stanzas(no)
+    return min(achados)[1] if achados else None
+
+
+def extrair_key_id(corpo) -> str:
+    """O ``key.id`` da mensagem criada -- na raiz ou dentro de ``data``.
+
+    Nada alem disso: se o id nao estiver onde a Evolution o poe, nao ha' prova
+    de entrega, e o desfecho fica incerto.
+    """
+    if not isinstance(corpo, dict):
+        return ""
+    for base in (corpo, corpo.get("data")):
+        if isinstance(base, dict) and isinstance(base.get("key"), dict):
+            valor = base["key"].get("id")
+            if isinstance(valor, str) and valor.strip():
+                return valor.strip()
+    return ""
 
 
 def conferir_citacao(corpo: dict, quote_message_id: str) -> str:
-    """Le' a resposta da API e diz o que aconteceu com a citacao.
+    """Le' a resposta REAL da API e diz o que aconteceu com a citacao.
 
-    * ``ok``          -- a mensagem criada aponta para o id pedido.
-    * ``not_applied`` -- a mensagem veio, mas sem citacao (a Evolution nao
-      achou o original e mandou solta) ou citando OUTRA mensagem.
-    * ``unverified``  -- a resposta nao traz a mensagem; nao da' para afirmar
-      nem negar. Nao e' inventado como sucesso: fica registrado assim.
+    * ``ok``          -- o ``stanzaId`` mais raso e' o id pedido;
+    * ``not_applied`` -- ha' ``stanzaId``, e ele aponta OUTRA mensagem;
+    * ``unverified``  -- nenhum ``stanzaId`` na resposta. Nao da' para afirmar
+      nem negar; nunca e' tratado como ``ok``.
     """
     if not quote_message_id:
         return QuoteStatus.NONE
-    mensagem = corpo.get("message") if isinstance(corpo, dict) else None
-    if not isinstance(mensagem, dict) or not mensagem:
+    stanza = _procurar_stanza(corpo)
+    if stanza is None:
         return QuoteStatus.UNVERIFIED
-    stanza = _procurar_stanza(mensagem)
-    if stanza == quote_message_id:
-        return QuoteStatus.OK
-    return QuoteStatus.NOT_APPLIED
+    return QuoteStatus.OK if stanza == quote_message_id else QuoteStatus.NOT_APPLIED
 
 
 def _id_da_midia(corpo: dict) -> str:
@@ -124,29 +264,6 @@ def _id_da_midia(corpo: dict) -> str:
             if isinstance(valor, dict):  # Buffer serializado
                 return str(valor.get("data", ""))[:88]
     return ""
-
-
-def classificar_resposta(status_http: int, corpo: str) -> tuple[bool, str]:
-    """Devolve ``(transitorio, motivo)`` para uma resposta que nao deu certo.
-
-    Separar isto do envio nao e' preciosismo: e' o que permite testar a
-    classificacao com uma tabela, sem servidor nenhum. Reenviar um erro
-    permanente enche o grupo de repeticao inutil; nao reenviar um transitorio
-    deixa o consultor sem resposta. Os dois erros ja' aconteceram.
-    """
-    trecho = (corpo or "")[:400]
-
-    if status_http == 503 and LICENCA_PENDENTE in (corpo or ""):
-        return False, ("a instancia da Evolution nao esta ativada -- abra "
-                       "/manager e faca a ativacao da licenca")
-    if status_http >= 500:
-        return True, f"a Evolution respondeu {status_http}: {trecho}"
-    if status_http == 429:
-        # Excesso de requisicoes e' transitorio por definicao.
-        return True, f"a Evolution pediu calma (429): {trecho}"
-    if status_http >= 400:
-        return False, f"a Evolution recusou ({status_http}): {trecho}"
-    return True, f"resposta inesperada ({status_http}): {trecho}"
 
 
 class EvolutionClient:
@@ -186,6 +303,20 @@ class EvolutionClient:
 
         self._status = WhatsAppStatus(chat_id=group_jid, chat_name=self.group_name)
         self._status_lock = threading.Lock()
+
+        # Ver ``diagnostico``. Nada aqui e' segredo: so' booleanos e estados.
+        self._diagnostico: dict = {
+            "evolution_url_configured": bool(self.base_url),
+            "evolution_instance": instance,
+            "group_configured": bool(group_jid),
+            "evolution_api_reachable": None,
+            "api_key_valid": None,
+            "instance_found": None,
+            "evolution_state": "unknown",
+            "webhook_configured": None,
+            "webhook_points_to_bot": None,
+            "checked_at": "",
+        }
 
         # Ver ``ja_enviado``.
         self._marcas_enviadas: list[str] = []
@@ -235,29 +366,38 @@ class EvolutionClient:
         return self._client
 
     def _post(self, rota: str, payload: dict) -> dict:
-        """POST que ou devolve o corpo, ou levanta ``ErroDeEnvio`` classificado."""
+        """POST que ou devolve o corpo com ``key``, ou levanta ``ErroDeEnvio`` classificado."""
         try:
             resposta = self._http().post(rota, json=payload)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
-            raise ErroDeEnvio(f"nao consegui falar com a Evolution: {exc}",
-                              transitorio=True) from exc
+            falha = classificar_falha_de_transporte(exc)
+            self._log("ERROR", f"Envio para a Evolution sem resposta: {falha.motivo}")
+            raise ErroDeEnvio(falha.motivo, desfecho=falha.desfecho) from exc
 
         corpo = resposta.text or ""
         if resposta.status_code >= 400:
-            transitorio, motivo = classificar_resposta(resposta.status_code, corpo)
+            falha = classificar_resposta(resposta.status_code, corpo,
+                                         com_citacao="quoted" in payload)
             # O corpo inteiro no log: a Evolution costuma explicar bem o que
             # recusou, e essa explicacao e' a diferenca entre consertar em um
             # minuto ou passar a noite adivinhando payload.
-            self._log("ERROR", f"Envio recusado pela Evolution: {motivo}")
-            raise ErroDeEnvio(motivo, transitorio=transitorio, corpo=corpo,
+            self._log("ERROR", f"Envio recusado pela Evolution [{falha.desfecho}]: "
+                               f"{falha.motivo}")
+            raise ErroDeEnvio(falha.motivo, desfecho=falha.desfecho, corpo=corpo,
                               status_http=resposta.status_code)
 
         try:
             dados = resposta.json()
         except ValueError:
-            dados = {}
+            dados = None
         if not isinstance(dados, dict):
-            dados = {}
+            # 2xx com corpo ilegivel (proxy devolvendo HTML, resposta cortada):
+            # a Evolution pode ter enviado. Incerto, nao "falhou".
+            raise ErroDeEnvio(
+                f"a Evolution respondeu {resposta.status_code} com um corpo ilegível; "
+                "a mensagem pode ter saído",
+                desfecho=Desfecho.INCERTA, corpo=corpo[:400],
+                status_http=resposta.status_code)
         dados.setdefault("_http_status", resposta.status_code)
         return dados
 
@@ -289,7 +429,7 @@ class EvolutionClient:
         self._set_status(state=DISCONNECTED)
 
     def _vigia_loop(self) -> None:
-        """Pergunta o estado da instancia de tempos em tempos.
+        """Pergunta o estado da instancia de tempos em tempos -- a primeira ja' no boot.
 
         O webhook ``CONNECTION_UPDATE`` avisa quando a conexao cai, mas so' se
         a Evolution conseguir nos alcancar. Se ela mesma estiver fora do ar,
@@ -297,24 +437,78 @@ class EvolutionClient:
         Esse foi exatamente o pior cenario da camada antiga: conectado na tela,
         mudo no grupo.
         """
-        while not self._parar.wait(self._INTERVALO_DO_STATUS):
+        ciclo = 0
+        while True:
             try:
                 self.atualizar_estado()
+                if ciclo % self._CICLOS_ENTRE_CONFERENCIAS_DO_WEBHOOK == 0:
+                    self.conferir_webhook()
             except Exception as exc:
                 self._set_status(state=DISCONNECTED, last_error=str(exc)[:200])
+            ciclo += 1
+            if self._parar.wait(self._INTERVALO_DO_STATUS):
+                return
+
+    #: O webhook muda pouco; conferir a cada ~5 min basta.
+    _CICLOS_ENTRE_CONFERENCIAS_DO_WEBHOOK = 15
+
+    def diagnostico(self) -> dict:
+        """Por que o bot esta' ligado e nao responde? Sem chave, sem token.
+
+        ``None`` = ainda nao deu para saber (nenhuma conferencia feita, ou a
+        Evolution nem respondeu).
+        """
+        with self._status_lock:
+            return dict(self._diagnostico)
+
+    def _anotar_diagnostico(self, **campos) -> None:
+        with self._status_lock:
+            self._diagnostico.update(campos, checked_at=now_iso())
 
     def atualizar_estado(self) -> str:
-        """Le ``/instance/connectionState`` e reflete no status."""
+        """Le ``/instance/connectionState`` e reflete no status e no diagnostico."""
         try:
             resposta = self._http().get(f"/instance/connectionState/{self.instance}")
-            dados = resposta.json() if resposta.status_code < 400 else {}
-        except (httpx.TimeoutException, httpx.TransportError, ValueError) as exc:
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            self._anotar_diagnostico(evolution_api_reachable=False, api_key_valid=None,
+                                     instance_found=None, evolution_state="unreachable")
             self._set_status(state=DISCONNECTED,
                              last_error=f"Evolution inacessível: {exc}"[:200])
             return DISCONNECTED
 
-        estado = ((dados.get("instance") or {}).get("state")
-                  or dados.get("state") or "").lower()
+        codigo = resposta.status_code
+        if codigo in (401, 403):
+            self._anotar_diagnostico(evolution_api_reachable=True, api_key_valid=False,
+                                     instance_found=None, evolution_state="unauthorized")
+            self._set_status(state=DISCONNECTED, last_poll=now_iso(),
+                             last_error=f"a Evolution recusou a chave ({codigo})")
+            return DISCONNECTED
+        if codigo == 404:
+            self._anotar_diagnostico(evolution_api_reachable=True, api_key_valid=True,
+                                     instance_found=False, evolution_state="not_found")
+            self._set_status(state=DISCONNECTED, last_poll=now_iso(),
+                             last_error=f"a instância '{self.instance}' não existe na Evolution")
+            return DISCONNECTED
+        if codigo >= 400:
+            licenca = LICENCA_PENDENTE in (resposta.text or "")
+            self._anotar_diagnostico(evolution_api_reachable=True, api_key_valid=None,
+                                     instance_found=None,
+                                     evolution_state="license_required" if licenca
+                                     else f"http_{codigo}")
+            self._set_status(state=DISCONNECTED, last_poll=now_iso(),
+                             last_error=("licença da Evolution não ativada (/manager)" if licenca
+                                         else f"a Evolution respondeu {codigo} ao estado"))
+            return DISCONNECTED
+        try:
+            dados = resposta.json()
+        except ValueError:
+            dados = {}
+        dados = dados if isinstance(dados, dict) else {}
+
+        estado = str((dados.get("instance") or {}).get("state")
+                     or dados.get("state") or "").lower()
+        self._anotar_diagnostico(evolution_api_reachable=True, api_key_valid=True,
+                                 instance_found=True, evolution_state=estado or "unknown")
         if estado == "open":
             self._set_status(state=CONNECTED, last_error="", last_poll=now_iso(),
                              chat_id=self.group_jid, chat_name=self.group_name)
@@ -324,6 +518,39 @@ class EvolutionClient:
             self._set_status(state=DISCONNECTED, last_poll=now_iso(),
                              last_error="instância desconectada")
         return estado
+
+    def conferir_webhook(self) -> bool | None:
+        """A instancia tem webhook ligado apontando para ``/webhook/whatsapp``?
+
+        Le' ``/webhook/find/<instancia>``. A resposta varia entre versoes; so'
+        se afirma ``True``/``False`` quando os campos ``enabled`` e ``url``
+        estao la'. Fora disso fica ``None`` ("nao deu para conferir"). A URL e
+        os cabecalhos (que levam o token) nunca vao para o diagnostico.
+        """
+        configurado: bool | None = None
+        aponta: bool | None = None
+        try:
+            resposta = self._http().get(f"/webhook/find/{self.instance}")
+        except (httpx.TimeoutException, httpx.TransportError):
+            resposta = None
+        if resposta is not None and resposta.status_code < 400:
+            bruto = (resposta.text or "").strip()
+            if bruto in ("", "null", "{}"):
+                configurado = False      # a instancia respondeu: nao ha' webhook
+            else:
+                try:
+                    dados = resposta.json()
+                except ValueError:
+                    dados = None
+                if isinstance(dados, dict) and isinstance(dados.get("webhook"), dict):
+                    dados = dados["webhook"]
+                if isinstance(dados, dict) and "url" in dados:
+                    url = str(dados.get("url") or "")
+                    configurado = bool(dados.get("enabled")) and bool(url)
+                    aponta = ("/webhook/whatsapp" in url) if url else False
+        self._anotar_diagnostico(webhook_configured=configurado,
+                                 webhook_points_to_bot=aponta)
+        return configurado
 
     def request_reconnect(self) -> None:
         try:
@@ -393,79 +620,98 @@ class EvolutionClient:
         """Um envio com a regra da citacao: FALHA DE QUOTE NAO E' FALHA DE RESPOSTA.
 
         1. tenta com ``quoted``;
-        2. se a API recusar de um jeito em que a citacao pode ser a causa,
-           manda de novo SEM ela, com a versao que leva o nome do consultor
-           (``alternativa`` = campo e texto);
+        2. SO' se a Evolution RECUSOU a citacao (``citacao_recusada``: 400/422
+           apontando o quoted -- prova de que nada saiu), manda de novo SEM
+           ela, com a versao que leva o nome do consultor;
         3. confere na resposta se a citacao realmente pegou.
 
-        Timeout, 429 e 5xx de indisponibilidade NAO disparam o passo 2: a
-        mensagem pode ter saido, e a mesma falha se repetiria sem citacao.
+        500, timeout, conexao caida e 2xx sem id NAO disparam o passo 2: a
+        primeira mensagem pode ter saido, e a segunda duplicaria a resposta.
         """
         campo, texto_alternativo = alternativa
+        citado = bool(citacao)
         if citacao:
             payload = {**payload, "quoted": citacao}
 
         quote_status = QuoteStatus.NONE
-        motivo_citacao = ""
+        quote_error = ""
         try:
             corpo = self._post(rota, payload)
-            if citacao:
-                quote_status = conferir_citacao(corpo, quote_message_id)
         except ErroDeEnvio as exc:
-            if not (citacao and exc.status_http in _CITACAO_PODE_SER_A_CAUSA):
-                return self._falha(exc, via=via, citacao=bool(citacao))
-            motivo_citacao = str(exc)
+            if not (citado and exc.desfecho == Desfecho.CITACAO_RECUSADA):
+                return self._falha(exc, via=via, citado=citado,
+                                   quote_message_id=quote_message_id)
+            quote_error = str(exc)[:300]
             self._log("WARNING",
-                      f"A Evolution recusou a citação de {quote_message_id} "
-                      f"(HTTP {exc.status_http}). Enviando sem citação, com o "
-                      "nome do consultor.")
+                      f"A Evolution RECUSOU a citação de {quote_message_id} "
+                      f"(HTTP {exc.status_http}); nada foi enviado. Enviando sem "
+                      "citação, com o nome do consultor.")
             sem = {k: v for k, v in payload.items() if k != "quoted"}
             if texto_alternativo:
                 sem[campo] = texto_alternativo
             try:
                 corpo = self._post(rota, sem)
             except ErroDeEnvio as exc2:
-                return self._falha(exc2, via=via, citacao=False)
+                return self._falha(exc2, via=via, citado=False, quote_message_id="",
+                                   quote_status=QuoteStatus.FALLBACK,
+                                   quote_error=quote_error)
             payload = sem
+            citado = False
             quote_status = QuoteStatus.FALLBACK
 
         http_status = int(corpo.pop("_http_status", 0) or 0)
-        enviado_id = str(((corpo.get("key") or {}).get("id") or ""))
-        texto_enviado = payload.get(campo, "")
-        evidencia = {"http_status": http_status,
-                     "corpo": _resumo(corpo),
+        enviado_id = extrair_key_id(corpo)
+        if citado:
+            # Sem key.id nao ha' mensagem provada -- muito menos citacao provada.
+            quote_status = (conferir_citacao(corpo, quote_message_id) if enviado_id
+                            else QuoteStatus.UNVERIFIED)
+        comum = dict(via=via, provider="evolution", quote_status=quote_status,
+                     http_status=http_status, quote_error=quote_error,
+                     quoted_message_id=quote_message_id if citado else "")
+        evidencia = {"http_status": http_status, "corpo": _resumo(corpo),
                      "quote_status": quote_status}
-        if motivo_citacao:
-            evidencia["motivo_citacao"] = motivo_citacao[:300]
+        if quote_error:
+            evidencia["motivo_citacao"] = quote_error
 
         if not enviado_id:
             # 2xx sem id nao e' prova de entrega -- e tambem nao e' prova de
-            # que NAO saiu. Nao inventar confirmacao, e nao reenviar sozinho:
-            # quem chama registra como entrega sem evidencia.
+            # que NAO saiu. Nao inventar confirmacao, e nao reenviar sozinho.
             return ResultadoEnvio(
-                ok=False, via=via, tipo_midia="nenhum",
-                motivo=f"a Evolution respondeu {http_status} sem key.id",
-                provider="evolution", quote_status=quote_status,
-                http_status=http_status, sem_prova=True,
-                evidencia={**evidencia, "transitorio": False, "sem_prova": True})
+                ok=False, tipo_midia="nenhum", desfecho=Desfecho.INCERTA, sem_prova=True,
+                motivo=f"a Evolution respondeu {http_status} sem key.id; a mensagem "
+                       "pode ter saído",
+                evidencia={**evidencia, "transitorio": False, "sem_prova": True,
+                           "desfecho": Desfecho.INCERTA},
+                **comum)
 
-        self._lembrar_envio(texto_enviado)
+        self._lembrar_envio(payload.get(campo, ""))
         return ResultadoEnvio(
-            ok=True, via=via, tipo_midia=tipo_midia,
+            ok=True, tipo_midia=tipo_midia, desfecho=Desfecho.ENTREGUE,
             quoted_ok=quote_status in (QuoteStatus.OK, QuoteStatus.UNVERIFIED),
-            provider="evolution", quote_status=quote_status,
-            enviado_id=enviado_id, http_status=http_status,
+            enviado_id=enviado_id,
             media_id=_id_da_midia(corpo) if tipo_midia == "imagem" else "",
-            evidencia={**evidencia, "key_id": enviado_id})
+            evidencia={**evidencia, "key_id": enviado_id, "desfecho": Desfecho.ENTREGUE},
+            **comum)
 
     @staticmethod
-    def _falha(exc: ErroDeEnvio, *, via: str, citacao: bool) -> ResultadoEnvio:
+    def _falha(exc: ErroDeEnvio, *, via: str, citado: bool, quote_message_id: str,
+               quote_status: str | None = None, quote_error: str = "") -> ResultadoEnvio:
+        """Envio sem prova de entrega. O desfecho diz se a mensagem PODE ter saido."""
+        incerta = exc.desfecho == Desfecho.INCERTA
+        if quote_status is None:
+            # Requisicao que nao foi processada nao avaliou citacao nenhuma ("").
+            # Uma incerta pode ter saido COM a citacao: nao da' para provar.
+            quote_status = ((QuoteStatus.UNVERIFIED if incerta else "") if citado
+                            else QuoteStatus.NONE)
         return ResultadoEnvio(
             ok=False, via=via, tipo_midia="nenhum", motivo=str(exc),
-            provider="evolution", transitorio=exc.transitorio,
-            http_status=exc.status_http,
-            quote_status=QuoteStatus.NONE if not citacao else "",
-            evidencia={"transitorio": exc.transitorio, "corpo": exc.corpo[:400],
+            provider="evolution", desfecho=exc.desfecho,
+            transitorio=exc.transitorio, sem_prova=incerta,
+            http_status=exc.status_http, quote_status=quote_status,
+            quoted_message_id=quote_message_id if citado else "",
+            quote_error=quote_error,
+            evidencia={"transitorio": exc.transitorio, "sem_prova": incerta,
+                       "desfecho": exc.desfecho, "corpo": exc.corpo[:400],
                        "http_status": exc.status_http})
 
     # -------------------------------------------------------------------- envio
@@ -485,6 +731,7 @@ class EvolutionClient:
             # correlacao se perdeu antes daqui, e adivinhar o chat seria
             # exatamente o defeito que esta camada existe para encerrar.
             return ResultadoEnvio(ok=False, via="texto", provider="evolution",
+                                  desfecho=Desfecho.PERMANENTE,
                                   motivo="envio sem chat_id: a origem da solicitação se perdeu",
                                   evidencia={"transitorio": False})
 
@@ -507,6 +754,7 @@ class EvolutionClient:
         """Imagem com legenda -- inline, nunca documento."""
         if not chat_id:
             return ResultadoEnvio(ok=False, via="imagem", provider="evolution",
+                                  desfecho=Desfecho.PERMANENTE,
                                   motivo="envio sem chat_id: a origem da solicitação se perdeu",
                                   evidencia={"transitorio": False})
 
@@ -516,6 +764,7 @@ class EvolutionClient:
         except PngInvalido as exc:
             return ResultadoEnvio(ok=False, via="imagem", tipo_midia="nenhum",
                                   provider="evolution", motivo=str(exc),
+                                  desfecho=Desfecho.RECUSADA,
                                   evidencia={"transitorio": False})
 
         citacao = self._citacao(quote_message_id, chat_id, quote_text, quote_participant)

@@ -28,13 +28,14 @@ from .clock import iso_atras, now_iso, parse_iso, utc_now
 from .config import ROOT, Config
 from .consultants import ConsultantRepository
 from .db import (ENTRADA_EXPIRADA, ENTRADA_IGNORADA, ENTRADA_RECEBIDA,
-                 ENTRADA_RECUSADA, ENTRADA_SOLICITACAO, Database)
+                 ENTRADA_RECUSADA, ENTRADA_SOLICITACAO, ENVIO_EM_CURSO, Database)
 from .events import EventHub
 from .jobs import QueueService, depois_de, estado_final
 from .models import (
     ParsedRequest,
     STAGE_LABELS,
     Delivery,
+    Desfecho,
     Entrega,
     IncomingMessage,
     QuoteStatus,
@@ -359,6 +360,16 @@ class BotManager:
         if not self._reivindicar_reenvio(linha):
             return   # outra varredura (ou a entrega original) ja' esta' nela
 
+        # O banco primeiro: uma saida ja' entregue (a gravacao do desfecho
+        # falhou) ou uma chamada que comecou e nao terminou (``sending``) proibem
+        # o reenvio. Mandar de novo nesses casos e' duplicar no grupo.
+        situacao, _saida = self.queue.situacao_do_envio(int(linha.get("id") or 0))
+        if situacao != "nada":
+            self.queue._resolver_entrega_interrompida(
+                linha, "o reenvio encontrou um envio anterior",
+                manter_status=linha.get("stage") not in (Stage.DELIVERY_RETRY, Stage.REPLYING))
+            return
+
         # Trava contra reenvio duplicado.
         #
         # Se a verificação de entrega falhar por qualquer motivo — seletor
@@ -555,6 +566,7 @@ class BotManager:
         Levanta excecao se nao conseguir gravar; a rota devolve erro e a
         Evolution reentrega, que e' exatamente o que se quer.
         """
+        self.registrar_webhook()
         registro = self._registrar_entrada(message)
         if not registro["novo"]:
             self.log(
@@ -790,8 +802,8 @@ class BotManager:
 
     def _gravar_solicitacao(self, message: IncomingMessage, consultor: "Consultor",
                             parsed: ParsedRequest, effective_name: str,
-                            entrada_id: int | None = None) -> tuple[str, int]:
-        """Grava a solicitacao e devolve (request_id, simulation_id).
+                            entrada_id: int | None = None) -> tuple[str, int] | None:
+        """Grava a solicitacao e devolve (request_id, simulation_id) -- ou None.
 
         O ``request_id`` nasce aqui e acompanha a solicitacao ate' a resposta:
         e' ele que liga a mensagem do WhatsApp, a linha do banco, os eventos
@@ -800,26 +812,25 @@ class BotManager:
         A solicitacao e o vinculo com a mensagem sao gravados na MESMA
         transacao: uma queda entre os dois deixava a mensagem "sem tratar" e
         a solicitacao na fila, e a retomada criaria uma segunda.
+
+        None = esta mensagem ja' tem solicitacao. A checagem roda DENTRO da
+        transacao de escrita: duas leituras da mesma mensagem ao mesmo tempo
+        (retomada + reentrega) nao criam duas simulacoes. O REQ reservado
+        antes fica sem uso -- um numero pulado, nunca um pedido duplicado.
         """
         request_id = self._next_request_id()
         dados = self._linha_da_solicitacao(request_id, message, consultor,
                                            parsed, effective_name)
-        colunas = list(dados)
         with self.db.write() as conn:
-            simulation_id = conn.execute(
-                f"INSERT INTO simulations ({','.join(colunas)}) "
-                f"VALUES ({','.join('?' for _ in colunas)})",
-                tuple(dados.values()),
-            ).lastrowid
-            if entrada_id:
-                conn.execute(
-                    "UPDATE messages SET simulation_id=?, request_id=?, status=? WHERE id=?",
-                    (simulation_id, request_id, ENTRADA_SOLICITACAO, entrada_id))
-            elif message.message_id:
-                conn.execute(
-                    "UPDATE messages SET simulation_id=?, request_id=? "
-                    " WHERE direction='in' AND wa_message_id=? AND simulation_id IS NULL",
-                    (simulation_id, request_id, message.message_id))
+            existente, simulation_id = self._inserir_solicitacao(
+                conn, dados, message, entrada_id)
+        if existente is not None:
+            # Fora da transacao: o log grava no banco e abriria outra.
+            self.log("WARNING", "whatsapp",
+                     f"Mensagem {message.message_id} já tinha gerado "
+                     f"{existente['request_id']}; não crio outra.",
+                     request_id=existente["request_id"])
+            return None
         self.hub.publish(
             "request_created",
             {
@@ -839,6 +850,43 @@ class BotManager:
             chat_id=message.chat_id,
         )
         return request_id, simulation_id
+
+    @staticmethod
+    def _inserir_solicitacao(conn, dados: dict, message: IncomingMessage,
+                             entrada_id: int | None) -> tuple[dict | None, int | None]:
+        """A checagem de duplicidade e a insercao, na MESMA transacao.
+
+        Devolve ``(existente, simulation_id)``: com ``existente`` preenchido,
+        nada foi inserido -- esta mensagem ja' tem solicitacao.
+        """
+        existente = conn.execute(
+            "SELECT id, request_id FROM simulations "
+            " WHERE source_message_id=? AND COALESCE(chat_id,'')=? LIMIT 1",
+            (message.message_id, message.chat_id or ""),
+        ).fetchone() if message.message_id else None
+        if existente is not None:
+            if entrada_id:
+                conn.execute(
+                    "UPDATE messages SET simulation_id=?, request_id=?, status=? WHERE id=?",
+                    (existente["id"], existente["request_id"], ENTRADA_SOLICITACAO, entrada_id))
+            return dict(existente), None
+
+        colunas = list(dados)
+        simulation_id = conn.execute(
+            f"INSERT INTO simulations ({','.join(colunas)}) "
+            f"VALUES ({','.join('?' for _ in colunas)})",
+            tuple(dados.values()),
+        ).lastrowid
+        if entrada_id:
+            conn.execute(
+                "UPDATE messages SET simulation_id=?, request_id=?, status=? WHERE id=?",
+                (simulation_id, dados["request_id"], ENTRADA_SOLICITACAO, entrada_id))
+        elif message.message_id:
+            conn.execute(
+                "UPDATE messages SET simulation_id=?, request_id=? "
+                " WHERE direction='in' AND wa_message_id=? AND simulation_id IS NULL",
+                (simulation_id, dados["request_id"], message.message_id))
+        return None, simulation_id
 
     def _linha_da_solicitacao(self, request_id: str, message: IncomingMessage,
                               consultor: "Consultor", parsed: ParsedRequest,
@@ -962,37 +1010,42 @@ class BotManager:
                 extra={"bank": parsed.bank})
             return
 
-        request_id, simulation_id = self._gravar_solicitacao(
+        criada = self._gravar_solicitacao(
             message, consultor, parsed, effective_name, entrada_id)
-        self._enfileirar(message, consultor, parsed, effective_name,
-                         request_id, simulation_id)
+        if criada:
+            self._enfileirar(message, consultor, parsed, effective_name, *criada)
 
     def _next_request_id(self) -> str:
         return f"REQ{self.db.bump_meta('request_seq', 1):06d}"
 
     # -------------------------------------------------------------- saida
     def _anotar_citacao(self, resultado, request_id: str, consultor: str) -> None:
-        """Registra quando a resposta saiu SOLTA, sem citar o pedido.
+        """Registra quando a resposta saiu SEM a citacao pedida.
 
         Nao e' so' log: e' o unico sinal de que a citacao parou de funcionar.
         Ela falhar nao segura a resposta -- o consultor recebe do mesmo jeito,
         com o nome dele no fim -- entao sem esta linha o defeito voltaria a
         ser invisivel, que e' exatamente como ele durou tanto.
+
+        E' sobre a CITACAO. Se a entrega falhou ou ficou incerta, quem diz e'
+        outra linha de log -- as duas coisas nao se misturam.
         """
+        if not bool(resultado):
+            return
         situacao = getattr(resultado, "quote_status", "") or ""
         if situacao == QuoteStatus.NOT_APPLIED:
             self.log(
                 "WARNING", "whatsapp",
-                "A API entregou a resposta SEM a citação pedida (a mensagem "
-                "original pode não estar no histórico da instância). A resposta "
-                "chegou, mas solta no grupo.",
+                "Citação NÃO aplicada: a API provou que a resposta saiu citando "
+                "outra mensagem. A resposta chegou; não mando uma segunda.",
                 request_id=request_id, consultant=consultor,
             )
-        elif situacao != QuoteStatus.NONE and getattr(resultado, "quoted_ok", None) is False:
+        elif situacao == QuoteStatus.FALLBACK or (
+                situacao != QuoteStatus.NONE and getattr(resultado, "quoted_ok", None) is False):
             self.log(
                 "WARNING", "whatsapp",
-                "Resposta enviada SEM citação (segue com o nome do consultor "
-                "no fim). Se isto se repetir, o menu do WhatsApp mudou.",
+                "Citação RECUSADA: a resposta foi entregue sem citação, com o nome "
+                "do consultor no fim. Falha de citação, não de entrega.",
                 request_id=request_id, consultant=consultor,
             )
 
@@ -1004,36 +1057,80 @@ class BotManager:
                      f"{job.request_id}: não consegui registrar a etapa {stage}: {_curto(exc)}",
                      request_id=job.request_id)
 
-    def _evidencia(self, resultado, erro: str) -> dict:
+    def _evidencia(self, resultado, erro: str, message: IncomingMessage) -> dict:
         """O que a camada devolveu, num formato so' -- para o banco e o log.
 
-        Exceção e retorno booleano (camada antiga, dublês) nao dizem se a
-        falha e' passageira; na duvida conta como transitoria, porque desistir
-        de uma entrega que ainda daria certo deixa o consultor sem resposta.
+        A camada Evolution classifica cada envio (``desfecho``). Excecao e
+        retorno booleano (camada dom, dublês) nao dizem nada: contam como
+        transitorios, que e' o comportamento antigo dessas camadas.
         """
         tipado = hasattr(resultado, "evidencia")
         evidencia = (getattr(resultado, "evidencia", None) or {}) if tipado else {}
         ok = bool(resultado)
+        desfecho = (getattr(resultado, "desfecho", "") or evidencia.get("desfecho", "")) if tipado else ""
         if ok:
-            transitorio = False
+            transitorio, sem_prova = False, False
+            desfecho = desfecho or Desfecho.ENTREGUE
         elif tipado:
             transitorio = bool(getattr(resultado, "transitorio", False)
                                or evidencia.get("transitorio", False))
+            sem_prova = bool(getattr(resultado, "sem_prova", False)
+                             or evidencia.get("sem_prova", False))
         else:
-            transitorio = True
+            transitorio, sem_prova = True, False
+        quote_status = getattr(resultado, "quote_status", "") or ""
+        if desfecho and tipado:
+            # A camada classificou: ela sabe qual id foi na requisicao final.
+            citado = getattr(resultado, "quoted_message_id", "") or ""
+        else:
+            citado = (message.message_id if quote_status in
+                      (QuoteStatus.OK, QuoteStatus.UNVERIFIED) else "")
         return {
             "provider": (getattr(resultado, "provider", "") or self.config.whatsapp_mode),
-            "quote_status": getattr(resultado, "quote_status", "") or "",
-            "enviado_id": self._prova_de_entrega(resultado),
+            "desfecho": desfecho,
+            "quote_status": quote_status,
+            "quoted_message_id": citado,
+            "quote_error": (getattr(resultado, "quote_error", "") or "") if tipado else "",
+            "enviado_id": self._prova_de_entrega(resultado) if ok else "",
             "http_status": int(getattr(resultado, "http_status", 0)
                                or evidencia.get("http_status", 0) or 0),
             "transitorio": transitorio,
-            "sem_prova": bool(getattr(resultado, "sem_prova", False)
-                              or evidencia.get("sem_prova", False)),
+            "sem_prova": sem_prova,
             "media_id": getattr(resultado, "media_id", "") or "",
             "resposta": str(evidencia.get("corpo") or "")[:400],
             "motivo": erro,
         }
+
+    @staticmethod
+    def _status_da_mensagem(ok: bool, evid: dict, status_ok: str) -> str:
+        if ok:
+            return status_ok
+        return Delivery.UNCONFIRMED if evid["sem_prova"] else "failed"
+
+    def _log_de_envio(self, tipo: str, request_id: str, message: IncomingMessage,
+                      evid: dict, tentativa: int, ok: bool, consultor: str) -> None:
+        """Uma linha por envio com tudo que investiga um incidente sem abrir o banco."""
+        if ok:
+            nivel, resultado = "INFO", "entregue"
+        elif evid["sem_prova"]:
+            nivel, resultado = "WARNING", "incerta"
+        elif evid["transitorio"]:
+            nivel, resultado = "WARNING", evid["desfecho"] or "transitoria"
+        else:
+            nivel, resultado = "ERROR", evid["desfecho"] or "falhou"
+        motivo = f" motivo={evid['motivo']}" if evid["motivo"] else ""
+        citacao = f" quote_error={evid['quote_error']}" if evid["quote_error"] else ""
+        self.log(
+            nivel, "whatsapp",
+            f"{request_id or 'sem REQ'} envio={tipo} tentativa={tentativa} "
+            f"provider={evid['provider']} http={evid['http_status'] or '-'} "
+            f"desfecho={resultado} origin_message_id={message.message_id or '-'} "
+            f"quote_message_id={evid['quoted_message_id'] or '-'} "
+            f"quote_participant={message.participant or '-'} "
+            f"quote_status={evid['quote_status'] or '-'} "
+            f"sent_message_id={evid['enviado_id'] or '-'}{motivo}{citacao}",
+            request_id=request_id, consultant=consultor,
+        )
 
     @staticmethod
     def _versao_que_saiu(resultado, com_citacao: str, sem_citacao: str) -> str:
@@ -1069,8 +1166,29 @@ class BotManager:
 
         ``registro``, quando passado, recebe a evidencia do envio -- quem
         decide o desfecho da entrega (reenviar, desistir) precisa dela.
+
+        A linha do envio e' gravada ANTES de chamar a API, como ``sending``.
+        Se o processo cair durante a chamada, e' essa linha que diz ao proximo
+        boot que a mensagem PODE ter saido -- e que reenviar duplicaria.
         """
         registro = registro if registro is not None else {}
+        linha_id = self.db.insert("messages", {
+            "simulation_id": simulation_id,
+            "request_id": request_id,
+            "direction": "out",
+            "kind": "text",
+            "chat_id": message.chat_id,
+            "chat_name": message.chat_name,
+            "consultant_id": consultant_id,
+            "consultant_name": consultant_name,
+            "sender_id": message.sender_id,
+            "text": text,
+            "status": ENVIO_EM_CURSO,
+            "provider": self.config.whatsapp_mode,
+            "attempt": tentativa,
+            "origin_message_id": message.message_id,
+            "created_at": now_iso(),
+        })
         ok = False
         error = ""
         resultado = None
@@ -1088,52 +1206,28 @@ class BotManager:
             if not ok:
                 error = (getattr(resultado, "motivo", "") or
                          "a camada de WhatsApp não confirmou o envio")[:240]
-                self.log(
-                    "ERROR", "whatsapp",
-                    f"Falha ao enviar resposta: {error}",
-                    request_id=request_id, consultant=consultant_name,
-                )
             self._anotar_citacao(resultado, request_id, consultant_name)
         except Exception as exc:
             error = str(exc)[:240] or exc.__class__.__name__
-            self.log(
-                "ERROR", "whatsapp",
-                f"Falha ao enviar resposta: {error}",
-                request_id=request_id, consultant=consultant_name,
-            )
 
-        evid = self._evidencia(resultado, error)
+        evid = self._evidencia(resultado, error, message)
         registro.update(evid, ok=ok)
         saiu = self._versao_que_saiu(resultado, text, texto_sem_citacao)
+        self._log_de_envio("texto", request_id, message, evid, tentativa, ok, consultant_name)
 
-        self.db.insert(
-            "messages",
-            {
-                "simulation_id": simulation_id,
-                "request_id": request_id,
-                "direction": "out",
-                "kind": "text",
-                "chat_id": message.chat_id,
-                "chat_name": message.chat_name,
-                "consultant_id": consultant_id,
-                "consultant_name": consultant_name,
-                "sender_id": message.sender_id,
-                "text": saiu,
-                "wa_message_id": evid["enviado_id"],
-                "status": (status if ok else
-                           (Delivery.UNCONFIRMED if evid["sem_prova"] else "failed")),
-                "provider": evid["provider"],
-                "attempt": tentativa,
-                "origin_message_id": message.message_id,
-                "quoted_message_id": (message.message_id if evid["quote_status"] in
-                                      (QuoteStatus.OK, QuoteStatus.UNVERIFIED) else ""),
-                "quote_status": evid["quote_status"],
-                "http_status": evid["http_status"] or None,
-                "error": error,
-                "response_excerpt": evid["resposta"],
-                "created_at": now_iso(),
-            },
-        )
+        self.db.update("messages", {
+            "text": saiu,
+            "wa_message_id": evid["enviado_id"],
+            "status": self._status_da_mensagem(ok, evid, status),
+            "provider": evid["provider"],
+            "desfecho": evid["desfecho"],
+            "quoted_message_id": evid["quoted_message_id"],
+            "quote_status": evid["quote_status"],
+            "quote_error": evid["quote_error"][:300],
+            "http_status": evid["http_status"] or None,
+            "error": error,
+            "response_excerpt": evid["resposta"],
+        }, {"id": linha_id})
         if ok:
             sent = self.db.bump_meta("wa_sent", 1)
             self.hub.publish(
@@ -1161,6 +1255,7 @@ class BotManager:
                 chat_id=message.chat_id,
             )
         else:
+            incerta = evid["sem_prova"]
             self.hub.publish(
                 "message_failed",
                 {
@@ -1168,13 +1263,16 @@ class BotManager:
                     "simulation_id": simulation_id,
                     "consultant": consultant_name,
                     "error": error or "WhatsApp indisponível",
+                    "desfecho": evid["desfecho"],
                     "retryable": evid["transitorio"],
+                    "uncertain": incerta,
                     "http_status": evid["http_status"],
                     "attempt": tentativa,
                 },
                 stage=Stage.ERROR,
-                level="error",
-                title="Falha ao responder",
+                level="warning" if incerta else "error",
+                title=("Entrega incerta — verificar WhatsApp" if incerta
+                       else "Falha ao responder"),
                 detail=error or "WhatsApp indisponível",
                 request_id=request_id,
                 simulation_id=simulation_id,
@@ -1189,12 +1287,15 @@ class BotManager:
         As regras, na ordem em que valem:
 
         * FALHA DA IMAGEM NAO E' FALHA DO RESULTADO: render, PNG invalido ou
-          envio recusado caem para o texto.
+          envio que PROVADAMENTE nao saiu caem para o texto.
         * FALHA DE QUOTE NAO E' FALHA DE RESPOSTA: resolvida na camada, que
-          manda sem citacao e com o nome do consultor.
-        * 2xx sem id nao vira texto por cima: a imagem pode ter chegado, e o
-          consultor receberia duas respostas. Fica "sem confirmacao".
-        * Falha passageira fica para o reenvio, no MESMO request_id.
+          manda sem citacao e com o nome do consultor -- so' quando a API
+          recusou a citacao de forma explicita.
+        * ENVIO INCERTO NAO GANHA SEGUNDA MENSAGEM: 500, timeout depois de
+          enviar, 2xx sem id. A imagem pode ter chegado; texto por cima
+          duplicaria. Fica ``unconfirmed`` -- verificar no WhatsApp.
+        * Falha que provadamente nao enviou nada fica para o reenvio, no MESMO
+          request_id.
         """
         job = result.job
         registro_img: dict = {}
@@ -1205,14 +1306,9 @@ class BotManager:
             media_status = registro_img.get("media_status") or (
                 "ok" if enviado_imagem else "send_failed")
 
-        if enviado_imagem:
-            entrega = Entrega(Delivery.DELIVERED, enviado_id=registro_img.get("enviado_id", ""),
-                              quote_status=registro_img.get("quote_status", ""),
-                              media_status="ok", kind="image")
-        elif registro_img.get("sem_prova"):
-            entrega = Entrega(Delivery.UNCONFIRMED, motivo=registro_img.get("motivo", ""),
-                              quote_status=registro_img.get("quote_status", ""),
-                              media_status=media_status, kind="image")
+        if enviado_imagem or registro_img.get("sem_prova"):
+            situacao = Delivery.DELIVERED if enviado_imagem else Delivery.UNCONFIRMED
+            entrega = self._entrega_de(situacao, registro_img, media_status, "image")
         else:
             if media_status in ("render_failed", "invalid"):
                 # A imagem nem chegou a subir: a etapa ainda diz "gerando imagem".
@@ -1241,14 +1337,23 @@ class BotManager:
                 situacao = Delivery.RETRYING
             else:
                 situacao = Delivery.FAILED
-            entrega = Entrega(situacao, motivo=registro_txt.get("motivo", ""),
-                              enviado_id=registro_txt.get("enviado_id", ""),
-                              quote_status=registro_txt.get("quote_status", ""),
-                              media_status=media_status, kind="text")
+            entrega = self._entrega_de(situacao, registro_txt, media_status, "text")
 
         self._registrar_entrega(job, result, entrega)
         self._metrics_dirty.set()
         return entrega
+
+    @staticmethod
+    def _entrega_de(situacao: str, registro: dict, media_status: str, kind: str,
+                    tentativa: int = 1) -> Entrega:
+        return Entrega(situacao, motivo=registro.get("motivo", "") or "",
+                       enviado_id=registro.get("enviado_id", "") or "",
+                       quote_status=registro.get("quote_status", "") or "",
+                       media_status=media_status, kind=kind, tentativa=tentativa,
+                       desfecho=registro.get("desfecho", "") or "",
+                       http_status=int(registro.get("http_status") or 0),
+                       quoted_message_id=registro.get("quoted_message_id", "") or "",
+                       quote_error=registro.get("quote_error", "") or "")
 
     def _registrar_entrega(self, job: SimulationJob, result: SimulationResult,
                            entrega: Entrega) -> None:
@@ -1265,18 +1370,26 @@ class BotManager:
             "status": status,
             "delivery_status": entrega.status,
             "quote_status": entrega.quote_status,
+            "quote_error": entrega.quote_error[:300],
             "media_status": entrega.media_status,
             "updated_at": agora,
         }
         resumo = (f"{entrega.kind or '?'} · citação {entrega.quote_status or '?'} · "
                   f"imagem {entrega.media_status or '?'}")
+        evidencia = (f"attempt={entrega.tentativa} origin_message_id="
+                     f"{job.message.message_id or '-'} quoted_message_id="
+                     f"{entrega.quoted_message_id or '-'} http={entrega.http_status or '-'} "
+                     f"delivery_status={entrega.status} quote_status="
+                     f"{entrega.quote_status or '-'} erro={entrega.motivo or '-'}")
         comum = dict(request_id=job.request_id, simulation_id=job.simulation_id,
                      consultant_name=consultor, chat_id=job.message.chat_id)
         payload = {"request_id": job.request_id, "simulation_id": job.simulation_id,
                    "origin_message_id": job.message.message_id,
-                   "chat_id": job.message.chat_id,
+                   "quoted_message_id": entrega.quoted_message_id,
+                   "chat_id": job.message.chat_id, "attempt": entrega.tentativa,
                    "delivery_status": entrega.status, "kind": entrega.kind,
-                   "quote_status": entrega.quote_status,
+                   "desfecho": entrega.desfecho, "http_status": entrega.http_status,
+                   "quote_status": entrega.quote_status, "quote_error": entrega.quote_error,
                    "media_status": entrega.media_status,
                    "sent_message_id": entrega.enviado_id, "reason": entrega.motivo}
 
@@ -1292,14 +1405,14 @@ class BotManager:
                              level="success" if result.ok else "warning",
                              title="Resposta entregue", detail=resumo, **comum)
         elif entrega.status == Delivery.UNCONFIRMED:
-            campos.update(stage=Stage.DELIVERY_UNCONFIRMED, delivery_error=entrega.motivo[:240])
+            campos.update(stage=Stage.DELIVERY_UNCONFIRMED, sent_message_id="",
+                          delivery_error=entrega.motivo[:240])
             self.log("WARNING", "whatsapp",
-                     f"{job.request_id}: a API aceitou a resposta ({entrega.kind}) mas não "
-                     f"devolveu o id da mensagem ({entrega.motivo}). Não vou reenviar "
-                     "sozinho para não duplicar; confira o grupo.",
+                     f"{job.request_id}: Entrega incerta — verificar WhatsApp. {evidencia}. "
+                     "A primeira pode ter chegado: não reenvio sozinho para não duplicar.",
                      request_id=job.request_id, consultant=consultor)
             self.hub.publish("delivery_unconfirmed", payload, stage=Stage.DELIVERY_UNCONFIRMED,
-                             level="warning", title="Entrega sem confirmação",
+                             level="warning", title="Entrega incerta — verificar WhatsApp",
                              detail=entrega.motivo, **comum)
         elif entrega.status == Delivery.RETRYING:
             campos.update(stage=Stage.DELIVERY_RETRY, delivery_error=entrega.motivo[:240],
@@ -1308,9 +1421,9 @@ class BotManager:
             # no painel e o consultor nunca era avisado. Um resultado que nao
             # chega vale o mesmo que nao ter simulado.
             self.log("WARNING", "whatsapp",
-                     f"{job.request_id}: resultado pronto mas não entregue "
-                     f"({entrega.motivo or 'sem motivo'}). Vou tentar reenviar quando "
-                     "o WhatsApp voltar, na mesma solicitação.",
+                     f"{job.request_id}: resultado pronto mas não entregue; nada saiu "
+                     f"({evidencia}). Vou tentar reenviar quando o WhatsApp voltar, na "
+                     "mesma solicitação.",
                      request_id=job.request_id, consultant=consultor)
             self.hub.publish("delivery_retry", payload, stage=Stage.DELIVERY_RETRY,
                              level="warning", title="Reenvio pendente",
@@ -1319,7 +1432,7 @@ class BotManager:
             campos.update(stage=Stage.DELIVERY_FAILED, delivery_error=entrega.motivo[:240])
             self.log("ERROR", "whatsapp",
                      f"{job.request_id}: a entrega falhou de um jeito que repetir não "
-                     f"resolve ({entrega.motivo}). O resultado está no painel.",
+                     f"resolve ({evidencia}). O resultado está no painel.",
                      request_id=job.request_id, consultant=consultor)
             self.hub.publish("delivery_failed", payload, stage=Stage.DELIVERY_FAILED,
                              level="error", title="Entrega falhou",
@@ -1376,8 +1489,10 @@ class BotManager:
                            registro: dict | None = None, tentativa: int = 1) -> bool:
         """Responde com a imagem dos cards + quanto libera.
 
-        Qualquer falha aqui volta False e o chamador cai para a resposta em
-        texto. O consultor nunca fica sem resposta por causa da imagem.
+        False quando a imagem nao saiu COM PROVA. Quem chama olha ``registro``:
+        so' cai para texto se ``sem_prova`` for falso -- ou seja, se a imagem
+        provadamente nao saiu. O consultor nunca fica sem resposta por causa
+        da imagem, e nunca recebe duas por causa da incerteza.
         """
         registro = registro if registro is not None else {}
         job = result.job
@@ -1389,14 +1504,35 @@ class BotManager:
             return False
         self._etapa(job, Stage.REPLYING)
 
+        com_citacao, sem_citacao = mensagens.duas_versoes(
+            mensagens.legenda, result, job.request_id, consultor=consultant)
+        # ANTES da chamada: se o processo cair durante o envio, esta linha e' a
+        # prova de que a imagem PODE ter saido.
+        linha_id = self.db.insert("messages", {
+            "simulation_id": job.simulation_id,
+            "request_id": job.request_id,
+            "direction": "out",
+            "kind": "image",
+            "chat_id": job.message.chat_id,
+            "chat_name": job.message.chat_name,
+            "consultant_id": job.consultant_id,
+            "consultant_name": consultant,
+            "sender_id": job.message.sender_id,
+            "text": com_citacao,
+            "media_path": str(destino),
+            "status": ENVIO_EM_CURSO,
+            "provider": self.config.whatsapp_mode,
+            "attempt": tentativa,
+            "origin_message_id": job.message.message_id,
+            "created_at": now_iso(),
+        })
+
         # As duas camadas avisam de falha de jeitos diferentes: a do navegador
         # LEVANTA excecao, a da Evolution DEVOLVE ok=False (ela tem a resposta
         # HTTP para explicar o motivo, e nao ha' por que transformar isso em
         # excecao). Tratar so' um dos dois faria a queda para texto -- a rede
         # de seguranca que garante resposta ao consultor -- parar de funcionar
         # justamente na camada nova.
-        com_citacao, sem_citacao = mensagens.duas_versoes(
-            mensagens.legenda, result, job.request_id, consultor=consultant)
         envio = None
         try:
             envio = self.whatsapp.send_image(
@@ -1414,53 +1550,43 @@ class BotManager:
         else:
             motivo = "" if envio else (getattr(envio, "motivo", "") or "a camada não explicou")
 
-        evid = self._evidencia(envio, motivo)
+        evid = self._evidencia(envio, motivo, job.message)
         registro.update(evid, ok=bool(envio))
+        # A legenda que REALMENTE saiu: com citação sai a curta, sem citação
+        # sai a que leva o nome do consultor. Gravar a versão errada faria o
+        # painel discordar do grupo.
         saiu = self._versao_que_saiu(envio, com_citacao, sem_citacao)
-        linha = {
-            "simulation_id": job.simulation_id,
-            "request_id": job.request_id,
-            "direction": "out",
-            "kind": "image",
-            "wa_message_id": evid["enviado_id"],
-            "chat_id": job.message.chat_id,
-            "chat_name": job.message.chat_name,
-            "consultant_id": job.consultant_id,
-            "consultant_name": consultant,
-            "sender_id": job.message.sender_id,
-            # A legenda que REALMENTE saiu: com citação sai a curta, sem
-            # citação sai a que leva o nome do consultor. Gravar a versão
-            # errada faria o painel discordar do grupo.
+        self._log_de_envio("imagem", job.request_id, job.message, evid, tentativa,
+                           bool(envio), consultant)
+        final = {
             "text": saiu,
-            "media_path": str(destino),
+            "wa_message_id": evid["enviado_id"],
             "provider": evid["provider"],
-            "attempt": tentativa,
-            "origin_message_id": job.message.message_id,
-            "quoted_message_id": (job.message.message_id if evid["quote_status"] in
-                                  (QuoteStatus.OK, QuoteStatus.UNVERIFIED) else ""),
+            "desfecho": evid["desfecho"],
+            "quoted_message_id": evid["quoted_message_id"],
             "quote_status": evid["quote_status"],
+            "quote_error": evid["quote_error"][:300],
             "http_status": evid["http_status"] or None,
             "media_id": evid["media_id"],
             "error": motivo[:240],
             "response_excerpt": evid["resposta"],
-            "created_at": now_iso(),
         }
 
         if not envio:
             registro["media_status"] = "unconfirmed" if evid["sem_prova"] else "send_failed"
-            self.db.insert("messages", {**linha, "status": (
-                Delivery.UNCONFIRMED if evid["sem_prova"] else "failed")})
+            self.db.update("messages", {**final, "status": self._status_da_mensagem(
+                False, evid, "")}, {"id": linha_id})
             if evid["sem_prova"]:
                 self.log(
                     "WARNING", "whatsapp",
-                    f"{job.request_id}: a API aceitou a imagem mas não devolveu o id "
-                    f"({motivo}). Não mando o texto por cima: duplicaria a resposta.",
+                    f"{job.request_id}: a imagem pode ter saído e não há prova ({motivo}). "
+                    "Não mando o texto por cima: duplicaria a resposta.",
                     request_id=job.request_id, consultant=consultant,
                 )
             else:
                 self.log(
                     "WARNING", "whatsapp",
-                    f"Falha ao enviar a imagem ({motivo}). Respondendo em texto.",
+                    f"A imagem não saiu ({motivo}). Respondendo em texto.",
                     request_id=job.request_id, consultant=consultant,
                 )
             return False
@@ -1478,15 +1604,16 @@ class BotManager:
                 request_id=job.request_id, consultant=consultant,
             )
         sent_total = self.db.bump_meta("wa_sent", 1)
-        self.db.insert(
+        self.db.update(
             "messages",
             {
-                **linha,
+                **final,
                 # "partial" quando o card foi sem a legenda: o consultor
                 # recebeu a imagem, mas sem o valor escrito e sem o REQ.
                 "status": ("partial" if getattr(envio, "parcial", False)
                            else (Status.COMPLETED if result.ok else Status.ERROR)),
             },
+            {"id": linha_id},
         )
         self.hub.publish(
             "message_sent",
@@ -1569,7 +1696,43 @@ class BotManager:
             "mode": self.config.whatsapp_mode,
             "instance": (self.config.evolution_instance
                          if self.config.whatsapp_mode == MODO_EVOLUTION else ""),
+            **self.diagnostico_do_whatsapp(),
         }
+
+    def diagnostico_do_whatsapp(self) -> dict:
+        """Por que o bot esta' ligado e nao responde?
+
+        Responde as perguntas na ordem em que elas travam o fluxo: a Evolution
+        responde? a chave vale? a instancia existe? esta' conectada? o webhook
+        aponta para ca'? o grupo esta' configurado? e quando chegou a ultima
+        mensagem por ele? Nenhum segredo entra aqui -- so' booleanos, estados
+        e horarios.
+        """
+        if self.config.whatsapp_mode != MODO_EVOLUTION:
+            return {"evolution": None, "last_webhook_at": ""}
+        diagnostico = {}
+        ler = getattr(self.whatsapp, "diagnostico", None)
+        if callable(ler):
+            try:
+                diagnostico = dict(ler() or {})
+            except Exception as exc:
+                diagnostico = {"erro": _curto(exc)}
+        diagnostico.setdefault("group_configured", bool(self.config.evolution_group_jid))
+        diagnostico["webhook_token_configured"] = bool(self.config.evolution_webhook_token)
+        ultimo = self.db.get_meta("wa_last_webhook_at", "")
+        diagnostico["last_webhook_at"] = ultimo
+        return {"evolution": diagnostico, "last_webhook_at": ultimo}
+
+    def registrar_webhook(self) -> None:
+        """Marca que a Evolution ALCANCOU o bot agora.
+
+        E' o unico sinal que prova o caminho de volta inteiro (Evolution ->
+        rede -> nossa rota). "Instancia conectada" nao prova isso.
+        """
+        try:
+            self.db.set_meta("wa_last_webhook_at", now_iso())
+        except Exception:
+            pass
 
     def system_status_payload(self) -> dict:
         return {

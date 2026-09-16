@@ -259,7 +259,7 @@ def _pedido(nome: str, cpf: str) -> str:
 # ======================================================= §25 — comportamentos
 class TestEntradaEIdentidade:
     def test_01_mensagem_recebida_cria_request(self, sistema):
-        assert sistema.webhook(_pedido("Ivone Teste", CPF_A), "3EB0A001").status_code == 200
+        assert sistema.webhook(_pedido("Cliente Teste", CPF_A), "3EB0A001").status_code == 200
         assert sistema.esperar_desfecho()
         linhas = sistema.db.fetchall("SELECT * FROM simulations")
         assert len(linhas) == 1
@@ -268,7 +268,7 @@ class TestEntradaEIdentidade:
 
     def test_02_mesmo_message_id_nao_cria_request_duplicado(self, sistema):
         for _ in range(3):
-            assert sistema.webhook(_pedido("Ivone Teste", CPF_A), "3EB0A002").status_code == 200
+            assert sistema.webhook(_pedido("Cliente Teste", CPF_A), "3EB0A002").status_code == 200
         assert sistema.esperar_desfecho()
         time.sleep(0.4)
         assert sistema.db.scalar("SELECT COUNT(*) FROM simulations") == 1
@@ -277,7 +277,7 @@ class TestEntradaEIdentidade:
         assert len(sistema.servidor.envios()) == 1, "duplicidade virou segunda resposta"
 
     def test_03_04_05_identidade_da_origem_persiste(self, sistema):
-        sistema.webhook(_pedido("Ivone Teste", CPF_A), "3EB0A003",
+        sistema.webhook(_pedido("Cliente Teste", CPF_A), "3EB0A003",
                         participante="12345678901234@lid", push="Ryan")
         assert sistema.esperar_desfecho()
         linha = sistema.db.fetchone("SELECT * FROM simulations")
@@ -296,12 +296,12 @@ class TestEntradaEIdentidade:
         assert entrada["participant"] == "12345678901234@lid"
 
     def test_consultor_vem_do_remetente_e_nao_do_corpo(self, sistema):
-        sistema.webhook(_pedido("Ivone Teste", CPF_A), "3EB0A004",
+        sistema.webhook(_pedido("Cliente Teste", CPF_A), "3EB0A004",
                         participante=CONSULTOR_B, push="Joana")
         assert sistema.esperar_desfecho()
         linha = sistema.db.fetchone("SELECT * FROM simulations")
         assert linha["consultant_name"] == "Joana"
-        assert linha["customer_name"] == "Ivone Teste"
+        assert linha["customer_name"] == "Cliente Teste"
         consultor = sistema.db.fetchone("SELECT * FROM consultants")
         assert consultor["wa_id"] == CONSULTOR_B
 
@@ -311,7 +311,7 @@ class TestRetryPreservaIdentidade:
         s = Sistema(tmp_path, com_imagem=False).ligar()
         try:
             s.servidor.roteiro = [recusa(503, "Service Unavailable")]
-            s.webhook(_pedido("Ivone Teste", CPF_A), "3EB0B001")
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0B001")
             assert s.esperar_desfecho()
             antes = s.db.fetchone("SELECT * FROM simulations")
             assert antes["delivery_status"] == Delivery.RETRYING
@@ -359,7 +359,7 @@ class TestRetryPreservaIdentidade:
         jobs.RETRY_BACKOFF_SECONDS = 0.05
         s.ligar()
         try:
-            s.webhook(_pedido("Ivone Teste", CPF_A), "3EB0B002")
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0B002")
             assert s.esperar_desfecho(timeout=30)
             assert len(set(simulador.vistos)) == 1 and len(simulador.vistos) == 2
             linha = s.db.fetchone("SELECT * FROM simulations")
@@ -373,7 +373,7 @@ class TestRetryPreservaIdentidade:
 
 class TestCitacao:
     def test_08_quote_recebe_o_message_id_texto_e_autor_corretos(self, sistema):
-        sistema.webhook(_pedido("Ivone Teste", CPF_A), "3EB0C001", participante=CONSULTOR_A)
+        sistema.webhook(_pedido("Cliente Teste", CPF_A), "3EB0C001", participante=CONSULTOR_A)
         assert sistema.esperar_desfecho()
         _rota, payload = sistema.servidor.envios()[0]
         citada = payload["quoted"]
@@ -388,7 +388,7 @@ class TestCitacao:
         s = Sistema(tmp_path, com_imagem=False).ligar()
         try:
             s.servidor.roteiro = [recusa_se_citar(400)]
-            s.webhook(_pedido("Ivone Teste", CPF_A), "3EB0C002", push="Ryan")
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0C002", push="Ryan")
             assert s.esperar_desfecho()
             envios = s.servidor.envios()
             assert len(envios) == 2
@@ -401,18 +401,23 @@ class TestCitacao:
         finally:
             s.desligar()
 
-    def test_2xx_sem_a_citacao_aplicada_fica_registrado(self, tmp_path):
-        """A Evolution manda solta quando não acha o original -- e não avisa."""
+    def test_2xx_sem_stanza_fica_unverified_e_nao_duplica(self, tmp_path):
+        """A Evolution manda solta quando não acha o original -- e não avisa.
+
+        Sem `stanzaId` na resposta não dá para provar nada sobre a citação:
+        fica `unverified`. O que NÃO muda é o principal -- a mensagem chegou,
+        então não sai uma segunda.
+        """
         s = Sistema(tmp_path, com_imagem=False).ligar()
         try:
             def solta(rota, payload):
                 sem = {k: v for k, v in payload.items() if k != "quoted"}
                 return httpx.Response(201, json=EvolutionFalsa.resposta_real(rota, sem, "BAE5SOLTA"))
             s.servidor.roteiro = [solta]
-            s.webhook(_pedido("Ivone Teste", CPF_A), "3EB0C003")
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0C003")
             assert s.esperar_desfecho()
             linha = s.db.fetchone("SELECT * FROM simulations")
-            assert linha["quote_status"] == QuoteStatus.NOT_APPLIED
+            assert linha["quote_status"] == QuoteStatus.UNVERIFIED
             assert linha["delivery_status"] == Delivery.DELIVERED
             assert len(s.servidor.envios()) == 1, "não pode reenviar o que já chegou"
         finally:
@@ -423,7 +428,7 @@ class TestImagem:
     def test_10_png_falhando_nao_elimina_resposta_em_texto(self, tmp_path):
         s = Sistema(tmp_path, renderizador=RenderizadorFalso(falha=True)).ligar()
         try:
-            s.webhook(_pedido("Ivone Teste", CPF_A), "3EB0D001")
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0D001")
             assert s.esperar_desfecho()
             envios = s.servidor.envios()
             assert [r for r, _ in envios] == ["/message/sendText/allana"]
@@ -453,7 +458,7 @@ class TestImagem:
     def test_14_png_vazio_no_fluxo_vira_texto(self, tmp_path):
         s = Sistema(tmp_path, renderizador=RenderizadorFalso(vazio=True)).ligar()
         try:
-            s.webhook(_pedido("Ivone Teste", CPF_A), "3EB0D002")
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0D002")
             assert s.esperar_desfecho()
             assert [r for r, _ in s.servidor.envios()] == ["/message/sendText/allana"]
             linha = s.db.fetchone("SELECT * FROM simulations")
@@ -473,7 +478,7 @@ class TestImagem:
             validar_png(arquivo, request_id="REQ000122", pasta=tmp_path)
         assert validar_png(arquivo, request_id="REQ000122", pasta=pasta) == (4, 3)
 
-        sistema.webhook(_pedido("Ivone Teste", CPF_A), "3EB0D003")
+        sistema.webhook(_pedido("Cliente Teste", CPF_A), "3EB0D003")
         assert sistema.esperar_desfecho()
         linha = sistema.db.fetchone("SELECT * FROM simulations")
         rota, payload = sistema.servidor.envios()[0]
@@ -491,7 +496,7 @@ class TestImagem:
             pasta = tmp_path / "comprovantes"
             pasta.mkdir(exist_ok=True)
             (pasta / "REQ000001.png").write_bytes(png_valido(semente=b"OLD"))
-            s.webhook(_pedido("Ivone Teste", CPF_A), "3EB0D004")
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0D004")
             assert s.esperar_desfecho()
             assert [r for r, _ in s.servidor.envios()] == ["/message/sendText/allana"], (
                 "mandou uma imagem que não foi gerada para esta solicitação")
@@ -505,7 +510,7 @@ class TestClassificacaoDeFalhas:
         s = Sistema(tmp_path, com_imagem=False).ligar()
         try:
             s.servidor.roteiro = [recusa(status)]
-            s.webhook(_pedido("Ivone Teste", CPF_A), f"3EB0E{status}")
+            s.webhook(_pedido("Cliente Teste", CPF_A), f"3EB0E{status}")
             assert s.esperar_desfecho()
             linha = s.db.fetchone("SELECT * FROM simulations")
             assert linha["delivery_status"] == Delivery.RETRYING
@@ -521,7 +526,7 @@ class TestClassificacaoDeFalhas:
         s = Sistema(tmp_path, com_imagem=False).ligar()
         try:
             s.servidor.roteiro = [recusa(401, "unauthorized")]
-            s.webhook(_pedido("Ivone Teste", CPF_A), "3EB0E401")
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0E401")
             assert s.esperar_desfecho()
             linha = s.db.fetchone("SELECT * FROM simulations")
             assert linha["delivery_status"] == Delivery.FAILED
@@ -534,7 +539,7 @@ class TestClassificacaoDeFalhas:
             s.desligar()
 
     def test_13_cpf_invalido_nao_vira_solicitacao(self, sistema):
-        sistema.webhook("Ivone Teste\n529.982.247-26", "3EB0E999")
+        sistema.webhook("Cliente Teste\n529.982.247-26", "3EB0E999")
         assert _aguardar(lambda: sistema.db.scalar(
             "SELECT COUNT(*) FROM messages WHERE direction='in' AND status='rejected'") == 1)
         assert sistema.db.scalar("SELECT COUNT(*) FROM simulations") == 0
@@ -543,7 +548,7 @@ class TestClassificacaoDeFalhas:
         s = Sistema(tmp_path).ligar()
         try:
             s.servidor.roteiro = [lambda rota, payload: httpx.Response(200, json={"status": "PENDING"})]
-            s.webhook(_pedido("Ivone Teste", CPF_A), "3EB0E200")
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0E200")
             assert s.esperar_desfecho()
             linha = s.db.fetchone("SELECT * FROM simulations")
             assert linha["delivery_status"] == Delivery.UNCONFIRMED
@@ -558,7 +563,7 @@ class TestClassificacaoDeFalhas:
             s.desligar()
 
     def test_19_sent_message_id_e_registrado(self, sistema):
-        sistema.webhook(_pedido("Ivone Teste", CPF_A), "3EB0E019")
+        sistema.webhook(_pedido("Cliente Teste", CPF_A), "3EB0E019")
         assert sistema.esperar_desfecho()
         linha = sistema.db.fetchone("SELECT * FROM simulations")
         assert linha["sent_message_id"].startswith("BAE5")
@@ -614,7 +619,7 @@ class TestConcorrenciaReinicioEIdempotencia:
             "request_id": "REQ000050", "consultant_name": "Ryan", "chat_id": GRUPO,
             "chat_name": "Consultores", "sender_id": CONSULTOR_A, "sender_name": "Ryan",
             "participant": CONSULTOR_A, "source_message_id": "3EB0ANTIGA",
-            "cpf": CPF_A, "bank": "Santander", "contract": "", "customer_name": "Ivone",
+            "cpf": CPF_A, "bank": "Santander", "contract": "", "customer_name": "Cliente Teste",
             "raw_message": f"Ivone\n{CPF_A}", "status": Status.PROCESSING,
             "stage": Stage.REPLYING, "result_ok": 1, "refin": "Sim",
             "reduction_value": 4725.0, "delivery_status": Delivery.PENDING,
@@ -645,7 +650,7 @@ class TestConcorrenciaReinicioEIdempotencia:
         s.db.insert("simulations", {
             "request_id": "REQ000060", "consultant_name": "Ryan", "chat_id": GRUPO,
             "sender_id": CONSULTOR_A, "participant": CONSULTOR_A,
-            "source_message_id": "3EB0REENVIO", "raw_message": _pedido("Ivone", CPF_A),
+            "source_message_id": "3EB0REENVIO", "raw_message": _pedido("Cliente Teste", CPF_A),
             "cpf": CPF_A, "bank": "Santander", "status": Status.COMPLETED,
             "stage": Stage.DELIVERY_RETRY, "result_ok": 1, "reduction_value": 10.0,
             "delivery_status": Delivery.PENDING, "reply_attempts": 1,
@@ -665,7 +670,7 @@ class TestConcorrenciaReinicioEIdempotencia:
         s = Sistema(tmp_path)
         s.manager._registrar_entrada(IncomingMessage(
             message_id="3EB0PERDIDA", chat_id=GRUPO, chat_name="Consultores",
-            sender_id=CONSULTOR_A, sender_name="Ryan", text=_pedido("Ivone", CPF_A),
+            sender_id=CONSULTOR_A, sender_name="Ryan", text=_pedido("Cliente Teste", CPF_A),
             participant=CONSULTOR_A))
         s.ligar()
         try:
@@ -686,7 +691,7 @@ class TestConcorrenciaReinicioEIdempotencia:
             "created_at": iso_atras(10), "updated_at": iso_atras(10)})
         mensagem = IncomingMessage(message_id="3EB0MEIO", chat_id=GRUPO, chat_name="C",
                                    sender_id=CONSULTOR_A, sender_name="Ryan",
-                                   text=_pedido("Ivone", CPF_A))
+                                   text=_pedido("Cliente Teste", CPF_A))
         s.manager._registrar_entrada(mensagem)
         s.manager._handle_message(mensagem)
         assert s.db.scalar("SELECT COUNT(*) FROM simulations") == 1
@@ -695,17 +700,417 @@ class TestConcorrenciaReinicioEIdempotencia:
         assert entrada["status"] == ENTRADA_SOLICITACAO
 
     def test_18_request_concluido_nao_e_criado_novamente(self, sistema):
-        sistema.webhook(_pedido("Ivone Teste", CPF_A), "3EB0F018")
+        sistema.webhook(_pedido("Cliente Teste", CPF_A), "3EB0F018")
         assert sistema.esperar_desfecho()
-        r = sistema.webhook(_pedido("Ivone Teste", CPF_A), "3EB0F018")
+        r = sistema.webhook(_pedido("Cliente Teste", CPF_A), "3EB0F018")
         assert r.json().get("ignorado") == "já processado"
         assert r.json().get("request_id", "").startswith("REQ")
         sistema.manager._handle_message(IncomingMessage(
             message_id="3EB0F018", chat_id=GRUPO, chat_name="Consultores",
-            sender_id=CONSULTOR_A, sender_name="Ryan", text=_pedido("Ivone Teste", CPF_A)))
+            sender_id=CONSULTOR_A, sender_name="Ryan", text=_pedido("Cliente Teste", CPF_A)))
         time.sleep(0.3)
         assert sistema.db.scalar("SELECT COUNT(*) FROM simulations") == 1
         assert len(sistema.servidor.envios()) == 1
+
+
+# ====================================== a política de HTTP, resposta por resposta
+def _corpo_de_erro(mensagem: str, status: int = 400) -> dict:
+    """Formato de erro da Evolution v2: {status, error, response.message[]}."""
+    return {"status": status, "error": "Bad Request", "response": {"message": [mensagem]}}
+
+
+class TestPoliticaHttpDaEvolution:
+    """A pergunta de cada caso: **a mensagem pode ter saído?**
+
+    Se puder, não sai uma segunda por nada -- nem sem citação, nem em texto,
+    nem pelo laço de reenvio. Se provadamente não saiu, o consultor é atendido.
+    """
+
+    def _pedido(self, s: Sistema, mid: str, push: str = "Ryan"):
+        s.webhook(_pedido("Cliente Teste", CPF_A), mid, push=push)
+        assert s.esperar_desfecho(), "a entrega não se resolveu"
+        return s.linha(source_message_id=mid) or {}
+
+    # ---------------------------------------------------------------- TESTE A
+    def test_a_500_com_citacao_nao_manda_segunda_mensagem(self, tmp_path):
+        """500 não prova que nada saiu: pode ser erro DEPOIS de enviar."""
+        s = Sistema(tmp_path).ligar()
+        try:
+            s.servidor.roteiro = [recusa(500, "Internal server error")]
+            linha = self._pedido(s, "3EB0H500")
+            assert len(s.servidor.envios()) == 1, (
+                "mandou uma segunda mensagem depois de um 500: "
+                f"{[r for r, _ in s.servidor.envios()]}")
+            assert linha["delivery_status"] == Delivery.UNCONFIRMED
+            assert linha["stage"] == Stage.DELIVERY_UNCONFIRMED
+            assert linha["sent_message_id"] == "", "inventou prova de entrega"
+            assert linha["replied_at"] is None
+            assert linha["quote_status"] == QuoteStatus.UNVERIFIED
+            # E o laço de reenvio também não manda.
+            s.db.execute("UPDATE simulations SET updated_at=?, finished_at=?, next_delivery_at=?",
+                         (iso_atras(9999), iso_atras(9999), iso_atras(9999)))
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 1, "o reenvio duplicou uma entrega incerta"
+        finally:
+            s.desligar()
+
+    # ---------------------------------------------------------------- TESTE B
+    def test_b_timeout_de_leitura_fica_incerto_e_nao_cai_para_texto(self, tmp_path):
+        """A requisição subiu e a resposta não veio: pode ter sido enviada."""
+        s = Sistema(tmp_path).ligar()
+        try:
+            def estoura(rota, payload):
+                raise httpx.ReadTimeout("a Evolution não respondeu a tempo")
+            s.servidor.roteiro = [estoura]
+            linha = self._pedido(s, "3EB0TIMEOUT")
+            assert len(s.servidor.envios()) == 1, "mandou texto por cima de um timeout"
+            assert linha["delivery_status"] == Delivery.UNCONFIRMED
+            assert linha["replied_at"] is None
+        finally:
+            s.desligar()
+
+    def test_b_conexao_recusada_nao_saiu_nada_entao_repete_com_citacao(self, tmp_path):
+        """Não conectar é diferente de não receber resposta: aqui nada saiu."""
+        s = Sistema(tmp_path, com_imagem=False).ligar()
+        try:
+            def recusa_conexao(rota, payload):
+                raise httpx.ConnectError("conexão recusada")
+            s.servidor.roteiro = [recusa_conexao]
+            linha = self._pedido(s, "3EB0CONEXAO")
+            assert linha["delivery_status"] == Delivery.RETRYING
+            s.db.execute("UPDATE simulations SET next_delivery_at=?", (iso_atras(5),))
+            s.manager._reenviar_pendentes()
+            _rota, payload = s.servidor.envios()[-1]
+            assert payload["quoted"]["key"]["id"] == "3EB0CONEXAO", "o retry perdeu a citação"
+            assert (s.linha(source_message_id="3EB0CONEXAO") or {})[
+                "delivery_status"] == Delivery.DELIVERED
+        finally:
+            s.desligar()
+
+    # ------------------------------------------------------------- TESTES C, D
+    @pytest.mark.parametrize("status", [400, 422])
+    def test_c_d_citacao_invalida_vira_um_unico_envio_sem_citacao(self, tmp_path, status):
+        s = Sistema(tmp_path, com_imagem=False).ligar()
+        try:
+            s.servidor.roteiro = [lambda rota, p: (
+                httpx.Response(status, json=_corpo_de_erro(
+                    "quoted message not found in the instance", status))
+                if "quoted" in p else None)]
+            linha = self._pedido(s, f"3EB0Q{status}", push="Ryan")
+            envios = s.servidor.envios()
+            assert len(envios) == 2, "esperava a recusa e o reenvio sem citação"
+            assert "quoted" in envios[0][1] and "quoted" not in envios[1][1]
+            entregues = [p for _r, p in envios if _r]  # todas as tentativas
+            assert len(entregues) == 2
+            assert "↩ Ryan" in envios[1][1]["text"]
+            assert linha["quote_status"] == QuoteStatus.FALLBACK
+            assert linha["delivery_status"] == Delivery.DELIVERED
+            assert linha["quote_error"], "o motivo da recusa da citação não foi gravado"
+            # UMA resposta final: a recusa não conta como mensagem entregue.
+            saidas = s.db.fetchall(
+                "SELECT status FROM messages WHERE direction='out' AND request_id=?",
+                (linha["request_id"],))
+            assert sum(1 for x in saidas if x["status"] not in ("failed", "unconfirmed")) == 1
+        finally:
+            s.desligar()
+
+    def test_400_sem_explicacao_nao_vira_fallback_nem_texto(self, tmp_path):
+        """Sem evidência do que foi recusado, a mensagem pode ter saído."""
+        s = Sistema(tmp_path).ligar()
+        try:
+            s.servidor.roteiro = [recusa(400, "Bad Request")]
+            linha = self._pedido(s, "3EB0OPACO")
+            assert len(s.servidor.envios()) == 1
+            assert linha["delivery_status"] == Delivery.UNCONFIRMED
+        finally:
+            s.desligar()
+
+    def test_400_de_validacao_na_imagem_cai_para_texto(self, tmp_path):
+        """Aqui a Evolution DIZ o que recusou: nada saiu, então o texto vai."""
+        s = Sistema(tmp_path).ligar()
+        try:
+            s.servidor.roteiro = [lambda rota, p: httpx.Response(
+                400, json=_corpo_de_erro("Owned media must be a url or base64"))]
+            linha = self._pedido(s, "3EB0MIDIA")
+            rotas = [r for r, _ in s.servidor.envios()]
+            assert rotas == ["/message/sendMedia/allana", "/message/sendText/allana"]
+            assert linha["delivery_status"] == Delivery.DELIVERED
+            assert linha["media_status"] == "send_failed"
+        finally:
+            s.desligar()
+
+    # ------------------------------------------------------------- TESTES E, F
+    @pytest.mark.parametrize("status", [429, 503])
+    def test_e_f_transitorio_repete_com_a_mesma_citacao(self, tmp_path, status):
+        s = Sistema(tmp_path, com_imagem=False).ligar()
+        try:
+            s.servidor.roteiro = [recusa(status)]
+            linha = self._pedido(s, f"3EB0T{status}")
+            assert linha["delivery_status"] == Delivery.RETRYING
+            assert linha["quote_status"] == "", "citação de requisição não processada"
+            s.db.execute("UPDATE simulations SET next_delivery_at=?", (iso_atras(5),))
+            s.manager._reenviar_pendentes()
+            _rota, payload = s.servidor.envios()[-1]
+            assert payload["quoted"]["key"]["id"] == f"3EB0T{status}", "o retry tirou a citação"
+            assert (s.linha(source_message_id=f"3EB0T{status}") or {})[
+                "delivery_status"] == Delivery.DELIVERED
+        finally:
+            s.desligar()
+
+    # ---------------------------------------------------------------- TESTE G
+    def test_g_2xx_sem_key_id_fica_incerto(self, tmp_path):
+        s = Sistema(tmp_path, com_imagem=False).ligar()
+        try:
+            s.servidor.roteiro = [lambda rota, p: httpx.Response(200, json={"status": "PENDING"})]
+            linha = self._pedido(s, "3EB0SEMID")
+            assert linha["delivery_status"] == Delivery.UNCONFIRMED
+            assert linha["sent_message_id"] == ""
+            s.db.execute("UPDATE simulations SET updated_at=?, finished_at=?, next_delivery_at=?",
+                         (iso_atras(9999), iso_atras(9999), iso_atras(9999)))
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 1, "reenviou sozinho uma entrega sem prova"
+        finally:
+            s.desligar()
+
+    # ---------------------------------------------------------------- TESTE H
+    def test_h_2xx_com_key_id_e_entrega_confirmada(self, tmp_path):
+        s = Sistema(tmp_path, com_imagem=False).ligar()
+        try:
+            linha = self._pedido(s, "3EB0COMID")
+            assert linha["delivery_status"] == Delivery.DELIVERED
+            assert linha["sent_message_id"].startswith("BAE5")
+            assert linha["quote_status"] == QuoteStatus.OK
+            assert linha["replied_at"]
+        finally:
+            s.desligar()
+
+    def test_a_classificacao_e_uma_tabela(self):
+        """A política, sem servidor nenhum."""
+        from app.evolution import classificar_resposta
+        from app.models import Desfecho
+
+        assert classificar_resposta(429, "").desfecho == Desfecho.TRANSITORIA
+        assert classificar_resposta(502, "").desfecho == Desfecho.TRANSITORIA
+        assert classificar_resposta(503, "").desfecho == Desfecho.TRANSITORIA
+        assert classificar_resposta(504, "").desfecho == Desfecho.TRANSITORIA
+        assert classificar_resposta(500, "boom").desfecho == Desfecho.INCERTA
+        assert classificar_resposta(401, "").desfecho == Desfecho.PERMANENTE
+        assert classificar_resposta(403, "").desfecho == Desfecho.PERMANENTE
+        assert classificar_resposta(404, "").desfecho == Desfecho.PERMANENTE
+        assert classificar_resposta(503, '{"error":"LICENSE_REQUIRED"}').desfecho == Desfecho.PERMANENTE
+        assert classificar_resposta(400, "quoted message not found",
+                                    com_citacao=True).desfecho == Desfecho.CITACAO_RECUSADA
+        assert classificar_resposta(422, "instance.quoted.key is not allowed",
+                                    com_citacao=True).desfecho == Desfecho.CITACAO_RECUSADA
+        # sem citação na requisição, um 400 que fala de quoted não é sobre a nossa
+        assert classificar_resposta(400, "quoted message not found").desfecho != Desfecho.CITACAO_RECUSADA
+        assert classificar_resposta(400, 'requires property "number"').desfecho == Desfecho.RECUSADA
+        assert classificar_resposta(400, "Bad Request").desfecho == Desfecho.INCERTA
+        # erro depois do envio vence a marca de citação: pode ter saído
+        assert classificar_resposta(400, "Invalid prisma.message.create() with quotedMessage",
+                                    com_citacao=True).desfecho == Desfecho.INCERTA
+
+    def test_transporte_separa_nao_conectou_de_nao_respondeu(self):
+        from app.evolution import classificar_falha_de_transporte
+        from app.models import Desfecho
+
+        for exc in (httpx.ConnectError("x"), httpx.ConnectTimeout("x"),
+                    httpx.WriteTimeout("x"), httpx.PoolTimeout("x")):
+            assert classificar_falha_de_transporte(exc).desfecho == Desfecho.TRANSITORIA
+        for exc in (httpx.ReadTimeout("x"), httpx.ReadError("x"),
+                    httpx.RemoteProtocolError("x")):
+            assert classificar_falha_de_transporte(exc).desfecho == Desfecho.INCERTA
+
+
+class TestNuncaDuasRespostas:
+    """Cenários em que a PRIMEIRA pode ter sido aceita pelo WhatsApp.
+
+    Todos têm a mesma forma: o bot não sabe se saiu. A resposta certa é
+    sempre a mesma -- registrar como incerta e não mandar nada por cima.
+    """
+
+    def _linha_em_entrega(self, s: Sistema, mid="3EB0VOO", **extra) -> int:
+        """Uma solicitação com resultado pronto e entrega em curso (`pending`)."""
+        return s.db.insert("simulations", {
+            "request_id": extra.pop("request_id", "REQ000700"),
+            "consultant_name": "Ryan", "chat_id": GRUPO, "chat_name": "Consultores",
+            "sender_id": CONSULTOR_A, "participant": CONSULTOR_A,
+            "source_message_id": mid, "raw_message": _pedido("Cliente Teste", CPF_A),
+            "cpf": CPF_A, "bank": "Santander", "customer_name": "Cliente Teste",
+            "status": Status.PROCESSING, "stage": Stage.REPLYING, "result_ok": 1,
+            "reduction_value": 4725.0, "delivery_status": Delivery.PENDING,
+            "attempts": 1, "max_attempts": 2, "created_at": iso_atras(90),
+            "updated_at": iso_atras(30), "finished_at": iso_atras(30), **extra})
+
+    def _saida(self, s: Sistema, simulation_id: int, status: str, **extra):
+        return s.db.insert("messages", {
+            "simulation_id": simulation_id, "request_id": "REQ000700", "direction": "out",
+            "kind": "image", "chat_id": GRUPO, "status": status, "provider": "evolution",
+            "attempt": 1, "origin_message_id": "3EB0VOO", "created_at": iso_atras(30),
+            **extra})
+
+    def test_queda_entre_o_post_e_a_gravacao_vira_incerta(self, tmp_path):
+        """O caso mais perigoso: a Evolution aceitou e o processo morreu antes de gravar."""
+        s = Sistema(tmp_path, com_imagem=False)
+        sid = self._linha_em_entrega(s)
+        self._saida(s, sid, "sending")          # a chamada tinha começado
+        s.ligar()
+        try:
+            assert s.manager.queue.recover() == 0
+            linha = s.linha(request_id="REQ000700")
+            assert linha["delivery_status"] == Delivery.UNCONFIRMED, (
+                "reenviaria uma resposta que pode ter chegado")
+            assert linha["stage"] == Stage.DELIVERY_UNCONFIRMED
+            s.manager._reenviar_pendentes()
+            assert s.servidor.envios() == [], "o laço de reenvio duplicou"
+            saida = s.db.fetchone("SELECT status FROM messages WHERE direction='out'")
+            assert saida["status"] == Delivery.UNCONFIRMED
+        finally:
+            s.desligar()
+
+    def test_resposta_ja_entregue_sem_gravar_o_desfecho_nao_reenvia(self, tmp_path):
+        """A mensagem saiu COM id e a atualização da solicitação falhou."""
+        s = Sistema(tmp_path, com_imagem=False)
+        sid = self._linha_em_entrega(s)
+        self._saida(s, sid, Status.COMPLETED, wa_message_id="BAE5JASAIU")
+        s.ligar()
+        try:
+            s.manager.queue.recover()
+            linha = s.linha(request_id="REQ000700")
+            assert linha["delivery_status"] == Delivery.DELIVERED
+            assert linha["sent_message_id"] == "BAE5JASAIU"
+            assert linha["replied_at"]
+            s.manager._reenviar_pendentes()
+            assert s.servidor.envios() == [], "reenviou algo que já tinha saído"
+        finally:
+            s.desligar()
+
+    def test_queda_no_meio_de_um_reenvio_vira_incerta(self, tmp_path):
+        """Mesma regra no laço de reenvio: `sending` gravado = pode ter saído."""
+        s = Sistema(tmp_path, com_imagem=False)
+        sid = self._linha_em_entrega(s, status=Status.COMPLETED, stage=Stage.DELIVERY_RETRY,
+                                     reply_attempts=1)
+        self._saida(s, sid, "sending", kind="text")
+        s.ligar()
+        try:
+            s.manager.queue.recover()
+            linha = s.linha(request_id="REQ000700")
+            assert linha["delivery_status"] == Delivery.UNCONFIRMED
+            s.manager._reenviar_pendentes()
+            assert s.servidor.envios() == []
+        finally:
+            s.desligar()
+
+    def test_excecao_depois_do_envio_nao_vira_reenvio(self, tmp_path):
+        """A API aceitou, o código quebrou depois. Reenviar duplicaria.
+
+        Como a saída ficou gravada COM id, o desfecho é melhor que "incerta":
+        dá para afirmar que foi entregue.
+        """
+        s = Sistema(tmp_path, com_imagem=False)
+        original = s.manager._send_reply
+
+        def envia_e_quebra(*a, **k):
+            original(*a, **k)
+            raise RuntimeError("o banco caiu depois do envio")
+
+        s.manager._send_reply = envia_e_quebra
+        s.ligar()
+        try:
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0QUEBRA")
+            assert _aguardar(lambda: (s.linha(source_message_id="3EB0QUEBRA") or {}).get(
+                "delivery_status") in (Delivery.UNCONFIRMED, Delivery.DELIVERED), timeout=20)
+            linha = s.linha(source_message_id="3EB0QUEBRA")
+            assert linha["delivery_status"] == Delivery.DELIVERED, (
+                "a saída gravada com id prova a entrega")
+            assert linha["sent_message_id"].startswith("BAE5")
+            assert len(s.servidor.envios()) == 1, "mandou duas respostas"
+            s.db.execute("UPDATE simulations SET updated_at=?, finished_at=?",
+                         (iso_atras(9999), iso_atras(9999)))
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 1
+        finally:
+            s.desligar()
+
+    def test_o_vigia_nao_reenvia_uma_entrega_que_comecou(self, tmp_path):
+        """A solicitação travou em `processing` com o envio já em curso."""
+        s = Sistema(tmp_path, com_imagem=False)
+        sid = self._linha_em_entrega(s, created_at=iso_atras(9000),
+                                     started_at=iso_atras(9000))
+        self._saida(s, sid, "sending")
+        s.ligar()
+        try:
+            assert s.manager.queue._resolver_presas() == 1
+            linha = s.linha(request_id="REQ000700")
+            assert linha["delivery_status"] == Delivery.UNCONFIRMED
+            assert "pode ter saído" in (linha["delivery_error"] or "")
+        finally:
+            s.desligar()
+
+
+class TestParticipantEIdentidade:
+    """`sender_id` identifica o CONSULTOR; `participant` cita o AUTOR.
+
+    São coisas diferentes e não podem ser trocadas: um participante pode
+    chegar como `@c.us`, `@s.whatsapp.net` ou `@lid`, e o `@lid` não é
+    telefone nenhum.
+    """
+
+    def test_participante_c_us_vira_identidade_e_citacao(self, sistema):
+        antigo = "5588999990000@c.us"
+        sistema.webhook(_pedido("Cliente Teste", CPF_A), "3EB0CUS", participante=antigo)
+        assert sistema.esperar_desfecho()
+        linha = sistema.linha(source_message_id="3EB0CUS")
+        assert linha["sender_id"] == antigo and linha["participant"] == antigo
+        _rota, payload = sistema.servidor.envios()[0]
+        assert payload["quoted"]["key"]["participant"] == antigo
+        consultor = sistema.db.fetchone("SELECT * FROM consultants")
+        assert consultor["phone"] == "5588999990000"
+
+    def test_lid_resolvido_separa_identidade_de_autor(self, sistema):
+        """O telefone identifica o consultor; o LID continua sendo o autor citado."""
+        lid = "209384756473829@lid"
+        r = sistema.cliente.post("/webhook/whatsapp", headers=CABECALHO, json={
+            "event": "messages.upsert",
+            "data": {"key": {"remoteJid": GRUPO, "fromMe": False, "id": "3EB0LID1",
+                             "participant": lid, "senderPn": CONSULTOR_B},
+                     "pushName": "Bruno",
+                     "message": {"conversation": _pedido("Cliente Teste", CPF_A)}}})
+        assert r.status_code == 200
+        assert sistema.esperar_desfecho()
+        linha = sistema.linha(source_message_id="3EB0LID1")
+        assert linha["sender_id"] == CONSULTOR_B, "identidade tinha de ser o telefone"
+        assert linha["participant"] == lid, "a citação tem de usar o autor como veio"
+        _rota, payload = sistema.servidor.envios()[0]
+        assert payload["quoted"]["key"]["participant"] == lid
+
+    def test_lid_nao_resolvido_nao_perde_o_pedido(self, sistema):
+        lid = "111222333444555@lid"
+        sistema.webhook(_pedido("Cliente Teste", CPF_A), "3EB0LID2", participante=lid)
+        assert sistema.esperar_desfecho()
+        linha = sistema.linha(source_message_id="3EB0LID2")
+        assert linha["sender_id"] == lid and linha["participant"] == lid
+        avisos = sistema.db.fetchall(
+            "SELECT message FROM logs WHERE level='WARNING' AND message LIKE '%LID%'")
+        assert avisos, "o LID não resolvido tem de virar aviso no log"
+
+    def test_leitura_do_webhook_preserva_os_dois(self):
+        from app.evolution_webhook import interpretar
+
+        base = {"event": "messages.upsert", "data": {
+            "key": {"remoteJid": GRUPO, "fromMe": False, "id": "3EB0X",
+                    "participant": "5511988887777@s.whatsapp.net"},
+            "pushName": "Ana", "message": {"conversation": "oi"}}}
+        leitura = interpretar(base, GRUPO)
+        assert leitura.mensagem.sender_id == "5511988887777@s.whatsapp.net"
+        assert leitura.mensagem.participant == "5511988887777@s.whatsapp.net"
+
+        sem_participante = {"event": "messages.upsert", "data": {
+            "key": {"remoteJid": "5511988887777@s.whatsapp.net", "fromMe": False, "id": "3EB0Y"},
+            "message": {"conversation": "oi"}}}
+        leitura = interpretar(sem_participante, "")
+        assert leitura.mensagem.participant == "5511988887777@s.whatsapp.net", (
+            "em conversa individual o próprio chat é o autor")
 
 
 # ============================================ §26 — regressões dos bugs conhecidos
@@ -716,7 +1121,7 @@ class TestRegressoes:
         outro_chat = "120363000000000999@g.us"
         mensagem = IncomingMessage(message_id="3EB0BUG1", chat_id=outro_chat,
                                    chat_name="Outro grupo", sender_id=CONSULTOR_A,
-                                   sender_name="Ryan", text=_pedido("Ivone", CPF_A))
+                                   sender_name="Ryan", text=_pedido("Cliente Teste", CPF_A))
         s.ligar()
         try:
             s.manager._handle_message(mensagem)
@@ -749,7 +1154,7 @@ class TestRegressoes:
         s = Sistema(tmp_path).ligar()
         try:
             s.servidor.roteiro = [recusa_se_citar(400)]
-            s.webhook(_pedido("Ivone Teste", CPF_A), "3EB0BUG3", push="Ryan")
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0BUG3", push="Ryan")
             assert s.esperar_desfecho()
             rotas = [r for r, _ in s.servidor.envios()]
             assert rotas == ["/message/sendMedia/allana", "/message/sendMedia/allana"]
@@ -767,7 +1172,7 @@ class TestRegressoes:
                             if "sendMedia" in rota else None)
             # com citação e, no fallback da citação, sem ela: as duas recusadas
             s.servidor.roteiro = [recusa_midia, recusa_midia]
-            s.webhook(_pedido("Ivone Teste", CPF_A), "3EB0BUG4")
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0BUG4")
             assert s.esperar_desfecho()
             rotas = [r for r, _ in s.servidor.envios()]
             # a imagem é recusada com citação, tenta sem citação (400), depois texto
@@ -782,7 +1187,7 @@ class TestRegressoes:
         s1 = Sistema(tmp_path, com_imagem=False).ligar()
         s1.servidor.roteiro = [recusa(503)]
         try:
-            s1.webhook(_pedido("Ivone Teste", CPF_A), "3EB0BUG5", participante=CONSULTOR_A)
+            s1.webhook(_pedido("Cliente Teste", CPF_A), "3EB0BUG5", participante=CONSULTOR_A)
             assert s1.esperar_desfecho()
         finally:
             s1.desligar()
@@ -807,7 +1212,7 @@ class TestRegressoes:
         s = Sistema(tmp_path)
         mensagem = IncomingMessage(message_id="3EB0BUG6", chat_id=GRUPO, chat_name="C",
                                    sender_id=CONSULTOR_A, sender_name="Ryan",
-                                   text=_pedido("Ivone", CPF_A))
+                                   text=_pedido("Cliente Teste", CPF_A))
         aceitas: list[bool] = []
         threads = [threading.Thread(target=lambda: aceitas.append(
             s.manager.receber_mensagem(mensagem)["aceita"])) for _ in range(8)]
@@ -859,7 +1264,7 @@ class TestRegressoes:
                 raise httpx.ConnectError("Evolution fora do ar")
             s.servidor.roteiro = [cai]
             s.servidor.estado = "close"
-            s.webhook(_pedido("Ivone Teste", CPF_A), "3EB0BUG8")
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0BUG8")
             assert s.esperar_desfecho()
             linha = s.db.fetchone("SELECT * FROM simulations")
             assert linha["delivery_status"] == Delivery.RETRYING
@@ -971,7 +1376,7 @@ class TestPerfisEObservabilidade:
             BotManager(config, db, EventHub(db))
 
     def test_timeline_reconstroi_o_incidente(self, sistema):
-        sistema.webhook(_pedido("Ivone Teste", CPF_A), "3EB0TL01")
+        sistema.webhook(_pedido("Cliente Teste", CPF_A), "3EB0TL01")
         assert sistema.esperar_desfecho()
         request_id = sistema.db.fetchone("SELECT request_id FROM simulations")["request_id"]
         etapas = [e["stage"] for e in sistema.hub.timeline(request_id) if e["stage"]]

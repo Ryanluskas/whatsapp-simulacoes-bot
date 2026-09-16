@@ -179,29 +179,62 @@ original: `key.id`, `remoteJid`, `participant` (o autor, como chegou — pode
 ser `@lid`) e o texto. Nada vem de memória em RAM. A resposta da Evolution é
 conferida: `contextInfo.stanzaId` igual ao id pedido = citação confirmada.
 
-**Citação recusada (400/422/500).** A resposta sai de novo SEM `quoted`, com a
-versão que termina em `↩ <consultor>`. Falha de citação não é falha de
-resposta. Timeout, 429, 502/503/504 não disparam isso (a mensagem pode ter
-saído).
+**Citação recusada.** SÓ quando a Evolution responde 400/422 apontando o
+`quoted` (e sem sinal de erro pós-envio): a resposta sai de novo SEM `quoted`,
+com a versão que termina em `↩ <consultor>`. Falha de citação não é falha de
+resposta.
+
+**500 NÃO é citação recusada.** Era, e esse era o defeito mais perigoso: um
+500 podia ser erro DEPOIS de a mensagem sair, e o reenvio sem citação
+entregava o resultado duas vezes no grupo. Hoje 500, timeout de leitura,
+conexão caída depois de enviar e 2xx sem `key.id` são **entrega incerta**.
 
 **Imagem.** Renderizada num arquivo provisório, validada (PNG legível:
 assinatura, CRC, dados descomprimidos batendo com as dimensões) e só então
 movida para `comprovantes/<REQ>.png`. Falhou render, validação ou envio → a
 resposta sai em texto.
 
-**2xx sem `key.id`.** Não é tratado como entregue (`delivery_status =
-unconfirmed`) e NÃO é reenviado sozinho — a mensagem pode ter chegado, e
-reenviar duplicaria. Aparece no log como WARNING e no painel.
+**A pergunta que decide tudo: a mensagem pode ter saído?** Só se a resposta
+PROVAR que nada saiu é que o bot manda outra (sem citação, em texto, ou mais
+tarde). Na dúvida, ele registra e para.
 
-**Falha transitória** (timeout, conexão, 429, 5xx): `delivery_status =
-retrying`, etapa `delivery_retry`. O laço de reenvio tenta de novo na MESMA
-solicitação (30 s, 60 s, 120 s… até 5 vezes), citando a mesma mensagem.
-**Falha permanente** (401/403/404, licença, sem `chat_id`): `failed`, sem
-repetir.
+| Resposta | Desfecho | O que o bot faz |
+|---|---|---|
+| 2xx com `key.id` | entregue | grava o id; fim |
+| 2xx sem `key.id` | **incerta** | `unconfirmed`; nada por cima, nada de reenvio |
+| 2xx com corpo ilegível | **incerta** | idem |
+| 400/422 apontando o `quoted` | citação recusada | reenvia SEM citação, com `↩ consultor` |
+| 400/422 de validação (`requires property`, `must be`, `exists:false`…) | recusada | imagem → cai para texto; texto → `failed` |
+| 400/422 sem explicação | **incerta** | `unconfirmed`; não cai para texto |
+| 400 com sinal de erro pós-envio (`prisma`, `database`, `timeout`…) | **incerta** | idem — vence a marca de citação |
+| 401 / 403 / 404 / licença | permanente | `failed`; não repete |
+| 408 / 429 / 502 / 503 / 504 | transitória | `retrying`: repete a MESMA requisição (com citação) |
+| 500 e outros 5xx | **incerta** | `unconfirmed`; **nunca** dispara reenvio sem citação |
+| timeout de conexão, conexão recusada, falha ao subir o corpo | transitória | `retrying` |
+| timeout de leitura, conexão caída depois de enviar | **incerta** | `unconfirmed` |
+
+**`unconfirmed` quer dizer**: "a API não permitiu provar se saiu". O painel
+mostra **"Entrega incerta — verificar WhatsApp"**, o log traz `attempt`,
+`origin_message_id`, `quoted_message_id`, `http`, `quote_status` e o erro, e
+**ninguém reenvia sozinho** — uma segunda mensagem no grupo é pior que uma
+entrega que precisa ser conferida.
+
+**Falha transitória**: `delivery_status = retrying`, etapa `delivery_retry`. O
+laço de reenvio tenta de novo na MESMA solicitação (30 s, 60 s, 120 s… até 5
+vezes), citando a mesma mensagem.
 
 **`completed` só depois da entrega.** Enquanto a resposta sobe, a solicitação
 fica `processing/replying`. Um reinício nesse meio NÃO simula de novo no
-Santander: o resultado já gravado vai para o reenvio.
+Santander.
+
+**Reinício no meio de um envio.** A linha da saída é gravada como `sending`
+ANTES da chamada à API. Ao voltar, o bot decide pelo que está gravado, nunca
+por palpite:
+
+* saída com `wa_message_id` → **entregue** (só faltou gravar o desfecho);
+* saída em `sending` → **incerta**: a chamada tinha começado e a mensagem pode
+  ter saído; não reenvia;
+* nenhuma saída → nada saiu: vai para o reenvio.
 
 **Evidência.** Cada tentativa de envio vira uma linha em `messages`
 (`direction='out'`) com `provider`, `attempt`, `origin_message_id`,
@@ -209,16 +242,35 @@ Santander: o resultado já gravado vai para o reenvio.
 `http_status`, `media_id` e `error`. A solicitação guarda o resumo:
 `delivery_status`, `quote_status`, `media_status`, `sent_message_id`.
 
+### Diagnóstico da instância
+
+O painel (aba **Status**) e o `/api/health` respondem, sem expor chave nem
+token: a Evolution responde? a chave é aceita? a instância existe e está
+conectada? há webhook configurado apontando para `/webhook/whatsapp`? e
+**quando chegou o último webhook** — o único sinal que prova o caminho de
+volta inteiro. É por aí que se responde "está ligado e não responde, por quê?".
+
 ### O que ainda precisa ser validado com a Evolution de verdade
 
 O servidor falso responde no formato da v2, mas não é a Evolution. No grupo
 de teste, confira em especial:
 
 1. se a Evolution aceita `quoted.key.participant` (se recusar, o fallback
-   manda sem citação e o log mostra `A Evolution recusou a citação`);
+   manda sem citação e o log mostra `A Evolution RECUSOU a citação`);
 2. se a resposta de `sendText`/`sendMedia` traz `message.*.contextInfo.stanzaId`
-   (se não trouxer, `quote_status` fica `unverified` em vez de `ok`);
-3. se a citação aparece no celular apontando para o consultor certo.
+   (se não trouxer, `quote_status` fica `unverified` em vez de `ok` — nunca o
+   contrário). Guarde a resposta e rode:
+
+   ```bash
+   .venv/Scripts/python.exe ferramentas/conferir_resposta_evolution.py resposta.json --quote ID_DO_PEDIDO
+   ```
+
+   Para travar o formato num teste, aponte `EVOLUTION_RESPOSTAS_REAIS` para a
+   pasta das capturas (elas ficam fora do git) e rode
+   `pytest tests/test_contrato_evolution.py`;
+3. se a citação aparece no celular apontando para o consultor certo;
+4. se um 400 real traz texto suficiente para a classificação acima acertar —
+   o log mostra `Envio recusado pela Evolution [<desfecho>]` com o corpo.
 
 ## O que fazer se der errado
 

@@ -60,6 +60,7 @@ CPFS = {
     "C": "40481494235", "D": "98765432100", "E": "39053344705",
     "F": "71428793860", "G1": "15350946056", "G2": "86288366757",
     "G3": "39825979194", "H": "35623012353",
+    "I": "78778932807", "J": "74852605700",
 }
 
 
@@ -151,7 +152,12 @@ class EvolutionFalsa:
                 registro["png_sha"] = hashlib.sha256(dados).hexdigest()[:16]
             self.chamadas.append(registro)
 
-        if regra:
+        # Responder devagar: e' assim que o roteiro mata o bot com a requisicao
+        # JA' aceita aqui dentro -- o caso em que a mensagem pode ter saido.
+        if regra and regra.get("atraso"):
+            time.sleep(regra["atraso"])
+
+        if regra and regra.get("status"):
             registro["status"] = regra["status"]
             return regra["status"], {"status": regra["status"], "error": "simulado",
                                      "response": {"message": [regra.get("motivo", "falha simulada")]}}
@@ -389,7 +395,7 @@ def rodar(relatorio: Path | None) -> int:
 
     # ------------------------------------------------------------------ A
     def cenario_a(conferir, det):
-        r = bot.webhook(pedido("Ivone Teste", CPFS["A"]), "E2E-A", "5562900000001@s.whatsapp.net", "Ana")
+        r = bot.webhook(pedido("Cliente Teste", CPFS["A"]), "E2E-A", "5562900000001@s.whatsapp.net", "Ana")
         conferir(r.status_code == 200, f"webhook respondeu {r.status_code}")
         conferir(bot.esperar(["E2E-A"]), "não entregou em 60s")
         linha = bot.solicitacao("E2E-A") or {}
@@ -447,7 +453,7 @@ def rodar(relatorio: Path | None) -> int:
     def cenario_c(conferir, det):
         # A marca e' o nome do cliente: esta' na legenda COM e SEM citacao.
         evolution.regra(rota="sendMedia", status=400, vezes=2, marca="Imagem Falha",
-                        motivo="media inválida")
+                        motivo="Owned media must be a url or base64")
         bot.webhook(pedido("Imagem Falha", CPFS["C"]), "E2E-C", "5562900000021@s.whatsapp.net", "Diego")
         conferir(bot.esperar(["E2E-C"]), "não entregou")
         linha = bot.solicitacao("E2E-C") or {}
@@ -463,7 +469,7 @@ def rodar(relatorio: Path | None) -> int:
     # ------------------------------------------------------------------ D
     def cenario_d(conferir, det):
         evolution.regra(rota="send", citado=True, status=400, vezes=1, marca="E2E-D",
-                        motivo="quoted message not found")
+                        motivo="quoted message not found in the instance")
         bot.webhook(pedido("Citacao Falha", CPFS["D"]), "E2E-D", "5562900000031@s.whatsapp.net", "Elisa")
         conferir(bot.esperar(["E2E-D"]), "não entregou")
         linha = bot.solicitacao("E2E-D") or {}
@@ -565,6 +571,66 @@ def rodar(relatorio: Path | None) -> int:
                  "reentrega pós-reinício criou solicitação")
 
     v.cenario("G — processo morto no meio da fila (+ H após reinício)", cenario_g)
+
+    # ------------------------------------------------------------------ I
+    def cenario_i(conferir, det):
+        """500 não prova que nada saiu: nada de segunda mensagem."""
+        evolution.regra(rota="send", status=500, vezes=2, marca="Erro Quinhentos",
+                        motivo="Internal server error")
+        bot.webhook(pedido("Erro Quinhentos", CPFS["I"]), "E2E-I",
+                    "5562900000101@s.whatsapp.net", "Joana")
+        conferir(bot.esperar(["E2E-I"], estados=("unconfirmed",), timeout=60),
+                 "não ficou como entrega incerta")
+        linha = bot.solicitacao("E2E-I") or {}
+        det["linha"] = {k: linha.get(k) for k in ("stage", "delivery_status", "quote_status",
+                                                    "sent_message_id", "replied_at")}
+        envios = evolution.envios(linha.get("request_id", "?"))
+        det["envios"] = [(e["rota"], e["status"]) for e in envios]
+        conferir(len(envios) == 1, f"{len(envios)} envios depois de um 500 (esperava 1)")
+        conferir(linha.get("sent_message_id") in ("", None), "inventou prova de entrega")
+        conferir(linha.get("replied_at") is None, "marcou entregue sem prova")
+        # e o laço de reenvio (30 s) não pode mandar nada depois
+        time.sleep(45)
+        conferir(len(evolution.envios(linha.get("request_id", "?"))) == 1,
+                 "o laço de reenvio duplicou uma entrega incerta")
+
+    v.cenario("I — HTTP 500 vira entrega incerta, sem segunda mensagem", cenario_i)
+
+    # ------------------------------------------------------------------ J
+    def cenario_j(conferir, det):
+        """O pior caso: a Evolution ACEITOU e o processo morreu antes de gravar."""
+        evolution.regra(rota="sendMedia", vezes=1, marca="Voo Cortado", atraso=25)
+        bot.webhook(pedido("Voo Cortado", CPFS["J"]), "E2E-J",
+                    "5562900000111@s.whatsapp.net", "Karla")
+
+        limite = time.monotonic() + 60
+        while time.monotonic() < limite and not evolution.envios("Voo Cortado"):
+            time.sleep(0.2)
+        aceitos = evolution.envios("Voo Cortado")
+        conferir(bool(aceitos), "a Evolution não chegou a receber o envio")
+        det["post_recebido"] = agora()
+        bot.matar()                      # morre com a requisição já aceita lá
+        det["kill"] = agora()
+        time.sleep(2)
+        bot.subir()
+        det["subiu"] = agora()
+
+        conferir(bot.esperar(["E2E-J"], estados=("unconfirmed",), timeout=60),
+                 "não marcou a entrega como incerta depois do reinício")
+        linha = bot.solicitacao("E2E-J") or {}
+        det["linha"] = {k: linha.get(k) for k in ("status", "stage", "delivery_status",
+                                                    "delivery_error")}
+        time.sleep(45)                   # dá tempo do laço de reenvio rodar
+        depois = evolution.envios(linha.get("request_id", "?"))
+        det["envios"] = [(e["rota"], e.get("status")) for e in depois]
+        conferir(len(depois) <= 1, f"{len(depois)} envios: reenviou algo que pode ter chegado")
+        saidas = bot.consultar(
+            "SELECT status FROM messages WHERE direction='out' AND request_id=?",
+            (linha.get("request_id", "?"),))
+        conferir(all(s["status"] in ("unconfirmed", "sending") for s in saidas),
+                 f"saídas em estado inesperado: {[s['status'] for s in saidas]}")
+
+    v.cenario("J — processo morto com o POST já aceito: incerta, sem duplicar", cenario_j)
 
     # --------------------------------------------------------------- segurança
     def cenario_seguranca(conferir, det):

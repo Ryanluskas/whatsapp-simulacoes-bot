@@ -188,6 +188,9 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "next_delivery_at": "TEXT",
         "sent_message_id": "TEXT DEFAULT ''",
         "quote_status": "TEXT DEFAULT ''",
+        # Por que a CITACAO foi recusada. Separado de delivery_error: citacao
+        # recusada nao e' entrega falha (ver models.QuoteStatus).
+        "quote_error": "TEXT DEFAULT ''",
         "media_status": "TEXT DEFAULT ''",
     },
     "messages": {
@@ -208,6 +211,10 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "origin_message_id": "TEXT DEFAULT ''",
         "quoted_message_id": "TEXT DEFAULT ''",
         "quote_status": "TEXT DEFAULT ''",
+        "quote_error": "TEXT DEFAULT ''",
+        # Como a requisicao terminou (models.Desfecho): entregue, incerta,
+        # transitoria, recusada... E' o que diz se a mensagem PODE ter saido.
+        "desfecho": "TEXT DEFAULT ''",
         "http_status": "INTEGER",
         "media_id": "TEXT DEFAULT ''",
         "error": "TEXT DEFAULT ''",
@@ -222,6 +229,11 @@ ENTRADA_IGNORADA = "ignored"      # conversa comum, nao e' pedido
 ENTRADA_RECUSADA = "rejected"     # pedido sem dado ou de banco nao atendido
 ENTRADA_SOLICITACAO = "request"   # virou uma solicitacao (REQ)
 ENTRADA_EXPIRADA = "expired"      # ficou sem tratar tempo demais
+
+#: ``messages.status`` de uma SAIDA gravada antes de chamar a API. Se o
+#: processo cair durante a chamada, a linha fica assim -- e e' ela que avisa
+#: o proximo boot que a mensagem PODE ter saido (ver jobs.QueueService).
+ENVIO_EM_CURSO = "sending"
 
 
 class Database:

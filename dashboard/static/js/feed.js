@@ -25,7 +25,7 @@ const ICON = {
   message_failed: "alert",
   request_completed: "check",
   delivery_retry: "refresh",
-  delivery_unconfirmed: "alert",
+  delivery_unconfirmed: "alert",   // entrega incerta: alguém precisa conferir
   delivery_failed: "ban",
   whatsapp_connected: "plug",
   whatsapp_disconnected: "plugOff",
