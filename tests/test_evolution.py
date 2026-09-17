@@ -241,10 +241,10 @@ class TestFalhaNuncaEhSilenciosa:
 
     @pytest.mark.parametrize("status,desfecho", [
         # nada saiu, repetir a MESMA requisição depois pode dar certo
-        (429, Desfecho.TRANSITORIA), (502, Desfecho.TRANSITORIA),
-        (503, Desfecho.TRANSITORIA), (504, Desfecho.TRANSITORIA),
-        # a mensagem PODE ter saído: não se manda outra
-        (500, Desfecho.INCERTA),
+        (429, Desfecho.TRANSITORIA), (503, Desfecho.TRANSITORIA),
+        # a mensagem PODE ter saído: não se manda outra. 502/504 vêm de um
+        # proxy na frente da Evolution -- ela pode ter recebido e enviado.
+        (500, Desfecho.INCERTA), (502, Desfecho.INCERTA), (504, Desfecho.INCERTA),
         # nada saiu e repetir não resolve
         (401, Desfecho.PERMANENTE), (403, Desfecho.PERMANENTE), (404, Desfecho.PERMANENTE),
     ])
@@ -300,6 +300,19 @@ class TestFalhaNuncaEhSilenciosa:
         r = c.send(GRUPO, "g", "oi")
         assert not r.ok
         assert r.evidencia["transitorio"] is True
+
+    def test_erro_de_leitura_da_resposta_e_incerto(self):
+        """A requisição subiu e a resposta veio quebrada: pode ter saído."""
+        def quebrada(request):
+            raise httpx.DecodingError("gzip cortado", request=request)
+        c = EvolutionClient("http://e:8080", "k", "allana", GRUPO,
+                            client=httpx.Client(transport=httpx.MockTransport(quebrada),
+                                                base_url="http://e:8080"),
+                            renderer=None)
+        r = c.send(GRUPO, "g", "oi")
+        assert not r.ok
+        assert r.desfecho == Desfecho.INCERTA and r.sem_prova is True
+        assert r.evidencia["transitorio"] is False
 
     def test_a_chave_nunca_aparece_no_motivo(self):
         espiao = Espiao(httpx.Response(401, text="unauthorized"))

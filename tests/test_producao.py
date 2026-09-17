@@ -890,9 +890,9 @@ class TestPoliticaHttpDaEvolution:
         from app.models import Desfecho
 
         assert classificar_resposta(429, "").desfecho == Desfecho.TRANSITORIA
-        assert classificar_resposta(502, "").desfecho == Desfecho.TRANSITORIA
+        assert classificar_resposta(502, "").desfecho == Desfecho.INCERTA
         assert classificar_resposta(503, "").desfecho == Desfecho.TRANSITORIA
-        assert classificar_resposta(504, "").desfecho == Desfecho.TRANSITORIA
+        assert classificar_resposta(504, "").desfecho == Desfecho.INCERTA
         assert classificar_resposta(500, "boom").desfecho == Desfecho.INCERTA
         assert classificar_resposta(401, "").desfecho == Desfecho.PERMANENTE
         assert classificar_resposta(403, "").desfecho == Desfecho.PERMANENTE
@@ -998,6 +998,72 @@ class TestNuncaDuasRespostas:
             assert linha["delivery_status"] == Delivery.UNCONFIRMED
             s.manager._reenviar_pendentes()
             assert s.servidor.envios() == []
+        finally:
+            s.desligar()
+
+    def test_queda_depois_de_gravar_a_saida_unconfirmed(self, tmp_path):
+        """500 gravado na SAÍDA, processo morre antes de gravar a SIMULAÇÃO.
+
+        A saída já diz "pode ter saído"; a simulação ainda está `pending`. A
+        recuperação lia só `sending` como incerta, via "nada saiu" aqui e
+        reenviava -- segunda mensagem no grupo.
+        """
+        s = Sistema(tmp_path, com_imagem=True)
+        sid = self._linha_em_entrega(s)
+        self._saida(s, sid, Delivery.UNCONFIRMED, desfecho="incerta", http_status=500)
+        s.ligar()
+        try:
+            s.manager.queue.recover()
+            linha = s.linha(request_id="REQ000700")
+            assert linha["delivery_status"] == Delivery.UNCONFIRMED
+            s.db.execute("UPDATE simulations SET updated_at=?, finished_at=?, next_delivery_at=?",
+                         (iso_atras(9999), iso_atras(9999), iso_atras(9999)))
+            s.manager._reenviar_pendentes()
+            assert s.servidor.envios() == [], "reenviou algo que pode ter saído (500)"
+        finally:
+            s.desligar()
+
+    def test_falha_ao_gravar_o_desfecho_depois_de_um_500(self, tmp_path):
+        """A imagem recebe 500 e gravar o desfecho da simulação quebra uma vez."""
+        s = Sistema(tmp_path, com_imagem=True)
+        s.servidor.roteiro = [recusa(500, "Internal server error")]
+        original = s.manager._registrar_entrega
+        chamadas = {"n": 0}
+
+        def quebra_uma_vez(*a, **k):
+            chamadas["n"] += 1
+            if chamadas["n"] == 1:
+                raise RuntimeError("database is locked")
+            return original(*a, **k)
+
+        s.manager._registrar_entrega = quebra_uma_vez
+        s.ligar()
+        try:
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0TRAVOU")
+            assert _aguardar(lambda: (s.linha(source_message_id="3EB0TRAVOU") or {}).get(
+                "delivery_status") not in (None, "", Delivery.PENDING), timeout=20)
+            linha = s.linha(source_message_id="3EB0TRAVOU")
+            assert linha["delivery_status"] == Delivery.UNCONFIRMED
+            s.db.execute("UPDATE simulations SET next_delivery_at=?, updated_at=?, finished_at=?",
+                         (iso_atras(9999), iso_atras(9999), iso_atras(9999)))
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 1, "segunda mensagem depois de um 500"
+        finally:
+            s.desligar()
+
+    def test_saida_unconfirmed_bloqueia_ate_o_reenvio_legado(self, tmp_path):
+        """Linha sem delivery_status (legado) com saída incerta: o laço não manda."""
+        s = Sistema(tmp_path, com_imagem=False)
+        sid = self._linha_em_entrega(s, delivery_status="", status=Status.COMPLETED,
+                                     stage=Stage.COMPLETED)
+        self._saida(s, sid, Delivery.UNCONFIRMED, desfecho="incerta", http_status=504)
+        s.ligar()
+        try:
+            s.db.execute("UPDATE simulations SET updated_at=?, finished_at=?",
+                         (iso_atras(9999), iso_atras(9999)))
+            s.manager._reenviar_pendentes()
+            assert s.servidor.envios() == []
+            assert s.linha(request_id="REQ000700")["delivery_status"] == Delivery.UNCONFIRMED
         finally:
             s.desligar()
 
@@ -1474,6 +1540,11 @@ class TestAcaoManualDaEntregaIncerta:
                                json={"acao": "nao_chegou"})
             assert r.status_code == 200, r.text
             assert s.linha(id=linha["id"])["delivery_status"] == Delivery.RETRYING
+            saidas = [m["status"] for m in s.db.fetchall(
+                "SELECT status FROM messages WHERE simulation_id=? AND direction='out'",
+                (linha["id"],))]
+            assert saidas == ["failed"], (
+                f"a saída incerta tinha de virar 'failed' (conferida no painel): {saidas}")
 
             s.manager._reenviar_pendentes()
             envios = s.servidor.envios()
@@ -1525,7 +1596,11 @@ class TestAcaoManualDaEntregaIncerta:
             r = s.cliente.post(url, json={"acao": "nao_chegou"})
             assert r.status_code == 409, r.text
             assert s.cliente.post(url, json={"acao": "apagar"}).status_code == 400
-            assert s.cliente.post(url, content=b"nao e json").status_code == 400
+            assert s.cliente.post(url, content=b"nao e json",
+                                  headers={"Content-Type": "application/json"}).status_code == 400
+            # Formulário text/plain de outra página do mesmo site: recusado.
+            assert s.cliente.post(url, content=b'{"acao":"nao_chegou"}',
+                                  headers={"Content-Type": "text/plain"}).status_code == 415
             assert s.cliente.post("/api/simulations/999999/entrega",
                                   json={"acao": "chegou"}).status_code == 404
             assert len(s.servidor.envios()) == 1

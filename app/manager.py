@@ -535,14 +535,14 @@ class BotManager:
             if cur.rowcount != 1:
                 return False
             if campos["delivery_status"] == Delivery.RETRYING:
-                # Uma chamada que ficou ``sending`` faria o reenvio desistir
-                # (situacao_do_envio -> incerta). Quem olhou o grupo disse que
-                # ela nao chegou.
+                # As saidas ``sending``/``unconfirmed`` fazem o reenvio desistir
+                # (situacao_do_envio -> incerta), de proposito. Quem olhou o
+                # grupo disse que elas nao chegaram: viram ``failed``.
                 conn.execute(
-                    "UPDATE messages SET status=?, error=COALESCE(NULLIF(error,''), ?) "
-                    " WHERE simulation_id=? AND direction='out' AND status=?",
-                    (Delivery.UNCONFIRMED, "conferido no painel: não chegou",
-                     simulation_id, ENVIO_EM_CURSO))
+                    "UPDATE messages SET status='failed', "
+                    "       error=TRIM(COALESCE(NULLIF(error,''), '') || ' [conferido no painel: não chegou]') "
+                    " WHERE simulation_id=? AND direction='out' AND status IN (?, ?)",
+                    (simulation_id, ENVIO_EM_CURSO, Delivery.UNCONFIRMED))
             return True
 
     def _anunciar_decisao_manual(self, linha: dict, acao: str, quem: str) -> None:

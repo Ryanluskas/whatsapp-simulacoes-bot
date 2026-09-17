@@ -23,9 +23,9 @@ histórico leem a mesma fonte, então painel e banco nunca discordam.
 | **Enfileira** | Vários consultores podem pedir ao mesmo tempo; cada pedido é isolado e recebe um `REQ000000`. |
 | **Simula** | Abre o portal do Santander no Brave, com a sessão do operador, e usa a lógica do projeto Arqueiro (nada é reimplementado aqui). |
 | **Responde** | Manda uma **imagem** com os cards dos contratos e quanto libera, mais um resumo em texto. Se a imagem falhar, o texto sai assim mesmo. |
-| **Reenvia** | Só quando a API PROVA que nada saiu (429, 502/503/504, conexão recusada): até 5 vezes **na mesma solicitação**, citando a mesma mensagem. |
+| **Reenvia** | Só quando a API PROVA que nada saiu (408, 429, 503, conexão recusada): até 5 vezes **na mesma solicitação**, citando a mesma mensagem. |
 | **Não duplica o pedido** | A mensagem recebida é gravada antes de qualquer coisa. O mesmo `message_id` nunca vira segunda solicitação — nem com webhook reentregue, nem depois de reiniciar. |
-| **Não duplica a resposta** | 500, timeout depois de enviar, 2xx sem id, queda no meio do envio: a mensagem pode ter chegado. Vira **"Entrega incerta — verificar WhatsApp"** e ninguém manda uma segunda sozinho: quem olha o grupo decide no painel (chegou / não chegou — reenviar). |
+| **Não duplica a resposta** | 500, 502/504 (proxy na frente da Evolution), timeout depois de enviar, 2xx sem id, queda no meio do envio: a mensagem pode ter chegado. Vira **"Entrega incerta — verificar WhatsApp"** e ninguém manda uma segunda sozinho: quem olha o grupo decide no painel (chegou / não chegou — reenviar). |
 | **Explica os erros** | Traduz o que o portal disse: "não foi possível contatar a averbadora", "matrícula inválida". Erros passageiros geram nova tentativa; erros de cadastro, não. |
 | **Registra tudo** | Banco SQLite com mensagens, simulações, consultores e logs. O painel lê daí. |
 
@@ -155,7 +155,7 @@ Duas chaves controlam isso:
 | Chave | Efeito |
 |---|---|
 | `SEND_RESULT_IMAGE` | `false` volta a responder só em texto |
-| `IMAGE_SHOW_CLIENT_DATA` | `false` envia o CPF mascarado na imagem |
+| `IMAGE_SHOW_CLIENT_DATA` | `false` envia o CPF mascarado na imagem — e desliga o print do portal, que não tem como mascarar |
 
 `IMAGE_SHOW_CLIENT_DATA` é separada de `MASK_CPF_IN_UI` de propósito: o painel e
 o grupo do WhatsApp são públicos diferentes.

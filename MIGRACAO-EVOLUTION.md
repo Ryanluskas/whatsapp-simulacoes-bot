@@ -208,8 +208,9 @@ tarde). Na dúvida, ele registra e para.
 | 400/422 sem explicação | **incerta** | `unconfirmed`; não cai para texto |
 | 400 com sinal de erro pós-envio (`prisma`, `database`, `timeout`…) | **incerta** | idem — vence a marca de citação |
 | 401 / 403 / 404 / licença | permanente | `failed`; não repete |
-| 408 / 429 / 502 / 503 / 504 | transitória | `retrying`: repete a MESMA requisição (com citação) |
-| 500 e outros 5xx | **incerta** | `unconfirmed`; **nunca** dispara reenvio sem citação |
+| 408 / 429 / 503 | transitória | `retrying`: repete a MESMA requisição (com citação) |
+| 500, 502, 504 e outros 5xx | **incerta** | `unconfirmed`; **nunca** dispara reenvio sem citação. 502/504 costumam vir de um proxy na frente da Evolution: ela pode ter recebido e enviado |
+| erro do httpx ao ler a resposta (corpo quebrado, protocolo) | **incerta** | `unconfirmed` |
 | timeout de conexão, conexão recusada, falha ao subir o corpo | transitória | `retrying` |
 | timeout de leitura, conexão caída depois de enviar | **incerta** | `unconfirmed` |
 
@@ -249,10 +250,17 @@ Santander.
 ANTES da chamada à API. Ao voltar, o bot decide pelo que está gravado, nunca
 por palpite:
 
-* saída com `wa_message_id` → **entregue** (só faltou gravar o desfecho);
-* saída em `sending` → **incerta**: a chamada tinha começado e a mensagem pode
-  ter saído; não reenvia;
-* nenhuma saída → nada saiu: vai para o reenvio.
+* saída que não está `failed`, `unconfirmed` nem `sending` → **entregue** (só
+  faltou gravar o desfecho);
+* saída em `sending` (a chamada tinha começado) ou `unconfirmed` (a API
+  respondeu sem provar) → **incerta**: a mensagem pode ter saído; não reenvia.
+  Vale mesmo se a simulação ainda estiver `pending` — saída e simulação são
+  gravadas em momentos diferentes, e uma queda entre as duas não pode virar
+  reenvio;
+* nenhuma saída que possa ter saído → vai para o reenvio.
+
+Só o "Não chegou — reenviar" do painel tira uma saída incerta dessa conta: ela
+vira `failed`, com `[conferido no painel: não chegou]` no erro.
 
 **Evidência.** Cada tentativa de envio vira uma linha em `messages`
 (`direction='out'`) com `provider`, `attempt`, `origin_message_id`,

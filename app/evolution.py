@@ -76,7 +76,7 @@ _MARCAS_DE_VALIDACAO = ('"exists":false', "requires property", "is not of a type
                         "is required", "invalid", "inválid", "malformed", "malformad")
 
 #: Nada foi processado; a MESMA requisicao pode ser repetida depois.
-_HTTP_TRANSITORIO = {408, 429, 502, 503, 504}
+_HTTP_TRANSITORIO = {408, 429, 503}
 #: Nada foi processado; repetir nao resolve.
 _HTTP_PERMANENTE = {401, 403, 404}
 
@@ -369,7 +369,10 @@ class EvolutionClient:
         """POST que ou devolve o corpo com ``key``, ou levanta ``ErroDeEnvio`` classificado."""
         try:
             resposta = self._http().post(rota, json=payload)
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
+        except httpx.HTTPError as exc:
+            # Qualquer erro do httpx, nao so' transporte: um ``DecodingError``
+            # depois de um 2xx escapava como excecao generica e virava
+            # "transitorio" no manager -- a imagem caia para texto e saiam duas.
             falha = classificar_falha_de_transporte(exc)
             self._log("ERROR", f"Envio para a Evolution sem resposta: {falha.motivo}")
             raise ErroDeEnvio(falha.motivo, desfecho=falha.desfecho) from exc

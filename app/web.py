@@ -291,6 +291,12 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
         ``{"acao": "nao_chegou"}`` libera um reenvio. 409 quando a entrega
         ja' nao esta' incerta (outro clique ou outra aba chegou antes).
         """
+        # So' JSON de verdade. Um <form enctype="text/plain"> de outra pagina
+        # do mesmo site monta um corpo parecido sem preflight; exigir o
+        # Content-Type fecha esse caminho.
+        tipo = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if tipo != "application/json":
+            raise HTTPException(status_code=415, detail="envie application/json")
         try:
             dados = await request.json()
         except ValueError:

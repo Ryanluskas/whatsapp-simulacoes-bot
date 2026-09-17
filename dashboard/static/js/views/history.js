@@ -375,7 +375,7 @@ function unconfirmedActions(s, reopen) {
       h("button.btn", {
         type: "button",
         onclick: () => decide("nao_chegou", "A resposta NÃO está no grupo?",
-          "Libera UM reenvio da mesma resposta, citando o mesmo pedido. Se ela tiver "
+          "Libera UM reenvio do resultado, em texto, citando o mesmo pedido. Se a primeira tiver "
           + "chegado e você não viu, o consultor recebe duas vezes.",
           "Não chegou — reenviar", "Reenvio liberado"),
       }, "Não chegou — reenviar"),

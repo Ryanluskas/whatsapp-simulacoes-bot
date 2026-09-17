@@ -445,9 +445,19 @@ class QueueService:
         """O que as linhas de SAIDA desta solicitacao provam.
 
         * ``("entregue", linha)`` -- alguma saida terminou como entregue;
-        * ``("incerta", None)``   -- ha' saida gravada como ``sending``: a chamada
-          a API comecou e nao terminou (queda, excecao). Pode ter saido;
-        * ``("nada", None)``      -- nenhuma tentativa em aberto: nada saiu.
+        * ``("incerta", None)``   -- ha' saida ``sending`` (a chamada comecou e
+          nao terminou) ou ``unconfirmed`` (a API respondeu sem provar: 500,
+          timeout de leitura, 2xx sem id). Pode ter saido;
+        * ``("nada", None)``      -- nenhuma tentativa que possa ter saido.
+
+        ``unconfirmed`` conta como incerta mesmo quando a SIMULACAO ainda nao
+        diz isso. A saida e a simulacao sao gravadas em momentos diferentes:
+        uma queda (ou um "database is locked") entre as duas deixava a saida
+        ``unconfirmed`` com a simulacao ``pending`` -- e a recuperacao lia
+        "nada saiu" e reenviava. Era uma segunda mensagem no grupo.
+
+        So' uma pessoa tira uma saida incerta dessa conta: "nao chegou", no
+        painel, a marca como ``failed``.
 
         E' a unica fonte da decisao de reenviar depois de uma interrupcao.
         Adivinhar "provavelmente nao saiu" e' como se manda a resposta duas
@@ -464,7 +474,7 @@ class QueueService:
             return "entregue", dict(entregue)
         em_curso = self.db.scalar(
             "SELECT COUNT(*) FROM messages WHERE simulation_id=? AND direction='out' "
-            "   AND status=?", (simulation_id, ENVIO_EM_CURSO))
+            "   AND status IN (?, ?)", (simulation_id, ENVIO_EM_CURSO, Delivery.UNCONFIRMED))
         return ("incerta", None) if em_curso else ("nada", None)
 
     def _resolver_entrega_interrompida(self, row: dict, motivo: str, *,
@@ -492,6 +502,14 @@ class QueueService:
                       "entregue; nada foi reenviado.", request_id=request_id)
             return situacao
         if situacao == "incerta":
+            erro = f"{motivo}; o envio tinha começado e a mensagem pode ter saído"
+            campos = {"delivery_status": Delivery.UNCONFIRMED, "sent_message_id": "",
+                      "delivery_error": erro, "updated_at": agora}
+            if not manter_status:
+                campos.update(status=status, stage=Stage.DELIVERY_UNCONFIRMED)
+            # Saida e simulacao na MESMA transacao: gravadas separadas, uma
+            # queda entre as duas e' justamente o estado que esta funcao
+            # existe para resolver.
             with self.db.write() as conn:
                 conn.execute(
                     "UPDATE messages SET status=?, desfecho='incerta', "
@@ -499,12 +517,9 @@ class QueueService:
                     " WHERE simulation_id=? AND direction='out' AND status=?",
                     (Delivery.UNCONFIRMED, f"interrompido durante o envio ({motivo})",
                      row["id"], ENVIO_EM_CURSO))
-            erro = f"{motivo}; o envio tinha começado e a mensagem pode ter saído"
-            campos = {"delivery_status": Delivery.UNCONFIRMED, "sent_message_id": "",
-                      "delivery_error": erro, "updated_at": agora}
-            if not manter_status:
-                campos.update(status=status, stage=Stage.DELIVERY_UNCONFIRMED)
-            self.db.update("simulations", campos, {"id": row["id"]})
+                conn.execute(
+                    f"UPDATE simulations SET {', '.join(f'{c}=?' for c in campos)} WHERE id=?",
+                    (*campos.values(), row["id"]))
             self._log("WARNING",
                       f"{request_id}: Entrega incerta — verificar WhatsApp. {erro}. "
                       "Não reenvio sozinho para não duplicar.", request_id=request_id)
