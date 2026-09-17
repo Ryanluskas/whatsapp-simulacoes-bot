@@ -534,13 +534,13 @@ ULTIMA_SAIDA_JS = r"""
 # `diagnostico/barra_citacao.png`, com a barra armada de verdade:
 #
 #     Ryan
-#     LUCIANGELA TESTADO
+#     CLIENTE TESTE
 #     ...
 #
-# O corpo era "LUCIANGELA TESTADO / 72845554753 / AMAPA". Normalizado sem
-# espacos, "luciangelatestado" tem 17 caracteres -- um a menos que os 18
-# comparados. O 18o caractere procurado era o primeiro digito do CPF, que a
-# barra nunca mostra. A conferencia reprovava por UM caractere.
+# O corpo era "CLIENTE TESTE / 52998224725 / AMAPA". Normalizado sem
+# espacos, "clienteteste" tem 12 caracteres -- menos que os 18
+# comparados. O caractere seguinte procurado era o primeiro digito do CPF, que a
+# barra nunca mostra. A conferencia reprovava por esse corte.
 #
 # O formato do pedido e' sempre NOME / CPF / ESTADO, entao isso acontecia
 # em qualquer nome curto. Rodando a conta sobre os 116 pedidos multi-linha
@@ -553,7 +553,7 @@ ULTIMA_SAIDA_JS = r"""
 # Ou seja: a citacao funcionava. Quem a jogava fora era esta conferencia.
 #
 # O teste que deixou passar tinha uma barra de mentira, com o corpo inteiro
-# dentro dela ("Ryan LUCIANGELA TESTADO 72845554753"). A fixture inventada
+# dentro dela ("Ryan CLIENTE TESTE 52998224725"). A fixture inventada
 # confirmava o codigo em vez de confrontar a tela.
 #
 # COMO ELA JULGA AGORA
