@@ -11,26 +11,25 @@
  *  3. todo gráfico aqui tem um gêmeo em tabela, para que nenhum valor dependa
  *     de passar o mouse ou de enxergar cor.
  *
- * As cores vêm dos tokens validados em `tokens.css`.
+ * As cores são tokens de `tokens.css` (var(--...)); `svg()` os aplica como
+ * propriedade CSS. Nenhum HEX aqui.
  */
 
 import { h, mount, svg } from "./core/dom.js";
 
-const SURFACE = "#131519";
-const INK_3 = "#8A93A1";
+const SURFACE = "var(--surface)";
 
 export const COLOR = {
-  // Rampa ordinal validada (uma cor só, luminosidade monotônica, ΔL >= 0.06,
-  // ponta escura com 2,74:1 contra a superfície). Do escuro ao claro.
-  ramp: ["#4E4CC3", "#6568E1", "#8088F5", "#9FA9FC", "#C1C9FF"],
-  brand: "#6E74E6",
-  brandSolid: "#5D5FD7",
-  done: "#3FAA6C",
-  error: "#E05A5A",
-  queued: "#B5871F",
-  processing: "#4C93D6",
-  consulting: "#9C4F96",
-  idle: "#7B828F",
+  // Rampa ordinal (lilás), do escuro ao claro.
+  ramp: ["var(--chart-1)", "var(--chart-2)", "var(--chart-3)", "var(--chart-4)", "var(--chart-5)"],
+  brand: "var(--chart-series)",
+  done: "var(--success)",
+  error: "var(--error)",
+  queued: "var(--muted)",
+  processing: "var(--info)",
+  consulting: "var(--lilac)",
+  warning: "var(--warning)",
+  idle: "var(--border-strong)",
 };
 
 export const STATE_COLOR = {
@@ -39,7 +38,7 @@ export const STATE_COLOR = {
   queued: COLOR.queued, received: COLOR.queued, validated: COLOR.queued, identified: COLOR.queued,
   processing: COLOR.processing,
   consulting: COLOR.consulting, extracting: COLOR.consulting, replying: COLOR.consulting,
-  cancelled: COLOR.idle, interrupted: COLOR.idle,
+  interrupted: COLOR.warning, cancelled: COLOR.idle,
 };
 
 const PAD = { top: 14, right: 16, bottom: 26, left: 40 };
@@ -86,10 +85,10 @@ export function chartFrame({ svgNode, legend = [], table = null, note = "" }) {
         toggle.textContent = open ? "Ver como tabela" : "Ocultar tabela";
       },
     }, "Ver como tabela");
-    parts.push(h("div.chart-foot", note && h("span.muted", { style: { fontSize: "11px" } }, note), toggle));
+    parts.push(h("div.chart-foot", note && h("span.note", note), toggle));
     parts.push(twin);
   } else if (note) {
-    parts.push(h("div.chart-foot", h("span.muted", { style: { fontSize: "11px" } }, note)));
+    parts.push(h("div.chart-foot", h("span.note", note)));
   }
 
   return h("div", ...parts);
@@ -629,7 +628,7 @@ export function funnelChart(stages, { width = 560 } = {}) {
       const rate = previous ? Math.round((value / previous) * 100) : 0;
       root.appendChild(svg("text", {
         class: "axis-text", x: x0 - 6, y: barY - 3, "text-anchor": "end",
-        fill: INK_3, text: `${rate}%`,
+        text: `${rate}%`,
       }));
     }
   });

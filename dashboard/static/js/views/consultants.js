@@ -1,22 +1,29 @@
-/** Gestão de consultores: cadastro, edição, ativação e desempenho. */
+/** Consultores: cadastro, edição, ativação e desempenho. */
 
 import { api } from "../core/api.js";
 import { h, mount } from "../core/dom.js";
 import * as fmt from "../core/format.js";
-import {
-  badge, closeModal, confirmAction, empty, errorState, modal, skeletonRows, toast,
-} from "../core/ui.js";
+import { icon } from "../core/icons.js";
+import { badge } from "../core/status.js";
+import { dataTable, twoLine } from "../core/table.js";
+import { closeModal, confirmAction, empty, errorState, modal, toast } from "../core/ui.js";
 import { setSearchTerm } from "./history.js";
 
-const COLUMNS = ["Consultor", "WhatsApp", "Status", "Solicitações", "Concluídas",
-  "Erros", "Taxa", "Tempo médio", "Última atividade", ""];
+const COLUMNS = [
+  { label: "Consultor" },
+  { label: "Situação" },
+  { label: "Solicitações", class: "num" },
+  { label: "Taxa de sucesso", class: "num" },
+  { label: "Última atividade", class: "num" },
+  { label: "", srLabel: "Ações", class: "act" },
+];
 
 export function render(root, { navigate }) {
-  const tbody = h("tbody");
+  const tabela = dataTable({ columns: COLUMNS, caption: "Consultores e desempenho no período" });
   let period = "30d";
 
-  const periodSel = h("select.input", {
-    style: { width: "auto" }, "aria-label": "Período das estatísticas",
+  const periodoSel = h("select.input", {
+    "aria-label": "Período das estatísticas",
     onchange: (e) => { period = e.target.value; load(); },
   },
     h("option", { value: "7d" }, "Últimos 7 dias"),
@@ -25,143 +32,144 @@ export function render(root, { navigate }) {
   );
 
   mount(root,
-    h("div.section-head",
-      h("h3", "Consultores"),
-      h("span.hint", "identificados automaticamente pelo número do WhatsApp"),
-      h("div.spacer"),
-      periodSel,
-      h("button.btn.primary", { type: "button", onclick: () => openForm(null, load) }, "+ Cadastrar"),
-    ),
-    h("div.table-wrap",
-      h("table.data",
-        h("thead", h("tr", COLUMNS.map((c, i) =>
-          h("th", { class: i >= 3 && i <= 7 ? "num" : "" }, c)))),
-        tbody,
+    h("div.stack",
+      h("div.toolbar",
+        h("span.muted", { style: { fontSize: "var(--t-meta-lg)" } },
+          "Quem manda pedido no grupo é cadastrado automaticamente."),
+        h("div.push", { style: { display: "flex", gap: "8px" } },
+          periodoSel,
+          h("button.btn.primary", { type: "button", onclick: () => abrirForm(null, load) },
+            icon("plus", 15), "Cadastrar"),
+        ),
       ),
+      tabela.wrap,
     ),
   );
 
   async function load() {
-    mount(tbody, skeletonRows(5, COLUMNS.length));
-    let data;
+    if (!tabela.tbody.childElementCount) tabela.loading(5);
+    let dados;
     try {
-      data = await api.consultants({ period });
+      dados = await api.consultants({ period });
     } catch (error) {
-      mount(tbody, h("tr", h("td", { colspan: COLUMNS.length }, errorState(error.message, load))));
+      tabela.message(errorState(error.message, load));
       return;
     }
 
-    if (!data.items.length) {
-      mount(tbody, h("tr", h("td", { colspan: COLUMNS.length }, empty({
-        mark: "consultants",
+    if (!dados.items.length) {
+      tabela.message(empty({
+        allana: true,
         title: "Nenhum consultor ainda",
-        desc: "Quem mandar uma solicitação no grupo é cadastrado automaticamente. "
+        desc: "Quem mandar uma solicitação no grupo entra nesta lista sozinho. "
             + "Você também pode cadastrar manualmente.",
-      }))));
+      }));
       return;
     }
 
-    mount(tbody, data.items.map((c) => h("tr",
-      h("td.cell-strong", c.name),
-      h("td", h("span.mono", { style: { fontSize: "12px" } }, c.phone_display || "—")),
-      h("td", badge(c.active ? "completed" : "cancelled", c.active ? "Ativo" : "Inativo")),
-      h("td.num", fmt.int(c.total)),
-      h("td.num", fmt.int(c.completed)),
-      h("td.num", c.errors
-        ? h("span", { style: { color: "var(--st-error)" } }, fmt.int(c.errors)) : "0"),
-      h("td.num", c.total ? fmt.pct(c.success_rate) : "—"),
-      h("td.num", fmt.duration(c.avg_seconds)),
-      h("td.num.muted", c.last_activity ? fmt.relative(c.last_activity) : "nunca"),
-      h("td", { style: { whiteSpace: "nowrap" } },
-        h("button.btn.sm.ghost", {
-          type: "button", title: "Ver histórico deste consultor",
-          onclick: () => { setSearchTerm(c.name); navigate("history"); },
-        }, "Histórico"),
-        h("button.btn.sm.ghost", {
-          type: "button", onclick: () => openForm(c, load),
-        }, "Editar"),
-        h("button.btn.sm.ghost", {
-          type: "button",
-          onclick: () => toggleActive(c, load),
-        }, c.active ? "Desativar" : "Ativar"),
-      ),
-    )));
+    tabela.rows(dados.items, (c) => ({
+      cells: [
+        twoLine(c.name, h("span.mono", c.phone_display || "—")),
+        c.active ? badge("success", "Ativo", "check") : badge("neutral", "Inativo", "pause"),
+        twoLine(fmt.int(c.total),
+          `${fmt.int(c.completed)} concluídas · ${fmt.int(c.errors)} com erro`),
+        twoLine(c.total ? fmt.pct(c.success_rate) : "—",
+          c.avg_seconds ? `média ${fmt.duration(c.avg_seconds)}` : ""),
+        c.last_activity ? fmt.relative(c.last_activity) : h("span.faint", "nunca"),
+        h("div", { style: { display: "inline-flex", gap: "4px" } },
+          h("button.btn.sm.ghost.icon", {
+            type: "button", "aria-label": `Ver solicitações de ${c.name}`, "data-tip": "Solicitações",
+            onclick: () => { setSearchTerm(c.name); navigate("history"); },
+          }, icon("history", 15)),
+          h("button.btn.sm.ghost.icon", {
+            type: "button", "aria-label": `Editar ${c.name}`, "data-tip": "Editar",
+            onclick: () => abrirForm(c, load),
+          }, icon("edit", 15)),
+          h("button.btn.sm.ghost.icon", {
+            type: "button",
+            "aria-label": `${c.active ? "Desativar" : "Ativar"} ${c.name}`,
+            "data-tip": c.active ? "Desativar" : "Ativar",
+            onclick: () => alternar(c, load),
+          }, icon("power", 15)),
+        ),
+      ],
+    }));
   }
 
   load();
   return () => {};
 }
 
-function toggleActive(consultant, reload) {
-  if (consultant.active) {
+function alternar(consultor, recarregar) {
+  if (consultor.active) {
     confirmAction(
       "Desativar consultor",
-      `${consultant.name} deixa de aparecer como ativo. O histórico é preservado e, `
+      `${consultor.name} deixa de aparecer como ativo. O histórico é preservado e, `
       + "se ele mandar uma nova solicitação, volta a ser reativado automaticamente.",
       async () => {
         try {
-          await api.deactivateConsultant(consultant.id);
-          toast("success", "Consultor desativado", consultant.name);
-          reload();
+          await api.deactivateConsultant(consultor.id);
+          toast("success", "Consultor desativado", consultor.name);
+          recarregar();
         } catch (error) {
           toast("error", "Não foi possível desativar", error.message);
         }
       },
       "Desativar",
+      { variant: "caution", iconName: "power" },
     );
     return;
   }
-  api.updateConsultant(consultant.id, { active: true })
-    .then(() => { toast("success", "Consultor ativado", consultant.name); reload(); })
+  api.updateConsultant(consultor.id, { active: true })
+    .then(() => { toast("success", "Consultor ativado", consultor.name); recarregar(); })
     .catch((error) => toast("error", "Não foi possível ativar", error.message));
 }
 
-function openForm(consultant, reload) {
-  const isEdit = Boolean(consultant);
-  const name = h("input.input", { type: "text", value: consultant?.name || "", required: true });
-  const phone = h("input.input", {
-    type: "text", value: consultant?.phone || consultant?.phone_display || "",
+function abrirForm(consultor, recarregar) {
+  const edicao = Boolean(consultor);
+  const nome = h("input.input", { type: "text", value: consultor?.name || "", required: true });
+  const telefone = h("input.input", {
+    type: "text", value: consultor?.phone || consultor?.phone_display || "",
     placeholder: "5567999998888",
   });
-  const notes = h("input.input", { type: "text", value: consultant?.notes || "" });
-  const error = h("div.login-error");
-  const save = h("button.btn.primary", { type: "submit" }, isEdit ? "Salvar" : "Cadastrar");
+  const notas = h("input.input", { type: "text", value: consultor?.notes || "" });
+  const erro = h("div.form-error");
+  const salvar = h("button.btn.primary", { type: "submit" }, edicao ? "Salvar" : "Cadastrar");
 
   const form = h("form", {
     style: { display: "grid", gap: "14px" },
     onsubmit: async (event) => {
       event.preventDefault();
-      const value = name.value.trim();
-      if (!value) { error.textContent = "Informe o nome."; return; }
-      save.disabled = true;
-      error.textContent = "";
-      const payload = { name: value, phone: phone.value.trim(), notes: notes.value.trim() };
+      const valor = nome.value.trim();
+      if (!valor) { erro.textContent = "Informe o nome."; return; }
+      salvar.disabled = true;
+      erro.textContent = "";
+      const payload = { name: valor, phone: telefone.value.trim(), notes: notas.value.trim() };
       try {
-        if (isEdit) await api.updateConsultant(consultant.id, payload);
+        if (edicao) await api.updateConsultant(consultor.id, payload);
         else await api.createConsultant(payload);
-        toast("success", isEdit ? "Consultor atualizado" : "Consultor cadastrado", value);
+        toast("success", edicao ? "Consultor atualizado" : "Consultor cadastrado", valor);
         closeModal();
-        reload();
+        recarregar();
       } catch (err) {
-        error.textContent = err.message;
-        save.disabled = false;
+        erro.textContent = err.message;
+        salvar.disabled = false;
       }
     },
   },
-    h("label.field", "Nome exibido", name),
-    h("label.field", "WhatsApp (só números, com DDI)", phone),
-    h("label.field", "Observações", notes),
-    isEdit
-      ? h("p.muted", { style: { fontSize: "12px", margin: 0 } },
+    h("label.field", "Nome exibido", nome),
+    h("label.field", "WhatsApp (só números, com DDI)", telefone),
+    h("label.field", "Observações", notas),
+    edicao
+      ? h("p.muted", { style: { fontSize: "var(--t-meta)", margin: 0 } },
         "Ao salvar o nome aqui, ele deixa de ser sobrescrito pelo nome do WhatsApp.")
       : null,
-    error,
-    h("div", { style: { display: "flex", gap: "8px", justifyContent: "flex-end" } },
+    erro,
+    h("div.modal-actions",
       h("button.btn", { type: "button", onclick: closeModal }, "Cancelar"),
-      save,
+      salvar,
     ),
   );
 
-  modal(isEdit ? `Editar ${consultant.name}` : "Novo consultor", form);
-  name.focus();
+  modal(edicao ? `Editar ${consultor.name}` : "Novo consultor", form);
+  nome.focus();
 }

@@ -99,6 +99,37 @@ contrato (`app/whatsapp_port.py`): `dom` (navegador, `app/whatsapp.py`) e
   **TESTE REAL PENDENTE**. Teste com servidor falso não valida a Evolution
   nem o Santander de verdade; não diga "validado" sem o teste real.
 
+## ALLANA BOT UI PRINCIPLE
+
+A interface deve usar a identidade visual da Allana sem transformar a
+dashboard em uma interface temática/cartoon.
+
+A personagem é parte da marca.
+A dashboard é um produto operacional.
+
+A estética deve permanecer:
+minimalista + dark + profissional + confortável.
+
+Vermelho = identidade/ação importante.
+Lilás = detalhe/acento.
+Navy/black = estrutura.
+Branco/cinza = leitura.
+
+Nunca saturar a interface com vermelho ou roxo.
+
+### Como isso vira código
+
+- Cor só sai de `dashboard/static/css/tokens.css`. Nenhum HEX em `app.css`,
+  em `.js` ou em atributo de SVG — use `var(--token)`.
+- A Allana (imagem) aparece em quatro lugares: barra lateral, login, estado
+  vazio e estado de erro. Em mais nenhum.
+- Estado nunca é comunicado só por cor: badge tem ícone e texto.
+- Vermelho não significa erro. Erro é `--error`.
+- Tabela tem no máximo 6 colunas; o resto vai para o painel de detalhe.
+- Um estado do backend (`status`, `stage`, `delivery_status`, `quote_status`)
+  é traduzido em `js/core/status.js` e em lugar nenhum mais. O painel não
+  inventa estado que o banco não gravou.
+
 ## Estilo
 
 - Siga o código ao redor: comentários de código em português sem acento

@@ -2,10 +2,11 @@
 
 import { api, onUnauthorized } from "./core/api.js";
 import { $, h, mount } from "./core/dom.js";
+import { closeDrawer } from "./core/drawer.js";
 import { icon } from "./core/icons.js";
-import { logoLockup } from "./core/logo.js";
 import * as store from "./core/store.js";
 import * as stream from "./core/stream.js";
+import { PRESENCE_LABEL, WHATSAPP_LABEL, toneOf } from "./core/status.js";
 import { closeModal, toast } from "./core/ui.js";
 import { shouldNotify } from "./feed.js";
 
@@ -18,15 +19,41 @@ import * as queue from "./views/queue.js";
 import * as reports from "./views/reports.js";
 import * as status from "./views/status.js";
 
+/* Ordem da barra lateral = ordem da operação: primeiro o que está
+   acontecendo agora, depois gestão, por último o sistema. */
 const ROUTES = {
-  overview:    { title: "Visão geral", icon: "overview",    view: overview },
-  monitor:     { title: "Monitor",     icon: "monitor",     view: monitor, live: true },
-  queue:       { title: "Fila",        icon: "queue",       view: queue, badge: "queue" },
-  history:     { title: "Histórico",   icon: "history",     view: history },
-  reports:     { title: "Relatórios",  icon: "reports",     view: reports },
-  consultants: { title: "Consultores", icon: "consultants", view: consultants },
-  logs:        { title: "Logs",        icon: "logs",        view: logs },
-  status:      { title: "Status",      icon: "status",      view: status },
+  overview: {
+    title: "Visão geral", subtitle: "Como o bot está agora",
+    icon: "overview", group: "Operação", view: overview,
+  },
+  history: {
+    title: "Solicitações", subtitle: "Pedidos, resultado e entrega",
+    icon: "history", group: "Operação", view: history,
+  },
+  queue: {
+    title: "Fila", subtitle: "Aguardando e em execução",
+    icon: "queue", group: "Operação", view: queue, badge: "queue",
+  },
+  monitor: {
+    title: "Monitor", subtitle: "Eventos em tempo real",
+    icon: "monitor", group: "Operação", view: monitor,
+  },
+  consultants: {
+    title: "Consultores", subtitle: "Quem pede simulações no grupo",
+    icon: "consultants", group: "Gestão", view: consultants,
+  },
+  reports: {
+    title: "Relatórios", subtitle: "Números por período e exportação",
+    icon: "reports", group: "Gestão", view: reports,
+  },
+  logs: {
+    title: "Logs", subtitle: "Registro técnico do sistema",
+    icon: "logs", group: "Sistema", view: logs,
+  },
+  status: {
+    title: "Status", subtitle: "WhatsApp, simulador e configuração",
+    icon: "status", group: "Sistema", view: status,
+  },
 };
 
 const DEFAULT_ROUTE = "overview";
@@ -47,29 +74,29 @@ function navigate(name, { push = true } = {}) {
   disposeView = null;
   current = route;
   closeModal();
+  closeDrawer({ instant: true });
 
   const meta = ROUTES[route];
-  document.title = `${meta.title} · Allana`;
+  document.title = `${meta.title} · Allana Bot`;
   $("#view-title").textContent = meta.title;
-  $("#crumb").textContent = `Painel · ${meta.title}`;
+  $("#view-subtitle").textContent = meta.subtitle;
 
   document.querySelectorAll(".nav-item").forEach((item) => {
     const active = item.dataset.route === route;
-    item.setAttribute("aria-current", active ? "page" : "false");
-    if (!active) item.removeAttribute("aria-current");
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
   });
 
-  $("#app").dataset.nav = "closed";
+  fecharMenu();
   const root = $("#view");
   mount(root);
   try {
     disposeView = meta.view.render(root, { navigate }) || null;
   } catch (error) {
     console.error(error);
-    mount(root, h("div.error-state",
-      h("div.mark", icon("alert", 22)),
-      h("div", "Esta tela falhou ao carregar."),
-      h("code.mono", { style: { fontSize: "12px", color: "var(--ink-3)" } }, String(error.message || error)),
+    mount(root, h("div.error-state", { role: "alert" },
+      h("div.title", "Esta tela falhou ao carregar."),
+      h("code.mono.desc", String(error.message || error)),
     ));
   }
   root.scrollTop = 0;
@@ -84,6 +111,8 @@ function showLogin(message = "") {
   current = null;
   disposeView?.();
   disposeView = null;
+  closeDrawer({ instant: true });
+  closeModal();
   $("#login").classList.remove("hidden");
   $("#app").classList.add("hidden");
   $("#login-error").textContent = message;
@@ -146,30 +175,50 @@ function wireStream() {
 
 /* ================================================= cromo da interface ==== */
 
-function buildLogos() {
-  mount($("#login-logo"), logoLockup({ size: 44, sub: "" }));
-  mount($("#sidebar-logo"), logoLockup({ size: 34, sub: "Operações" }));
+function buildNav() {
+  const grupos = new Map();
+  for (const [name, meta] of Object.entries(ROUTES)) {
+    if (!grupos.has(meta.group)) grupos.set(meta.group, []);
+    grupos.get(meta.group).push([name, meta]);
+  }
+
+  mount($("#nav"), Array.from(grupos, ([grupo, itens]) =>
+    h("div.nav-group",
+      h("div.nav-group-label", grupo),
+      itens.map(([name, meta]) => h("a.nav-item", {
+        href: `#${name}`, dataset: { route: name },
+        onclick: (event) => { event.preventDefault(); navigate(name); },
+      },
+        h("span.ic", icon(meta.icon, 17)),
+        h("span", meta.title),
+        meta.badge === "queue"
+          ? h("span.count", { dataset: { route: name }, title: "Solicitações na fila" }, "0")
+          : null,
+      )),
+    )));
 }
 
-function buildNav() {
-  const nav = $("#nav");
-  mount(nav, Object.entries(ROUTES).map(([name, meta]) =>
-    h("a.nav-item", {
-      href: `#${name}`, dataset: { route: name }, role: "link",
-      onclick: (event) => { event.preventDefault(); navigate(name); },
-    },
-      h("span.ic", icon(meta.icon, 17)),
-      h("span", meta.title),
-      meta.badge === "queue" ? h("span.count", { dataset: { route: name } }, "0") : null,
-    )));
+function abrirMenu() {
+  const app = $("#app");
+  app.dataset.nav = "open";
+  $("#menu-btn").setAttribute("aria-expanded", "true");
+  $("#sidebar").querySelector(".nav-item")?.focus();
+}
+
+function fecharMenu() {
+  const app = $("#app");
+  if (app.dataset.nav !== "open") return;
+  app.dataset.nav = "closed";
+  $("#menu-btn").setAttribute("aria-expanded", "false");
 }
 
 function wireChrome() {
   mount($("#logout"), icon("logout", 17));
+  mount($("#menu-btn"), icon("menu", 18));
+  mount($("#sb-close"), icon("close", 16));
   const lupa = icon("search", 15);
   lupa.classList.add("ic");
   $(".search")?.prepend(lupa);
-  mount($("#menu-btn"), icon("menu", 18));
 
   $("#logout").addEventListener("click", async () => {
     try { await api.logout(); } catch { /* sai de qualquer forma */ }
@@ -177,9 +226,11 @@ function wireChrome() {
   });
 
   $("#menu-btn").addEventListener("click", () => {
-    const app = $("#app");
-    app.dataset.nav = app.dataset.nav === "open" ? "closed" : "open";
+    if ($("#app").dataset.nav === "open") fecharMenu();
+    else abrirMenu();
   });
+  $("#sb-close").addEventListener("click", () => { fecharMenu(); $("#menu-btn").focus(); });
+  $("#nav-overlay").addEventListener("click", () => { fecharMenu(); $("#menu-btn").focus(); });
 
   $("#global-search").addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
@@ -187,30 +238,39 @@ function wireChrome() {
     if (term.length < 2) return;
     history.setSearchTerm(term);
     event.target.value = "";
-    current = null;          // força o redesenho mesmo já estando no histórico
+    current = null;          // força o redesenho mesmo já estando na lista
     navigate("history");
   });
 
-  // Atalho: "/" foca a busca, Esc fecha o modal
+  // Atalhos: "/" foca a busca; Esc fecha o menu lateral no celular
   document.addEventListener("keydown", (event) => {
     if (event.key === "/" && !/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName)) {
       event.preventDefault();
       $("#global-search").focus();
     }
+    if (event.key === "Escape" && $("#app").dataset.nav === "open") {
+      fecharMenu();
+      $("#menu-btn").focus();
+    }
   });
 
-  // Indicador de conexão do WhatsApp no topo e na barra lateral
-  const paint = (wa) => {
+  // Conexão do WhatsApp: presença na barra lateral e estado no cabeçalho
+  const paintWhatsApp = (wa) => {
     const state = wa.state || (wa.connected ? "connected" : "disconnected");
-    $("#wa-dot").dataset.state = state;
+    const tom = toneOf(state);
+    const onde = wa.chat_name || wa.group_name || "";
+
+    $("#wa-dot").dataset.tone = tom;
     $("#wa-dot").classList.toggle("pulse", Boolean(wa.connected));
-    $("#wa-dot-mini").dataset.state = state;
-    $("#wa-label").textContent = LABEL[state] || "Desconhecido";
-    $("#wa-meta").textContent = wa.phone || wa.chat_name || wa.group_name || "";
-    $("#wa-mini-label").textContent = wa.connected ? "WhatsApp online" : "WhatsApp offline";
+    $("#wa-label").textContent = WHATSAPP_LABEL[state] || "Desconhecido";
+    $("#wa-meta").textContent = onde;
+
+    $("#presence-dot").dataset.tone = tom;
+    $("#presence-dot").classList.toggle("pulse", Boolean(wa.connected));
+    $("#presence-label").textContent = PRESENCE_LABEL[state] || "Estado desconhecido";
   };
-  paint(store.get("whatsapp"));
-  store.subscribe("whatsapp", paint);
+  paintWhatsApp(store.get("whatsapp"));
+  store.subscribe("whatsapp", paintWhatsApp);
 
   const paintQueue = (queueState) => {
     const el = document.querySelector('.nav-item .count[data-route="queue"]');
@@ -223,19 +283,12 @@ function wireChrome() {
   store.subscribe("queue", paintQueue);
 
   const paintStream = (s) => {
-    $("#stream-dot").dataset.state = s.connected ? "connected" : "error";
-    $("#stream-dot").title = s.connected ? "Recebendo eventos ao vivo" : "Reconectando…";
+    $("#stream-dot").dataset.tone = s.connected ? "success" : "error";
+    $("#stream-label").textContent = s.connected ? "Eventos ao vivo" : "Reconectando…";
   };
   paintStream(store.get("stream"));
   store.subscribe("stream", paintStream);
 }
-
-const LABEL = {
-  connected: "Conectado",
-  disconnected: "Desconectado",
-  qr: "Ler QR Code",
-  starting: "Conectando…",
-};
 
 /* ==================================================================== boot */
 
@@ -259,7 +312,6 @@ $("#login-form").addEventListener("submit", async (event) => {
 });
 
 async function boot() {
-  buildLogos();
   buildNav();
   wireChrome();
   wireStream();

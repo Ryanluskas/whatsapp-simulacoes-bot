@@ -166,19 +166,58 @@ o grupo do WhatsApp são públicos diferentes.
 
 ## O painel
 
-| Tela | O que faz |
+| Tela | O que responde |
 |---|---|
-| **Visão geral** | KPIs do dia, volume e resultado por dia, horários de pico, ranking de consultores, funil operacional |
-| **Monitor** | Console ao vivo do bot trabalhando: cada mensagem, etapa e resposta, com filtros e pausa |
+| **Visão geral** | "Como está o bot agora?": WhatsApp, simulador, fila e tempo real; números do dia; solicitações recentes; o que precisa de atenção; funil do dia; atividade |
+| **Solicitações** | Lista filtrável com **status do pedido** e **estado da entrega** lado a lado; o detalhe abre num painel lateral |
 | **Fila** | Posição, consultor, cliente, etapa atual, tentativas e tempo em execução |
-| **Histórico** | Busca por consultor, CPF, contrato, banco, status, refin, período e ID; timeline completa por solicitação |
-| **Relatórios** | Números por período e por consultor, com exportação CSV / Excel / PDF |
+| **Monitor** | Console ao vivo do bot trabalhando: cada mensagem, etapa e resposta, com filtros e pausa |
 | **Consultores** | Cadastro, edição, ativação e desempenho individual |
+| **Relatórios** | Números por período e por consultor, com exportação CSV / Excel / PDF |
 | **Logs** | INFO / WARNING / ERROR / DEBUG com filtros e busca |
-| **Status** | Conexão do WhatsApp, QR Code, simuladores e configuração ativa |
+| **Status** | Conexão do WhatsApp, QR Code, simuladores, diagnóstico da Evolution e configuração ativa |
 
 O painel atualiza sozinho por **Server-Sent Events**. Não precisa de F5, e o
 monitor reconstrói o histórico recente do banco ao abrir.
+
+### O painel de detalhe
+
+Clicar numa solicitação (em qualquer tela) abre um painel lateral com tudo
+que o banco gravou daquele pedido: ids, consultor, chat, horário, status,
+entrega, citação, tentativas, erros, linha do tempo, mensagens (com a
+evidência de cada envio e a imagem que o consultor recebeu) e os contratos
+encontrados. Quando a entrega está **não confirmada**, é ali que ficam as
+duas ações manuais — *Chegou no grupo* e *Não chegou — reenviar* —
+visualmente diferentes de propósito: a segunda envia mensagem, a primeira
+não.
+
+### Identidade visual
+
+A Allana é a marca; o painel é ferramenta de operação. A estética é
+minimalista, escura e sóbria — a personagem aparece na barra lateral, no
+login e nos estados vazio e de erro, e em mais lugar nenhum.
+
+| Papel | Token | Onde |
+|---|---|---|
+| Estrutura (70%) | `--bg` `--surface` `--surface-2` `--surface-hover` `--border` | fundo, cards, tabelas |
+| Leitura (15%) | `--text` `--text-secondary` `--muted` | texto, metadado, placeholder |
+| Identidade (10%) | `--allana-red` `--accent-solid` | logo, fio da navegação ativa, botão principal |
+| Detalhe (5%) | `--lilac` `--lilac-soft` `--purple-dark` | foco, gráficos, acentos |
+| Estado | `--success` `--warning` `--error` `--info` | badges, callouts, pontos |
+
+Regras que o código segue (ver `AGENTS.md`): cor só existe em
+`css/tokens.css`; estado nunca depende só de cor (badge tem ícone e texto);
+vermelho é identidade e ação, **não** é erro; tabela tem no máximo 6 colunas.
+
+Contraste medido sobre `--surface`: texto 17,1:1 · texto secundário 7,7:1 ·
+erro 5,7:1 · aviso 11,4:1 · sucesso 10,7:1 · texto claro sobre o vermelho do
+botão 5,2:1. `--muted` (3,8:1) é só para placeholder, ícone decorativo e
+separador.
+
+No celular a barra lateral vira gaveta e **as tabelas viram cartões** — não
+existe rolagem horizontal. Os arquivos da marca ficam em
+`dashboard/static/img/` (`allana-logo.webp`, `allana-avatar.webp`,
+`favicon.png`), recortados da arte original.
 
 ---
 
@@ -313,7 +352,13 @@ Dockerfile              imagem do painel + bot do WhatsApp
 docker-compose.yml      volumes, portas e variáveis
 
 dashboard/static/       painel (sem build, sem CDN, funciona offline)
-tests/                  947 testes
+  css/tokens.css        ÚNICO lugar com cor: paleta da Allana e papéis
+  css/app.css           layout e componentes (só var(--token))
+  js/core/              dom, api, store, stream, status, ui, table,
+                        drawer, timeline, icons, logo, format
+  js/views/             uma tela por arquivo + request-detail.js
+  img/                  logo, avatar e favicon da Allana
+tests/                  1190 testes
 ```
 
 ### O caminho de uma mensagem
@@ -378,7 +423,7 @@ Santander falsos, incluindo matar o processo no meio da fila):
 Ele **não** substitui validar no grupo de teste com a Evolution de verdade —
 ver [MIGRACAO-EVOLUTION.md](MIGRACAO-EVOLUTION.md).
 
-São **1175 testes** (mais um que só roda com respostas reais da Evolution
+São **1190 testes** (mais um que só roda com respostas reais da Evolution
 capturadas). Cobrem, entre outros: identificação do consultor pelo
 telefone, isolamento de thread do Playwright, execução de 1/2/5 solicitações
 simultâneas sem cruzar resultados, tentativas e erros permanentes, recuperação
@@ -398,6 +443,7 @@ Os que valem destaque, porque nasceram de defeitos reais em produção:
 | `test_reenvio.py` | Entrega que falhou é reenviada, e o reenvio **não atropela** a entrega em curso |
 | `test_erro_portal.py` | O erro do Santander chega traduzido ao consultor, e só o que é passageiro gera nova tentativa |
 | `test_docker.py` | Caminho do Windows vazando para o container, versão do Playwright, segredo fora da imagem |
+| `test_painel_visual.py` | As invariantes da interface: cor só em `tokens.css`, o que o `index.html` referencia existe, tabela com no máximo 6 colunas, estado traduzido num módulo só e badge que nunca depende só de cor |
 | `test_whatsapp_service.py` | A invariante que sustenta tudo: nada do Playwright fora da thread dona |
 | `test_mensagens.py` | O tom das falas e, principalmente, **o que o bot não fala** — falha se voltar "Simulação recebida", "com sucesso" ou mensagem longa demais |
 

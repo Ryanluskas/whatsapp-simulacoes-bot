@@ -1,101 +1,97 @@
-/** Fila de processamento: posição, consultor, cliente, etapa, tempo e tentativas. */
+/** Fila de processamento: posição, consultor, cliente, etapa e tempo. */
 
 import { h, mount } from "../core/dom.js";
 import * as fmt from "../core/format.js";
+import { icon } from "../core/icons.js";
 import * as store from "../core/store.js";
-import { badge, chip, empty } from "../core/ui.js";
-import { openSimulation } from "./history.js";
+import { stateBadge } from "../core/status.js";
+import { dataTable, twoLine } from "../core/table.js";
+import { chip, empty } from "../core/ui.js";
+import { openRequest } from "./request-detail.js";
 
-const COLUMNS = ["#", "Solicitação", "Consultor", "Cliente", "CPF", "Contrato",
-  "Etapa", "Tentativas", "Recebida", "Tempo"];
+const COLUMNS = [
+  { label: "#", class: "num" },
+  { label: "Consultor" },
+  { label: "Cliente" },
+  { label: "Etapa" },
+  { label: "Tempo", class: "num" },
+  { label: "", srLabel: "Detalhes", class: "act" },
+];
 
 export function render(root) {
-  const summary = h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } });
-  const tbody = h("tbody");
+  const resumo = h("div.toolbar");
+  const tabela = dataTable({ columns: COLUMNS, caption: "Solicitações na fila e em execução" });
 
-  mount(root,
-    h("div.section-head",
-      h("h3", "Fila de processamento"),
-      h("span.hint", "vários consultores podem solicitar ao mesmo tempo · cada pedido é isolado"),
-    ),
-    h("div", { style: { marginBottom: "16px" } }, summary),
-    h("div.table-wrap",
-      h("table.data",
-        h("thead", h("tr", COLUMNS.map((c, i) =>
-          h("th", { class: i >= 7 ? "num" : "" }, c)))),
-        tbody,
-      ),
-    ),
-  );
+  mount(root, h("div.stack", resumo, tabela.wrap));
 
   // Um relógio de 1s mantém o "tempo em execução" honesto entre eventos
-  const ticker = setInterval(() => draw(store.get("queue")), 1000);
+  const ticker = setInterval(() => desenhar(store.get("queue")), 1000);
 
-  function draw(queue) {
-    const items = queue.items || [];
-    const running = items.filter((i) => i.status === "processing").length;
-    const waiting = items.filter((i) => i.status === "queued").length;
-    const stuck = items.filter((i) => i.status === "interrupted").length;
+  function desenhar(queue) {
+    const itens = queue.items || [];
+    const rodando = itens.filter((i) => i.status === "processing").length;
+    const esperando = itens.filter((i) => i.status === "queued").length;
+    const presas = itens.filter((i) => i.status === "interrupted").length;
 
-    mount(summary,
-      chip("Na fila", fmt.int(waiting)),
-      chip("Em execução", fmt.int(running)),
-      stuck ? chip("Interrompidas", fmt.int(stuck)) : null,
+    mount(resumo,
+      chip("Aguardando", fmt.int(esperando)),
+      chip("Em execução", fmt.int(rodando)),
+      presas ? chip("Interrompidas", fmt.int(presas)) : null,
+      h("span.muted.push", { style: { fontSize: "var(--t-meta)" } },
+        "cada pedido é processado isolado dos outros"),
     );
 
-    if (!items.length) {
-      mount(tbody, h("tr", h("td", { colspan: COLUMNS.length },
-        empty({
-          mark: "queue",
-          title: "Fila vazia",
-          desc: "Nenhuma simulação aguardando ou em execução no momento.",
-        }))));
+    if (!itens.length) {
+      tabela.message(empty({
+        allana: true,
+        title: "Fila vazia",
+        desc: "Nada aguardando nem em execução agora.",
+      }));
       return;
     }
 
-    mount(tbody, items.map((item) => h("tr", {
-      dataset: { clickable: "true" },
-      tabindex: "0",
-      onclick: () => openSimulation(item.id),
-      onkeydown: (e) => { if (e.key === "Enter") openSimulation(item.id); },
-    },
-      h("td.num.cell-strong", String(item.position)),
-      h("td", h("span.mono", { style: { fontSize: "12px" } }, item.request_id)),
-      h("td.cell-strong", item.consultant_name || "—"),
-      h("td", item.customer_name || "—"),
-      h("td", h("span.mono", maskedCpf(item.cpf))),
-      h("td", h("span.mono", item.contract || "—")),
-      h("td", badge(item.stage, item.stage_label)),
-      h("td.num", attemptCell(item)),
-      h("td.num.muted", fmt.time(item.created_at)),
-      h("td.num", elapsedCell(item)),
-    )));
+    tabela.rows(itens, (item) => ({
+      onOpen: () => openRequest(item.id),
+      cells: [
+        twoLine(String(item.position), h("span.mono", item.request_id)),
+        twoLine(item.consultant_name || "—", `recebida ${fmt.time(item.created_at, false)}`),
+        twoLine(item.customer_name || "—", h("span.mono", mascararCpf(item.cpf))),
+        h("div",
+          stateBadge(item.stage, item.stage_label),
+          item.attempts > 1
+            ? h("div.cell-sub", { style: { color: "var(--warning)" } },
+              `tentativa ${item.attempts} de ${item.max_attempts || "—"}`)
+            : null,
+        ),
+        tempo(item),
+        h("button.btn.sm.ghost.icon", {
+          type: "button",
+          "aria-label": `Abrir detalhes de ${item.request_id}`,
+          "data-tip": "Detalhes",
+          onclick: () => openRequest(item.id),
+        }, icon("chevronRight", 16)),
+      ],
+    }));
   }
 
-  draw(store.get("queue"));
-  const off = store.subscribe("queue", draw);
+  desenhar(store.get("queue"));
+  const off = store.subscribe("queue", desenhar);
   return () => { clearInterval(ticker); off(); };
 }
 
-function attemptCell(item) {
-  const attempts = item.attempts || 0;
-  if (attempts <= 1) return h("span.muted", String(attempts || "—"));
-  return h("span", { style: { color: "var(--st-queued)" } }, `${attempts}/${item.max_attempts || "—"}`);
-}
-
-function elapsedCell(item) {
+function tempo(item) {
   if (item.status === "processing" && item.started_at) {
-    const seconds = (Date.now() - new Date(item.started_at).getTime()) / 1000;
-    return h("span", fmt.duration(Math.max(0, seconds)));
+    const segundos = (Date.now() - new Date(item.started_at).getTime()) / 1000;
+    return fmt.duration(Math.max(0, segundos));
   }
-  if (item.processing_seconds) return h("span", fmt.duration(item.processing_seconds));
-  return h("span.muted", "—");
+  if (item.processing_seconds) return fmt.duration(item.processing_seconds);
+  return h("span.faint", "—");
 }
 
 /** O servidor já entrega mascarado quando MASK_CPF_IN_UI está ligado. */
-function maskedCpf(cpf) {
+function mascararCpf(cpf) {
   if (!cpf) return "—";
-  const digits = String(cpf).replace(/\D/g, "");
-  if (digits.length !== 11) return cpf;
-  return `${digits.slice(0, 3)}.***.***-${digits.slice(9)}`;
+  const digitos = String(cpf).replace(/\D/g, "");
+  if (digitos.length !== 11) return cpf;
+  return `${digitos.slice(0, 3)}.***.***-${digitos.slice(9)}`;
 }

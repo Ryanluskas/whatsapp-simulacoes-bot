@@ -44,6 +44,29 @@ Evolution, WhatsApp e Santander de verdade** (ver `ROTEIRO-TESTE-REAL.md`).
 - Aba Status e `/api/health` mostram o diagnóstico da Evolution (alcance,
   chave, instância, webhook, último webhook) sem segredos.
 
+### Painel — identidade e reforma visual
+
+- Paleta da Allana em `css/tokens.css`, o único arquivo com cor: navy/preto
+  na estrutura, branco/cinza na leitura, vermelho na identidade e na ação,
+  lilás no detalhe. `app.css`, os módulos JS e os gráficos passaram a usar só
+  `var(--token)`.
+- A personagem entra na barra lateral, no login e nos estados vazio e de erro
+  — a dashboard continua sóbria (regra **ALLANA BOT UI PRINCIPLE** no
+  `AGENTS.md`).
+- Nova casca: barra lateral com a Allana, o nome e a presença; cabeçalho com
+  título, subtítulo e estado da conexão.
+- **Visão geral** responde "como está o bot agora": painel de estado
+  (WhatsApp, simulador, fila, tempo real), quatro métricas, solicitações
+  recentes, o que precisa de atenção, o funil do dia e a atividade.
+- Listas com no máximo 6 colunas; o detalhe abre num **painel lateral** com
+  ids, entrega, citação, tentativas, erros, linha do tempo e mensagens.
+- Entrega, citação e status viram texto, ícone e cor num lugar só
+  (`js/core/status.js`), refletindo o que o banco gravou.
+- No celular a barra lateral vira gaveta e as tabelas viram cartões: sem
+  rolagem horizontal.
+- Esqueleto no lugar de "carregando…", estado vazio com texto, toasts
+  consistentes (nenhum `alert()`), foco visível, `Esc` fecha modal e painel.
+
 ### Segurança
 
 - O sistema se recusa a subir exposto na rede com senha fraca, `SESSION_SECRET`
