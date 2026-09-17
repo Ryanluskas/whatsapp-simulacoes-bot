@@ -13,8 +13,14 @@ PR que a introduz.
 
 ## [Não lançado]
 
-PR #1 — camada Evolution pronta para o teste real. **Ainda não validado com
-Evolution, WhatsApp e Santander de verdade** (ver `ROTEIRO-TESTE-REAL.md`).
+Nada ainda.
+
+## [0.2.0] — 2026-09-17
+
+PR #1 — camada Evolution pronta para o teste real, mais o painel com a
+identidade da Allana. **Ainda não validado com Evolution, WhatsApp e
+Santander de verdade** (ver `ROTEIRO-TESTE-REAL.md`): esta versão marca o
+código revisado e testado com dublês, não um teste em produção.
 
 ### Entrega
 
@@ -123,5 +129,6 @@ Primeira versão marcada: o bot em produção no modo `dom` (WhatsApp Web).
   (`IMAGEM_DA_RESPOSTA=portal`) e correção da conferência da barra de citação
   no WhatsApp Web.
 
-[Não lançado]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/compare/v0.1.0...claude/whatsapp-santander-bot-prod-96a55e
+[Não lançado]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/compare/v0.2.0...main
+[0.2.0]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/releases/tag/v0.1.0
