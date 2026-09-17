@@ -219,6 +219,24 @@ mostra **"Entrega incerta — verificar WhatsApp"**, o log traz `attempt`,
 **ninguém reenvia sozinho** — uma segunda mensagem no grupo é pior que uma
 entrega que precisa ser conferida.
 
+**Quem confere decide no painel.** No detalhe da solicitação aparecem dois
+botões (e a rota `POST /api/simulations/{id}/entrega`):
+
+* **Chegou no grupo** (`{"acao": "chegou"}`) — fecha como entregue; nada é
+  enviado; `delivery_resolution = manual:chegou`;
+* **Não chegou — reenviar** (`{"acao": "nao_chegou"}`) — libera **um**
+  reenvio pelo laço de sempre, citando o mesmo pedido, mesmo com as
+  tentativas esgotadas; `delivery_resolution = manual:nao_chegou`.
+
+A troca só vale enquanto a linha está `unconfirmed` (UPDATE condicional): dois
+cliques ou duas abas não viram dois reenvios — o segundo recebe 409. A decisão
+vai para o log e para a timeline (`delivery_manual`), com quem decidiu.
+
+**`quoted_ok` só com prova.** `unverified` (sem `stanzaId` na resposta) sai com
+a versão curta da legenda, porque a requisição foi COM `quoted` — mas
+`quoted_ok` fica `false` e o log diz "Citação enviada, mas NÃO confirmada", não
+"recusada".
+
 **Falha transitória**: `delivery_status = retrying`, etapa `delivery_retry`. O
 laço de reenvio tenta de novo na MESMA solicitação (30 s, 60 s, 120 s… até 5
 vezes), citando a mesma mensagem.

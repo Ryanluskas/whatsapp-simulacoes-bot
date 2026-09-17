@@ -1425,3 +1425,159 @@ class TestPerfisEObservabilidade:
         for texto in (logs, eventos):
             assert "529.982.247.25" not in texto and "52998224725" not in texto
             assert "chave-de-teste" not in texto
+
+
+# ================================================ entrega incerta: ação manual
+class TestAcaoManualDaEntregaIncerta:
+    """`unconfirmed` nunca reenvia sozinho. Quem desempata é uma pessoa no painel.
+
+    "Chegou" fecha sem mandar nada. "Não chegou" libera UM reenvio, citando o
+    mesmo pedido, pelas mesmas travas do laço. Dois cliques não viram dois.
+    """
+
+    def _incerta(self, s: Sistema, mid: str = "3EB0MANUAL") -> dict:
+        s.servidor.roteiro = [recusa(500, "Internal server error")]
+        s.webhook(_pedido("Cliente Teste", CPF_A), mid)
+        assert s.esperar_desfecho(), "a entrega não se resolveu"
+        linha = s.linha(source_message_id=mid) or {}
+        assert linha["delivery_status"] == Delivery.UNCONFIRMED
+        assert len(s.servidor.envios()) == 1
+        return linha
+
+    def _login(self, s: Sistema) -> None:
+        assert s.cliente.post("/api/login", data={"password": "senha-de-teste"}).status_code == 200
+
+    def test_chegou_fecha_como_entregue_sem_enviar_nada(self, tmp_path):
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s)
+            self._login(s)
+            r = s.cliente.post(f"/api/simulations/{linha['id']}/entrega", json={"acao": "chegou"})
+            assert r.status_code == 200, r.text
+            depois = s.linha(id=linha["id"])
+            assert depois["delivery_status"] == Delivery.DELIVERED
+            assert depois["replied_at"]
+            assert depois["stage"] == Stage.COMPLETED
+            assert depois["delivery_resolution"] == "manual:chegou"
+            assert depois["sent_message_id"] == "", "inventou prova de entrega"
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 1, "marcar como entregue não pode enviar nada"
+        finally:
+            s.desligar()
+
+    def test_nao_chegou_libera_um_reenvio_citando_o_mesmo_pedido(self, tmp_path):
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0NAOCHEGOU")
+            self._login(s)
+            r = s.cliente.post(f"/api/simulations/{linha['id']}/entrega",
+                               json={"acao": "nao_chegou"})
+            assert r.status_code == 200, r.text
+            assert s.linha(id=linha["id"])["delivery_status"] == Delivery.RETRYING
+
+            s.manager._reenviar_pendentes()
+            envios = s.servidor.envios()
+            assert len(envios) == 2, [rota for rota, _ in envios]
+            assert envios[-1][1]["quoted"]["key"]["id"] == "3EB0NAOCHEGOU"
+            depois = s.linha(id=linha["id"])
+            assert depois["delivery_status"] == Delivery.DELIVERED
+            assert depois["sent_message_id"]
+            assert depois["delivery_resolution"] == "manual:nao_chegou"
+
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 2, "o reenvio liberado saiu mais de uma vez"
+        finally:
+            s.desligar()
+
+    def test_dois_cliques_simultaneos_liberam_um_reenvio_so(self, tmp_path):
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0DOISCLIQUES")
+            resultados: list[dict] = []
+            largada = threading.Barrier(4)
+
+            def clicar(acao):
+                largada.wait()
+                resultados.append(s.manager.resolver_entrega_incerta(linha["id"], acao))
+
+            threads = [threading.Thread(target=clicar, args=(acao,))
+                       for acao in ("nao_chegou", "nao_chegou", "chegou", "nao_chegou")]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+            assert sum(1 for r in resultados if r["ok"]) == 1, resultados
+            s.manager._reenviar_pendentes()
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) <= 2
+        finally:
+            s.desligar()
+
+    def test_so_vale_para_entrega_incerta(self, tmp_path):
+        s = Sistema(tmp_path).ligar()
+        try:
+            s.webhook(_pedido("Cliente Teste", CPF_A), "3EB0ENTREGUE")
+            assert s.esperar_desfecho()
+            entregue = s.linha(source_message_id="3EB0ENTREGUE")
+            assert entregue["delivery_status"] == Delivery.DELIVERED
+            self._login(s)
+            url = f"/api/simulations/{entregue['id']}/entrega"
+            r = s.cliente.post(url, json={"acao": "nao_chegou"})
+            assert r.status_code == 409, r.text
+            assert s.cliente.post(url, json={"acao": "apagar"}).status_code == 400
+            assert s.cliente.post(url, content=b"nao e json").status_code == 400
+            assert s.cliente.post("/api/simulations/999999/entrega",
+                                  json={"acao": "chegou"}).status_code == 404
+            assert len(s.servidor.envios()) == 1
+        finally:
+            s.desligar()
+
+    def test_exige_sessao(self, tmp_path):
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0SEMSESSAO")
+            r = s.cliente.post(f"/api/simulations/{linha['id']}/entrega", json={"acao": "nao_chegou"})
+            assert r.status_code == 401
+            assert s.linha(id=linha["id"])["delivery_status"] == Delivery.UNCONFIRMED
+        finally:
+            s.desligar()
+
+    def test_envio_preso_em_sending_nao_trava_o_reenvio_liberado(self, tmp_path):
+        """Sem isto o botão não faria nada: situacao_do_envio veria 'incerta'."""
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0PRESO")
+            s.db.execute("UPDATE messages SET status='sending' WHERE simulation_id=? "
+                         "AND direction='out'", (linha["id"],))
+            assert s.manager.resolver_entrega_incerta(linha["id"], "nao_chegou")["ok"]
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 2
+            assert s.linha(id=linha["id"])["delivery_status"] == Delivery.DELIVERED
+        finally:
+            s.desligar()
+
+    def test_tentativas_esgotadas_ainda_liberam_uma(self, tmp_path):
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0ESGOTADA")
+            s.db.execute("UPDATE simulations SET reply_attempts=? WHERE id=?",
+                         (s.manager._MAX_REENVIOS, linha["id"]))
+            assert s.manager.resolver_entrega_incerta(linha["id"], "nao_chegou")["ok"]
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 2
+        finally:
+            s.desligar()
+
+    def test_decisao_fica_registrada_no_log_e_na_timeline(self, tmp_path):
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0AUDITORIA")
+            assert s.manager.resolver_entrega_incerta(linha["id"], "chegou", quem="admin")["ok"]
+            logs = [l["message"] for l in s.db.fetchall(
+                "SELECT message FROM logs WHERE request_id=?", (linha["request_id"],))]
+            assert any("chegou (por admin)" in m for m in logs), logs
+            tipos = [e["type"] for e in s.db.fetchall(
+                "SELECT type FROM events WHERE request_id=?", (linha["request_id"],))]
+            assert "delivery_manual" in tipos, tipos
+        finally:
+            s.desligar()

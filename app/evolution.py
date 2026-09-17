@@ -687,7 +687,12 @@ class EvolutionClient:
         self._lembrar_envio(payload.get(campo, ""))
         return ResultadoEnvio(
             ok=True, tipo_midia=tipo_midia, desfecho=Desfecho.ENTREGUE,
-            quoted_ok=quote_status in (QuoteStatus.OK, QuoteStatus.UNVERIFIED),
+            # ``quoted_ok`` afirma que a citacao PEGOU -- so' com prova. A
+            # ``unverified`` saiu com o ``quoted`` na requisicao (a versao
+            # curta, sem o nome do consultor), mas a API nao devolveu o
+            # ``stanzaId``: nao da' para afirmar. Qual texto saiu e' outra
+            # pergunta, respondida pelo ``quote_status``.
+            quoted_ok=quote_status == QuoteStatus.OK,
             enviado_id=enviado_id,
             media_id=_id_da_midia(corpo) if tipo_midia == "imagem" else "",
             evidencia={**evidencia, "key_id": enviado_id, "desfecho": Desfecho.ENTREGUE},

@@ -25,7 +25,7 @@ histórico leem a mesma fonte, então painel e banco nunca discordam.
 | **Responde** | Manda uma **imagem** com os cards dos contratos e quanto libera, mais um resumo em texto. Se a imagem falhar, o texto sai assim mesmo. |
 | **Reenvia** | Só quando a API PROVA que nada saiu (429, 502/503/504, conexão recusada): até 5 vezes **na mesma solicitação**, citando a mesma mensagem. |
 | **Não duplica o pedido** | A mensagem recebida é gravada antes de qualquer coisa. O mesmo `message_id` nunca vira segunda solicitação — nem com webhook reentregue, nem depois de reiniciar. |
-| **Não duplica a resposta** | 500, timeout depois de enviar, 2xx sem id, queda no meio do envio: a mensagem pode ter chegado. Vira **"Entrega incerta — verificar WhatsApp"** e ninguém manda uma segunda. |
+| **Não duplica a resposta** | 500, timeout depois de enviar, 2xx sem id, queda no meio do envio: a mensagem pode ter chegado. Vira **"Entrega incerta — verificar WhatsApp"** e ninguém manda uma segunda sozinho: quem olha o grupo decide no painel (chegou / não chegou — reenviar). |
 | **Explica os erros** | Traduz o que o portal disse: "não foi possível contatar a averbadora", "matrícula inválida". Erros passageiros geram nova tentativa; erros de cadastro, não. |
 | **Registra tudo** | Banco SQLite com mensagens, simulações, consultores e logs. O painel lê daí. |
 
@@ -370,7 +370,7 @@ Santander falsos, incluindo matar o processo no meio da fila):
 Ele **não** substitui validar no grupo de teste com a Evolution de verdade —
 ver [MIGRACAO-EVOLUTION.md](MIGRACAO-EVOLUTION.md).
 
-São **1047 testes** (mais um que só roda com respostas reais da Evolution
+São **1063 testes** (mais um que só roda com respostas reais da Evolution
 capturadas). Cobrem, entre outros: identificação do consultor pelo
 telefone, isolamento de thread do Playwright, execução de 1/2/5 solicitações
 simultâneas sem cruzar resultados, tentativas e erros permanentes, recuperação
@@ -405,7 +405,8 @@ Os que valem destaque, porque nasceram de defeitos reais em produção:
   WhatsApp e do banco, e as capturas de diagnóstico contêm a conversa real.
 - **Partida recusada com configuração insegura.** Com `WEB_HOST` fora de
   `127.0.0.1` (o caso do Docker), o sistema não sobe com senha fraca/padrão,
-  `SESSION_SECRET` vazio ou placeholder, nem com `EVOLUTION_WEBHOOK_TOKEN` /
+  `SESSION_SECRET` vazio (sorteado a cada partida: as sessões caem a cada
+  reinício) ou placeholder/curto (cookie de sessão forjável), nem com `EVOLUTION_WEBHOOK_TOKEN` /
   `AGENT_TOKEN` curtos. Em localhost os defaults passam, com aviso — e o log
   diz qual regra está valendo.
 
@@ -434,7 +435,7 @@ causa. Estas são as principais, no painel em **Logs**:
 | `O Santander está na tela de login` | A sessão do portal caiu | Faça login na janela do simulador, ou preencha o `credenciais.ini` do Arqueiro |
 | `resultado pronto mas não entregue` | A resposta falhou por motivo passageiro | Ele reenvia sozinho (30 s, 60 s, 120 s…), até 5 vezes, na mesma solicitação |
 | `A Evolution RECUSOU a citação` | 400/422 apontando o `quoted` | Nada: a resposta saiu sem citação, com `↩ consultor`. Se repetir sempre, a mensagem original não está no histórico da instância |
-| `Entrega incerta — verificar WhatsApp` | 500, timeout depois de enviar, 2xx sem id, ou queda no meio do envio | **Olhe o grupo.** A mensagem pode ter chegado; o bot não manda outra de propósito |
+| `Entrega incerta — verificar WhatsApp` | 500, timeout depois de enviar, 2xx sem id, ou queda no meio do envio | **Olhe o grupo** e decida no detalhe da solicitação (Histórico): **Chegou no grupo** fecha como entregue sem enviar nada; **Não chegou — reenviar** libera UM reenvio citando o mesmo pedido. O bot não decide sozinho de propósito |
 | `envio=texto tentativa=1 provider=… quote_status=…` | Uma linha por envio, com id de origem, id citado, autor, HTTP e id enviado | É o suficiente para reconstruir a entrega sem abrir o banco |
 | `a entrega falhou de um jeito que repetir não resolve` | 401/403/404, licença, sem `chat_id` | Corrija a configuração da Evolution; o resultado está no painel |
 | `já recebida antes ... Reentrega ignorada` | Webhook reentregue | Nada: a trava de duplicidade funcionou |

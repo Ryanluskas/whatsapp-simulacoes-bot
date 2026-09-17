@@ -220,8 +220,8 @@ class TestGuardaDeExposicao:
             ["--env", self._env(tmp_path, DASHBOARD_PASSWORD=senha)]) == 2
 
     @pytest.mark.parametrize("chave,valor", [
-        ("SESSION_SECRET", ""),                    # cookie de sessão forjável
-        ("SESSION_SECRET", "troque-por-um-valor-longo-e-aleatorio"),   # placeholder
+        ("SESSION_SECRET", ""),                    # sorteado a cada partida: sessões caem
+        ("SESSION_SECRET", "troque-por-um-valor-longo-e-aleatorio"),   # placeholder: forjável
         ("AGENT_TOKEN", "x"),                      # token curto no modo remoto
     ])
     def test_recusa_exposto_com_segredo_fraco(self, tmp_path, monkeypatch, chave, valor):
@@ -265,6 +265,55 @@ class TestGuardaDeExposicao:
             ["--env", self._env(tmp_path, DASHBOARD_PASSWORD="uma-senha-de-verdade")])
         assert codigo == 0
         assert chamou["sim"], "a guarda barrou uma configuração válida"
+
+
+class TestTextoDoSessionSecret:
+    """Cada caso de SESSION_SECRET fraco diz o risco que ele TEM.
+
+    O texto antigo dizia "qualquer um pode forjar um cookie" também para o
+    vazio -- e vazio não é forjável: o segredo é sorteado a cada partida. O
+    custo real ali é outro (todo mundo deslogado a cada reinício).
+    """
+
+    def test_vazio_nao_fala_em_forjar(self):
+        from app.security import problema_do_session_secret
+
+        texto = problema_do_session_secret("")
+        assert "sorteado a cada partida" in texto
+        assert "deslogado" in texto
+        assert "Não dá para forjar" in texto
+
+    def test_placeholder_e_forjavel(self):
+        from app.security import problema_do_session_secret
+
+        texto = problema_do_session_secret("troque-por-um-valor-longo-e-aleatorio")
+        assert "placeholder" in texto and "cookie de sessão válido" in texto
+
+    def test_curto_e_forca_bruta(self):
+        from app.security import problema_do_session_secret
+
+        texto = problema_do_session_secret("curtinho")
+        assert "força bruta" in texto and "8 caracteres" in texto
+
+    def test_segredo_bom_nao_reclama(self):
+        from app.security import problema_do_session_secret
+
+        assert problema_do_session_secret("um-segredo-longo-e-aleatorio-de-verdade") == ""
+
+    def test_vazio_realmente_nao_e_forjavel(self):
+        """A afirmação do texto, verificada: sem segredo, um cookie assinado
+        por outro processo (ou com a chave vazia) não vale."""
+        import base64
+        import hashlib
+        import hmac
+
+        from app.security import SessionManager
+
+        corpo = "admin.9999999999.abcd"
+        forjado = base64.urlsafe_b64encode(
+            hmac.new(b"", corpo.encode(), hashlib.sha256).digest()).decode().rstrip("=")
+        assert SessionManager("").verify(f"{corpo}.{forjado}") is None
+        assert SessionManager("").verify(SessionManager("").issue()) is None
 
 
 class TestServicoDaEvolution:

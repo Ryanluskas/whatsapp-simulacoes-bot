@@ -463,6 +463,110 @@ class BotManager:
             campos["next_delivery_at"] = depois_de(self._espera_do_reenvio(tentativas))
         self.db.update("simulations", campos, {"id": linha.get("id")})
 
+    # ----------------------------------------- entrega incerta: decisao manual
+    #: O que o operador pode dizer depois de olhar o grupo.
+    ACOES_ENTREGA_INCERTA = ("chegou", "nao_chegou")
+
+    def resolver_entrega_incerta(self, simulation_id: int, acao: str,
+                                 quem: str = "painel") -> dict:
+        """O operador conferiu o grupo e decide o que a API nao deixou provar.
+
+        Entrega incerta (``unconfirmed``) nunca e' reenviada sozinha: a primeira
+        pode ter chegado. So' uma pessoa olhando o WhatsApp desempata:
+
+        * ``chegou``     -- fecha como entregue. NADA e' enviado;
+        * ``nao_chegou`` -- libera UM reenvio pelo laco de sempre: mesma
+          solicitacao, mesma citacao, as mesmas travas (``situacao_do_envio``,
+          ``ja_enviado``).
+
+        A troca so' acontece se a linha AINDA estiver ``unconfirmed``, numa
+        UPDATE condicional: dois cliques, duas abas ou duas pessoas nao viram
+        dois reenvios. ``ValueError`` = acao invalida; ``LookupError`` = id
+        inexistente; ``{"ok": False}`` = a linha nao esta' mais incerta.
+        """
+        if acao not in self.ACOES_ENTREGA_INCERTA:
+            raise ValueError(f"ação desconhecida: {acao or '(vazia)'}; "
+                             f"use {' ou '.join(self.ACOES_ENTREGA_INCERTA)}")
+        linha = self.db.fetchone("SELECT * FROM simulations WHERE id=?", (simulation_id,))
+        if not linha:
+            raise LookupError("simulação não encontrada")
+        linha = dict(linha)
+        campos = (self._campos_de_entregue_manual(linha) if acao == "chegou"
+                  else self._campos_de_reenvio_manual(linha))
+        if not self._trocar_se_incerta(simulation_id, campos):
+            agora = self.db.scalar("SELECT delivery_status FROM simulations WHERE id=?",
+                                   (simulation_id,))
+            return {"ok": False,
+                    "motivo": f"a entrega não está mais incerta (agora: {agora or 'sem estado'})"}
+        self._anunciar_decisao_manual(linha, acao, quem)
+        return {"ok": True, "delivery_status": campos["delivery_status"]}
+
+    @staticmethod
+    def _campos_de_entregue_manual(linha: dict) -> dict:
+        agora = now_iso()
+        _status, final = estado_final(bool(linha.get("result_ok")))
+        campos = {"delivery_status": Delivery.DELIVERED, "replied_at": agora,
+                  "delivery_error": "", "next_delivery_at": None,
+                  "delivery_resolution": "manual:chegou", "updated_at": agora}
+        if linha.get("stage") == Stage.DELIVERY_UNCONFIRMED:
+            campos["stage"] = final
+        return campos
+
+    def _campos_de_reenvio_manual(self, linha: dict) -> dict:
+        agora = now_iso()
+        campos = {"delivery_status": Delivery.RETRYING, "next_delivery_at": agora,
+                  "delivery_error": "conferido no painel: não chegou; reenvio liberado",
+                  # UM reenvio, mesmo com as tentativas esgotadas: foi uma
+                  # pessoa que pediu, depois de olhar o grupo.
+                  "reply_attempts": min(int(linha.get("reply_attempts") or 0),
+                                        self._MAX_REENVIOS - 1),
+                  "delivery_resolution": "manual:nao_chegou", "updated_at": agora}
+        if linha.get("stage") == Stage.DELIVERY_UNCONFIRMED:
+            campos["stage"] = Stage.DELIVERY_RETRY
+        return campos
+
+    def _trocar_se_incerta(self, simulation_id: int, campos: dict) -> bool:
+        colunas = ", ".join(f"{coluna}=?" for coluna in campos)
+        with self.db.write() as conn:
+            cur = conn.execute(
+                f"UPDATE simulations SET {colunas} "
+                " WHERE id=? AND delivery_status=? AND replied_at IS NULL",
+                (*campos.values(), simulation_id, Delivery.UNCONFIRMED))
+            if cur.rowcount != 1:
+                return False
+            if campos["delivery_status"] == Delivery.RETRYING:
+                # Uma chamada que ficou ``sending`` faria o reenvio desistir
+                # (situacao_do_envio -> incerta). Quem olhou o grupo disse que
+                # ela nao chegou.
+                conn.execute(
+                    "UPDATE messages SET status=?, error=COALESCE(NULLIF(error,''), ?) "
+                    " WHERE simulation_id=? AND direction='out' AND status=?",
+                    (Delivery.UNCONFIRMED, "conferido no painel: não chegou",
+                     simulation_id, ENVIO_EM_CURSO))
+            return True
+
+    def _anunciar_decisao_manual(self, linha: dict, acao: str, quem: str) -> None:
+        request_id = linha.get("request_id") or ""
+        if acao == "chegou":
+            nivel, titulo = "success", "Entrega conferida no WhatsApp: chegou"
+            detalhe = "Marcada como entregue no painel. Nada foi reenviado."
+        else:
+            nivel, titulo = "warning", "Entrega conferida no WhatsApp: não chegou"
+            detalhe = ("Reenvio liberado no painel: sai na próxima volta do laço de "
+                       "reenvio, com o WhatsApp conectado.")
+        self.log("INFO" if acao == "chegou" else "WARNING", "whatsapp",
+                 f"{request_id}: {titulo.lower()} (por {quem}). {detalhe}",
+                 request_id=request_id, consultant=linha.get("consultant_name") or "")
+        self.hub.publish(
+            "delivery_manual",
+            {"request_id": request_id, "simulation_id": linha.get("id"),
+             "acao": acao, "por": quem},
+            stage=Stage.DELIVERY_RETRY if acao == "nao_chegou" else "",
+            level=nivel, title=titulo, detail=detalhe, request_id=request_id,
+            simulation_id=linha.get("id"),
+            consultant_name=linha.get("consultant_name") or "",
+            chat_id=linha.get("chat_id") or "")
+
     @staticmethod
     def _espera_do_reenvio(tentativas: int) -> float:
         """30 s, 60 s, 120 s... ate' 10 min. Nao martela a API caida."""
@@ -1039,6 +1143,15 @@ class BotManager:
                 "WARNING", "whatsapp",
                 "Citação NÃO aplicada: a API provou que a resposta saiu citando "
                 "outra mensagem. A resposta chegou; não mando uma segunda.",
+                request_id=request_id, consultant=consultor,
+            )
+        elif situacao == QuoteStatus.UNVERIFIED:
+            # Saiu COM o pedido de citacao; so' nao ha' prova de que pegou.
+            # Nao e' recusa (``quoted_ok`` falso aqui nao quer dizer isso).
+            self.log(
+                "INFO", "whatsapp",
+                "Citação enviada, mas NÃO confirmada: a resposta da API não trouxe "
+                "o stanzaId. Confira no celular se a resposta aparece citando o pedido.",
                 request_id=request_id, consultant=consultor,
             )
         elif situacao == QuoteStatus.FALLBACK or (

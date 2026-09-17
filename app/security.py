@@ -22,7 +22,11 @@ _SEPARATOR = "."
 
 # --------------------------------------------------------------------- sessao
 class SessionManager:
-    """Token assinado por HMAC. Sem estado no servidor, sobrevive a reinicio."""
+    """Token assinado por HMAC. Sem estado no servidor.
+
+    Sobrevive a reinicio SO' com ``SESSION_SECRET`` fixo. Vazio, o segredo e'
+    sorteado a cada partida: as sessoes antigas deixam de valer.
+    """
 
     def __init__(self, secret: str, ttl_hours: int = 12) -> None:
         self._secret = (secret or secrets.token_hex(32)).encode("utf-8")
@@ -145,6 +149,33 @@ def _fraca(valor: str, minimo: int, proibidos: set[str]) -> bool:
     return (not limpo) or limpo.lower() in proibidos or len(limpo) < minimo
 
 
+def problema_do_session_secret(valor: str) -> str:
+    """O que esta' errado com o ``SESSION_SECRET`` -- ou "" se nada.
+
+    Os tres casos tem riscos DIFERENTES, e o texto antigo ("sem ele qualquer
+    um pode forjar um cookie") so' era verdade para dois deles:
+
+    * vazio -- ``SessionManager`` sorteia um segredo novo a cada partida.
+      Ninguem forja cookie; o custo e' todo mundo deslogado a cada reinicio
+      (e, com mais de um processo, cada um com o seu segredo);
+    * placeholder -- o valor esta' no ``.env.example`` publico: quem leu o
+      repositorio assina um cookie de sessao valido;
+    * curto -- da' para descobrir por forca bruta e, com ele, assinar cookies.
+    """
+    limpo = (valor or "").strip()
+    if not limpo:
+        return ("SESSION_SECRET vazio: um segredo novo é sorteado a cada partida. "
+                "Não dá para forjar cookie, mas todo mundo é deslogado a cada reinício. "
+                "Defina um valor fixo, longo e aleatório.")
+    if limpo.lower() in SEGREDOS_PLACEHOLDER:
+        return ("SESSION_SECRET é o placeholder público do .env.example: quem leu o "
+                "repositório consegue assinar um cookie de sessão válido e entrar no painel.")
+    if len(limpo) < MINIMO_SEGREDO:
+        return (f"SESSION_SECRET curto ({len(limpo)} caracteres; mínimo {MINIMO_SEGREDO}): "
+                "dá para descobri-lo por força bruta e assinar um cookie de sessão válido.")
+    return ""
+
+
 def problemas_de_seguranca(config) -> tuple[list[str], list[str]]:
     """Devolve ``(problemas, avisos)`` da configuracao atual.
 
@@ -159,10 +190,9 @@ def problemas_de_seguranca(config) -> tuple[list[str], list[str]]:
         achados.append(
             f"DASHBOARD_PASSWORD é fraca ou padrão (mínimo {MINIMO_SENHA} caracteres). "
             "O painel mostra CPF de cliente.")
-    if _fraca(config.session_secret, MINIMO_SEGREDO, SEGREDOS_PLACEHOLDER):
-        achados.append(
-            f"SESSION_SECRET vazio, placeholder ou curto (mínimo {MINIMO_SEGREDO}). "
-            "Sem ele qualquer um pode forjar um cookie de sessão.")
+    problema_da_sessao = problema_do_session_secret(config.session_secret)
+    if problema_da_sessao:
+        achados.append(problema_da_sessao)
     if getattr(config, "whatsapp_mode", "") == "evolution" and _fraca(
             config.evolution_webhook_token, MINIMO_SEGREDO, SEGREDOS_PLACEHOLDER):
         achados.append(

@@ -4,7 +4,7 @@ import { api } from "../core/api.js";
 import { h, mount } from "../core/dom.js";
 import * as fmt from "../core/format.js";
 import * as store from "../core/store.js";
-import { badge, debounce, empty, errorState, modal, skeletonRows } from "../core/ui.js";
+import { badge, confirmAction, debounce, empty, errorState, modal, skeletonRows, toast } from "../core/ui.js";
 
 const PAGE = 25;
 const COLUMNS = ["Solicitação", "Consultor", "Cliente", "CPF", "Banco", "Contrato",
@@ -231,6 +231,9 @@ export async function openSimulation(id) {
         background: "var(--st-error-bg)", fontSize: "13px",
       },
     }, `Entrega: ${s.delivery_error}`) : null,
+    s.delivery_status === "unconfirmed" ? unconfirmedActions(s, () => openSimulation(id)) : null,
+    s.delivery_resolution ? h("p.muted", { style: { marginTop: "8px", fontSize: "12px" } },
+      RESOLUTION_LABELS[s.delivery_resolution] || s.delivery_resolution) : null,
     s.error_message ? h("div", {
       style: {
         marginTop: "18px", padding: "10px 12px", borderRadius: "6px",
@@ -333,6 +336,52 @@ const QUOTE_LABELS = {
   none: "Sem citação",
   "": "Não avaliada",
 };
+
+const RESOLUTION_LABELS = {
+  "manual:chegou": "Entrega conferida no WhatsApp pelo painel: chegou.",
+  "manual:nao_chegou": "Entrega conferida no WhatsApp pelo painel: não chegou — reenvio liberado.",
+};
+
+/**
+ * Entrega incerta: a API não deixou provar se a resposta saiu, e o bot NÃO
+ * reenvia sozinho (duplicaria). Só quem olha o grupo desempata.
+ */
+function unconfirmedActions(s, reopen) {
+  const decide = (acao, title, message, label, done) => confirmAction(title, message, async () => {
+    try {
+      await api.post(`/api/simulations/${s.id}/entrega`, { acao });
+      toast("success", done, s.request_id);
+    } catch (error) {
+      toast("error", "Não foi possível registrar", error.message);
+    }
+    reopen();
+  }, label);
+
+  return h("div", {
+    style: {
+      marginTop: "12px", padding: "12px", borderRadius: "6px",
+      border: "1px solid var(--line)", fontSize: "13px",
+    },
+  },
+    h("p", { style: { marginBottom: "10px" } },
+      "Abra o grupo no WhatsApp e procure a resposta de ", h("span.mono", s.request_id),
+      ". O bot não reenvia sozinho: se a primeira chegou, uma segunda duplicaria."),
+    h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } },
+      h("button.btn.primary", {
+        type: "button",
+        onclick: () => decide("chegou", "A resposta chegou no grupo?",
+          "Marca a entrega como feita. Nada é enviado.", "Sim, chegou", "Marcada como entregue"),
+      }, "Chegou no grupo"),
+      h("button.btn", {
+        type: "button",
+        onclick: () => decide("nao_chegou", "A resposta NÃO está no grupo?",
+          "Libera UM reenvio da mesma resposta, citando o mesmo pedido. Se ela tiver "
+          + "chegado e você não viu, o consultor recebe duas vezes.",
+          "Não chegou — reenviar", "Reenvio liberado"),
+      }, "Não chegou — reenviar"),
+    ),
+  );
+}
 
 function deliveryLabel(s) {
   const base = DELIVERY_LABELS[s.delivery_status] || (s.replied_at ? "Entregue" : "—");

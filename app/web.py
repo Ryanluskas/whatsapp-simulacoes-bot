@@ -283,6 +283,29 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
             "contracts": contracts,
         }
 
+    @api.post("/api/simulations/{sim_id}/entrega")
+    async def resolver_entrega(sim_id: int, request: Request, usuario: str = Auth):
+        """Entrega incerta: o operador olhou o grupo e diz se chegou.
+
+        ``{"acao": "chegou"}`` fecha como entregue sem enviar nada;
+        ``{"acao": "nao_chegou"}`` libera um reenvio. 409 quando a entrega
+        ja' nao esta' incerta (outro clique ou outra aba chegou antes).
+        """
+        try:
+            dados = await request.json()
+        except ValueError:
+            dados = {}
+        acao = str((dados if isinstance(dados, dict) else {}).get("acao") or "")
+        try:
+            resultado = manager.resolver_entrega_incerta(sim_id, acao, quem=usuario)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if not resultado["ok"]:
+            raise HTTPException(status_code=409, detail=resultado["motivo"])
+        return resultado
+
     @api.get("/api/comprovantes/{nome}")
     async def comprovante(nome: str, _: str = Auth):
         """Serve a imagem enviada ao grupo.

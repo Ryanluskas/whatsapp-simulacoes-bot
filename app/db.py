@@ -192,6 +192,9 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         # recusada nao e' entrega falha (ver models.QuoteStatus).
         "quote_error": "TEXT DEFAULT ''",
         "media_status": "TEXT DEFAULT ''",
+        # Quem desempatou uma entrega incerta no painel, e como:
+        # "manual:chegou" | "manual:nao_chegou". Vazio = ninguem precisou.
+        "delivery_resolution": "TEXT DEFAULT ''",
     },
     "messages": {
         "request_id": "TEXT",

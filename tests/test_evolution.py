@@ -23,7 +23,7 @@ import pytest
 from app import mensagens
 from app.evolution import (DELAY_HUMANO_MS, EvolutionClient, LICENCA_PENDENTE,
                            classificar_resposta)
-from app.models import Desfecho
+from app.models import Desfecho, QuoteStatus
 from app.whatsapp_port import METODOS_DO_CONTRATO
 from tests.test_concurrency import png_valido
 
@@ -159,7 +159,10 @@ class TestCitacao:
         r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL,
                          quote_text="Ivone Teste\n42888832453",
                          quote_participant="5562999990000@s.whatsapp.net")
-        assert r.ok and r.quoted_ok
+        # A resposta falsa padrão não traz stanzaId: a citação foi PEDIDA, mas
+        # não há prova de que pegou. `quoted_ok` só afirma com prova.
+        assert r.ok and r.quote_status == QuoteStatus.UNVERIFIED
+        assert r.quoted_ok is False
         citada = espiao.ultimo["quoted"]
         assert citada["key"]["id"] == ID_ORIGINAL
         assert citada["key"]["remoteJid"] == GRUPO
@@ -174,8 +177,46 @@ class TestCitacao:
     def test_id_desconhecido_ainda_cita(self, cliente, espiao):
         """Se o texto original se perdeu, citar pelo id ainda é melhor que nada."""
         r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id="ID_QUE_NAO_GUARDEI")
-        assert r.quoted_ok
         assert espiao.ultimo["quoted"]["key"]["id"] == "ID_QUE_NAO_GUARDEI"
+        assert r.quote_status == QuoteStatus.UNVERIFIED and r.quoted_ok is False
+
+    def test_quoted_ok_so_com_stanza_igual_ao_pedido(self, cliente, espiao):
+        """O único caminho para `quoted_ok=True`: a API devolve o stanzaId pedido."""
+        espiao.resposta = httpx.Response(201, json={
+            "key": {"id": "3EB0RESPOSTA", "remoteJid": GRUPO, "fromMe": True},
+            "message": {"extendedTextMessage": {
+                "text": "resposta", "contextInfo": {"stanzaId": ID_ORIGINAL}}}})
+        r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL)
+        assert r.quote_status == QuoteStatus.OK and r.quoted_ok is True
+
+    def test_stanza_de_outra_mensagem_nao_e_quoted_ok(self, cliente, espiao):
+        espiao.resposta = httpx.Response(201, json={
+            "key": {"id": "3EB0RESPOSTA", "remoteJid": GRUPO, "fromMe": True},
+            "message": {"extendedTextMessage": {
+                "text": "resposta", "contextInfo": {"stanzaId": "3EB0OUTRA"}}}})
+        r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL)
+        assert r.ok and r.quote_status == QuoteStatus.NOT_APPLIED and r.quoted_ok is False
+
+    def test_unverified_nao_e_registrada_como_citacao_recusada(self, tmp_path):
+        """Sem stanzaId a citação é INCERTA, não recusada: o log não pode mentir."""
+        from app.db import Database
+        from app.events import EventHub
+        from app.manager import BotManager
+        from app.models import ResultadoEnvio
+        from tests.test_concurrency import _config
+
+        config = _config(tmp_path)
+        db = Database(config.db_path)
+        manager = BotManager(config, db, EventHub(db))
+        manager._anotar_citacao(
+            ResultadoEnvio(ok=True, via="texto", provider="evolution",
+                           quote_status=QuoteStatus.UNVERIFIED, quoted_ok=False,
+                           enviado_id="3EB0RESPOSTA"),
+            "REQ000001", "Ryan")
+        mensagens_de_log = [linha["message"] for linha in db.fetchall(
+            "SELECT message FROM logs WHERE request_id='REQ000001'")]
+        assert any("NÃO confirmada" in m for m in mensagens_de_log), mensagens_de_log
+        assert not any("RECUSADA" in m for m in mensagens_de_log), mensagens_de_log
 
 
 # --------------------------------------------------------- 3-7: falhar alto
