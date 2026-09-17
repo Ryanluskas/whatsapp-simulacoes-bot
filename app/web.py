@@ -120,6 +120,10 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
                 status_code=429,
                 detail=f"muitas tentativas, aguarde {login_limiter.retry_after(client)}s",
             )
+        if not (config.dashboard_password or "").strip():
+            raise HTTPException(
+                status_code=401,
+                detail="painel sem senha configurada: defina DASHBOARD_PASSWORD no .env")
         if not check_password(password, config.dashboard_password):
             manager.log("WARNING", "auth", f"Tentativa de login inválida de {client}.")
             raise HTTPException(status_code=401, detail="senha inválida")

@@ -233,7 +233,9 @@ export async function openSimulation(id) {
     }, `Entrega: ${s.delivery_error}`) : null,
     s.delivery_status === "unconfirmed" ? unconfirmedActions(s, () => openSimulation(id)) : null,
     s.delivery_resolution ? h("p.muted", { style: { marginTop: "8px", fontSize: "12px" } },
-      RESOLUTION_LABELS[s.delivery_resolution] || s.delivery_resolution) : null,
+      (RESOLUTION_LABELS[s.delivery_resolution] || s.delivery_resolution)
+      + (s.delivery_resolved_by ? ` Por ${s.delivery_resolved_by}` : "")
+      + (s.delivery_resolved_at ? ` em ${fmt.time(s.delivery_resolved_at)}.` : "")) : null,
     s.error_message ? h("div", {
       style: {
         marginTop: "18px", padding: "10px 12px", borderRadius: "6px",
@@ -372,7 +374,9 @@ function unconfirmedActions(s, reopen) {
         onclick: () => decide("chegou", "A resposta chegou no grupo?",
           "Marca a entrega como feita. Nada é enviado.", "Sim, chegou", "Marcada como entregue"),
       }, "Chegou no grupo"),
-      h("button.btn", {
+      // "Não chegou" vale uma vez: se o reenvio também ficou incerto, sobra
+      // conferir e marcar como entregue (o servidor recusa um segundo).
+      s.delivery_resolution === "manual:nao_chegou" ? null : h("button.btn", {
         type: "button",
         onclick: () => decide("nao_chegou", "A resposta NÃO está no grupo?",
           "Libera UM reenvio do resultado, em texto, citando o mesmo pedido. Se a primeira tiver "

@@ -60,7 +60,9 @@ copy .env.example .env
 python main.py
 ```
 
-Painel em `http://localhost:8000`. A senha é a `DASHBOARD_PASSWORD` do `.env`.
+Painel em `http://localhost:8000`. A senha é a `DASHBOARD_PASSWORD` do `.env` —
+**obrigatória**: vazia, o painel não aceita login. O `.env.example` traz os
+comandos para gerar a senha e o `SESSION_SECRET`.
 
 Na primeira execução, abra a aba **Status** e leia o QR Code com o celular.
 
@@ -155,7 +157,7 @@ Duas chaves controlam isso:
 | Chave | Efeito |
 |---|---|
 | `SEND_RESULT_IMAGE` | `false` volta a responder só em texto |
-| `IMAGE_SHOW_CLIENT_DATA` | `false` envia o CPF mascarado na imagem — e desliga o print do portal, que não tem como mascarar |
+| `IMAGE_SHOW_CLIENT_DATA` | `false` tira da imagem **todo** identificador do cliente — nome, CPF (nem mascarado) e número de contrato — e desliga o print do portal, que não tem como mascarar. O resultado financeiro continua |
 
 `IMAGE_SHOW_CLIENT_DATA` é separada de `MASK_CPF_IN_UI` de propósito: o painel e
 o grupo do WhatsApp são públicos diferentes.
@@ -370,7 +372,7 @@ Santander falsos, incluindo matar o processo no meio da fila):
 Ele **não** substitui validar no grupo de teste com a Evolution de verdade —
 ver [MIGRACAO-EVOLUTION.md](MIGRACAO-EVOLUTION.md).
 
-São **1070 testes** (mais um que só roda com respostas reais da Evolution
+São **1150 testes** (mais um que só roda com respostas reais da Evolution
 capturadas). Cobrem, entre outros: identificação do consultor pelo
 telefone, isolamento de thread do Playwright, execução de 1/2/5 solicitações
 simultâneas sem cruzar resultados, tentativas e erros permanentes, recuperação
@@ -382,6 +384,7 @@ Os que valem destaque, porque nasceram de defeitos reais em produção:
 | Arquivo | O que trava |
 |---|---|
 | `test_producao.py` | O fluxo de produção na camada Evolution, e **a regra de não duplicar**: 500/timeout/2xx-sem-id viram entrega incerta sem segunda mensagem; 400/422 que apontam o `quoted` viram um único envio sem citação; 429/503 repetem COM citação; queda entre o POST e a gravação não vira reenvio; um `message_id` = uma solicitação; PNG validado e do pedido certo; dois consultores simultâneos sem cruzar |
+| `test_contrato_entrega.py` | O contrato de entrega como tabela: a categoria e o desfecho de cada resposta HTTP e falha de transporte, `quoted_ok` só com prova em todos os estados, exceção depois do POST aceito, senha vazia que não abre o painel, diagnóstico e observador sem dado pessoal |
 | `test_contrato_evolution.py` | A leitura da resposta da Evolution: acha `key.id` e `stanzaId` em níveis diferentes, e **nunca inventa um `ok`** quando não acha |
 | `test_leitura_dom.py` | Roda o JS num **Chromium de verdade** contra as gerações de HTML que o WhatsApp já serviu: leitura de mensagens, escolha do grupo, menu de contexto, anexo de foto, e a garantia de que o bot **nunca lê nem encaminha as próprias mensagens** |
 | `test_abas.py` | A aba certa do navegador. Uma `about:blank` restaurada pelo perfil já fez o bot pilotar uma página vazia a sessão inteira |
@@ -584,7 +587,13 @@ consultores isso é um vazamento. Por isso:
 
 **`IMAGE_SHOW_CLIENT_DATA=false` desliga o print.** A tela do banco mostra
 nome e CPF como pixels, sem como mascarar. Com a flag em `false` o print nem
-é tirado, e a resposta sai com o card, que mascara.
+é tirado, e a resposta sai com o card sem nome, CPF e número de contrato.
+
+**Print que não dá para conferir é descartado.** A conferência lê o TEXTO do
+elemento; o print é dos PIXELS. Quando os dois podem divergir o card entra no
+lugar: o recorte não cabe inteiro na janela (rolagem, lista maior que a
+tela), um elemento fixo do portal (cabeçalho com o operador) cruza a área,
+ou o texto passa do que é conferido.
 
 > **Ainda não rodou contra o portal.** Exige uma sessão logada do Santander,
 > que não havia quando isto foi escrito. Os testes montam a página com o
@@ -658,6 +667,14 @@ depende de HTML nenhum:
 
 ```bash
 .venv/Scripts/python.exe -m app.evolution_check
+```
+
+O `evolution_check` lista os grupos **com o JID** para você configurar o `.env`:
+não cole essa saída em chamado ou chat. Para diagnosticar e compartilhar, use
+o diagnóstico seguro — só estado, sem chave, token, JID ou telefone:
+
+```bash
+.venv/Scripts/python.exe -m app.evolution_diagnostico
 ```
 
 Ele diz se a Evolution responde, se a licença está ativa, se a instância

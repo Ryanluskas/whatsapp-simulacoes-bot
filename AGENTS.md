@@ -21,6 +21,8 @@ contrato (`app/whatsapp_port.py`): `dom` (navegador, `app/whatsapp.py`) e
 | `app/security.py` | sessão HMAC, máscaras, regra de partida com configuração fraca |
 | `dashboard/static/js/` | painel (sem framework; DOM só por `h()`, nunca `innerHTML` com dado de terceiro) |
 | `ferramentas/e2e_simulado.py` | E2E de processo real com Evolution e Santander falsos |
+| `app/evolution_diagnostico.py` | diagnóstico da Evolution real sem segredo (`python -m app.evolution_diagnostico`) |
+| `ROTEIRO-TESTE-REAL.md` | o teste real com Evolution + WhatsApp + celular, passo a passo |
 
 ## Regras que não se negociam
 
@@ -28,11 +30,20 @@ contrato (`app/whatsapp_port.py`): `dom` (navegador, `app/whatsapp.py`) e
    pode ter saído?* Se puder (500, timeout de leitura, 2xx sem `key.id`, queda
    com a linha `sending` gravada), o desfecho é `unconfirmed` e **ninguém
    reenvia sozinho** — nem sem citação, nem em texto, nem pelo laço. Só uma
-   pessoa desempata, no painel (`POST /api/simulations/{id}/entrega`).
+   pessoa desempata, no painel (`POST /api/simulations/{id}/entrega`), e o
+   "não chegou" vale uma vez por solicitação.
+   **Se houver dúvida entre enviar novamente ou marcar como `unconfirmed`, NÃO
+   reenviar automaticamente.**
 2. **Entrega e citação são perguntas separadas.** `delivery_status` diz se
    chegou; `quote_status` diz o que houve com a citação. `quoted_ok=True` e
-   `quote_status=ok` só com **prova** (`stanzaId` igual ao id pedido). Sem
-   prova é `unverified` — nunca `ok`.
+   `quote_status=ok` só com **prova**: na Evolution, `stanzaId` igual ao id
+   pedido; no modo `dom`, a barra de citação conferida na tela. Sem prova é
+   `unverified` — nunca `ok`. `ResultadoEnvio` zera `quoted_ok` para qualquer
+   `quote_status` diferente de `ok`.
+5. **Classificação de resposta num lugar só.** `classificar_resposta` e
+   `classificar_falha_de_transporte` (`app/evolution.py`) devolvem categoria
+   (QUOTE_REJECTED, VALIDATION_REJECTED, POST_SEND_ERROR, TRANSIENT,
+   PERMANENT, UNCERTAIN) e desfecho. Não espalhe `if status == ...` pelo código.
 3. **Identidade vem do banco, não da tela nem da RAM.** Um `message_id` = uma
    solicitação. Citação usa o id, o autor (`participant`) e o texto gravados.
 4. **Grave antes de agir.** A saída é gravada como `sending` antes da chamada
@@ -55,9 +66,12 @@ contrato (`app/whatsapp_port.py`): `dom` (navegador, `app/whatsapp.py`) e
 
 ## Git
 
-- Não faça push em `main`, não faça merge de PR e não use `--force`: isso é
-  decisão humana. Se reescrever histórico for inevitável, prepare com
-  `--force-with-lease=<ref>:<sha>` e peça autorização.
+- **Nunca altere `main` diretamente**: nem commit, nem push. Trabalhe na branch
+  do PR.
+- **Nunca faça merge de PR, `push --force`/`--force-with-lease`, `filter-repo`,
+  `filter-branch` ou BFG por iniciativa própria.** Reescrita de histórico só
+  com autorização explícita do dono do repositório, dada para aquela operação.
+  O seu papel é diagnosticar e preparar os comandos, não executá-los.
 - Commits pequenos, mensagem em português dizendo o **porquê**.
 - Não apague backup, branch ou worktree de outra pessoa.
 
@@ -71,7 +85,9 @@ contrato (`app/whatsapp_port.py`): `dom` (navegador, `app/whatsapp.py`) e
 .venv/Scripts/python.exe ferramentas/e2e_simulado.py
 ```
 
-- Toda correção de comportamento vem com teste que **falharia sem ela**.
+- **Depois de toda correção, rode os testes** (a suíte e o E2E acima) antes de
+  dizer que terminou. Toda correção de comportamento vem com teste que
+  **falharia sem ela**.
 - Não enfraqueça um teste para ele passar. Se a expectativa antiga estava
   errada, diga no teste por quê.
 - Há testes de tamanho de função (`tests/test_mensagens.py`): quebre em

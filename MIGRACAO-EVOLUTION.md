@@ -200,21 +200,26 @@ resposta sai em texto.
 PROVAR que nada saiu é que o bot manda outra (sem citação, em texto, ou mais
 tarde). Na dúvida, ele registra e para.
 
-| Resposta | Desfecho | O que o bot faz |
-|---|---|---|
-| 2xx com `key.id` | entregue | grava o id; fim |
-| 2xx sem `key.id` | **incerta** | `unconfirmed`; nada por cima, nada de reenvio |
-| 2xx com corpo ilegível | **incerta** | idem |
-| 400/422 apontando o `quoted` | citação recusada | reenvia SEM citação, com `↩ consultor` |
-| 400/422 de validação (`requires property`, `must be`, `exists:false`…) | recusada | imagem → cai para texto; texto → `failed` |
-| 400/422 sem explicação | **incerta** | `unconfirmed`; não cai para texto |
-| 400 com sinal de erro pós-envio (`prisma`, `database`, `timeout`…) | **incerta** | idem — vence a marca de citação |
-| 401 / 403 / 404 / licença | permanente | `failed`; não repete |
-| 408 / 429 / 503 | transitória | `retrying`: repete a MESMA requisição (com citação) |
-| 500, 502, 504 e outros 5xx | **incerta** | `unconfirmed`; **nunca** dispara reenvio sem citação. 502/504 costumam vir de um proxy na frente da Evolution: ela pode ter recebido e enviado |
-| erro do httpx ao ler a resposta (corpo quebrado, protocolo) | **incerta** | `unconfirmed` |
-| timeout de conexão, conexão recusada, falha ao subir o corpo | transitória | `retrying` |
-| timeout de leitura, conexão caída depois de enviar | **incerta** | `unconfirmed` |
+Toda resposta passa por UMA função (`classificar_resposta` /
+`classificar_falha_de_transporte`, em `app/evolution.py`), que devolve a
+**categoria** (o que a resposta disse) e o **desfecho** (o que o envio faz).
+Travado em `tests/test_contrato_entrega.py`.
+
+| Evento | Categoria | `delivery_status` | Ação | Pode duplicar? |
+|---|---|---|---|---|
+| 2xx com `key.id` | — | `delivered` | grava o id; fim | não |
+| 2xx sem `key.id` | UNCERTAIN | `unconfirmed` | nada por cima, nada de reenvio | não (decisão manual) |
+| 2xx com corpo ilegível | UNCERTAIN | `unconfirmed` | idem | não |
+| POST aceito e a leitura da resposta quebra (exceção) | — | `delivered` com `key.id` legível; senão `unconfirmed` | nunca "transitório" | não |
+| 400/422 apontando o `quoted` (palavra `quoted`, `stanzaId`, `contextInfo`) | QUOTE_REJECTED | `delivered` se o envio sem citação sair | UM envio SEM citação, com `↩ consultor` | não: a recusa prova que nada saiu |
+| 400/422 de validação (`requires property`, `must be`, `exists:false`, `inválid`…) | VALIDATION_REJECTED | imagem → cai para texto; texto → `failed` | não repete a mesma requisição | não |
+| 400/422 com sinal pós-envio (`prisma`, `database`, `timeout`, S3/MinIO, RabbitMQ, SQS, websocket…) | POST_SEND_ERROR | `unconfirmed` | nada; vence a marca de citação | não |
+| 400/422 sem explicação | UNCERTAIN | `unconfirmed` | não cai para texto | não |
+| 401 / 403 / 404 / licença | PERMANENT | `failed` | não repete | não |
+| 408 / 429 / 503 | TRANSIENT | `retrying` | repete a MESMA requisição (com citação) | não: nada foi processado |
+| 500, 502, 504 e outros 5xx | UNCERTAIN | `unconfirmed` | **nunca** reenvio sem citação. 502/504 vêm de proxy: a Evolution pode ter enviado | não |
+| timeout de conexão, conexão recusada, falha ao subir o corpo | TRANSIENT | `retrying` | repete | não |
+| timeout de leitura, connection reset, protocolo quebrado, erro ao decodificar | UNCERTAIN | `unconfirmed` | nada | não |
 
 **`unconfirmed` quer dizer**: "a API não permitiu provar se saiu". O painel
 mostra **"Entrega incerta — verificar WhatsApp"**, o log traz `attempt`,
@@ -232,8 +237,15 @@ botões (e a rota `POST /api/simulations/{id}/entrega`):
   tentativas esgotadas; `delivery_resolution = manual:nao_chegou`.
 
 A troca só vale enquanto a linha está `unconfirmed` (UPDATE condicional): dois
-cliques ou duas abas não viram dois reenvios — o segundo recebe 409. A decisão
-vai para o log e para a timeline (`delivery_manual`), com quem decidiu.
+cliques ou duas abas não viram dois reenvios — o segundo recebe 409. Quem
+decidiu e quando ficam em `delivery_resolved_by` / `delivery_resolved_at`, no
+log e na timeline (`delivery_manual`).
+
+**"Não chegou" vale uma vez por solicitação.** Se o reenvio liberado também
+ficar incerto, o painel só oferece "Chegou no grupo" e a rota responde 409 a
+um segundo "não chegou": o bot não entra num ciclo de reenvios sobre uma
+entrega que ninguém consegue provar. (Se a resposta de fato não estiver no
+grupo, copie o resultado do painel à mão.)
 
 **`quoted_ok` só com prova.** `unverified` (sem `stanzaId` na resposta) sai com
 a versão curta da legenda, porque a requisição foi COM `quoted` — mas
@@ -244,9 +256,12 @@ a versão curta da legenda, porque a requisição foi COM `quoted` — mas
 laço de reenvio tenta de novo na MESMA solicitação (30 s, 60 s, 120 s… até 5
 vezes), citando a mesma mensagem.
 
-**`completed` só depois da entrega.** Enquanto a resposta sobe, a solicitação
-fica `processing/replying`. Um reinício nesse meio NÃO simula de novo no
-Santander.
+**`completed` só depois de a ENTREGA se resolver.** Enquanto a resposta sobe,
+a solicitação fica `processing/replying`. Quando o envio termina ela vira
+`completed` (ou `error`, se a simulação falhou) — **mesmo que a entrega tenha
+ficado `unconfirmed` ou `retrying`**: `status` é da simulação, `delivery_status`
+é da entrega, e o painel mostra os dois. Um reinício nesse meio NÃO simula de
+novo no Santander.
 
 **Reinício no meio de um envio.** A linha da saída é gravada como `sending`
 ANTES da chamada à API. Ao voltar, o bot decide pelo que está gravado, nunca
@@ -264,6 +279,18 @@ por palpite:
 Só o "Não chegou — reenviar" do painel tira uma saída incerta dessa conta: ela
 vira `failed`, com `[conferido no painel: não chegou]` no erro.
 
+| O processo morreu… | Depois do reinício | Santander de novo? | WhatsApp de novo? |
+|---|---|---|---|
+| A. antes de gravar `sending` | nada saiu → `retrying` → 1 reenvio | não | sim, uma vez (nada tinha saído) |
+| B. depois de `sending`, antes do POST | `unconfirmed` (no banco é igual a C) | não | não |
+| C. durante o POST | `unconfirmed` | não | não |
+| D. a API devolveu `key.id`, antes de persistir | `unconfirmed` (a prova não foi gravada) | não | não |
+| E. depois de persistir `wa_message_id` | `delivered`, com o id gravado | não | não |
+| F. depois de `delivery_status=delivered` | nada muda | não | não |
+| G. durante a simulação (sem resultado) | volta para a fila | **sim** (único caso) | uma vez, com o resultado |
+
+Travado em `tests/test_producao.py::TestReinicioEmCadaPontoDaEntrega`.
+
 **Evidência.** Cada tentativa de envio vira uma linha em `messages`
 (`direction='out'`) com `provider`, `attempt`, `origin_message_id`,
 `quoted_message_id`, `quote_status`, `wa_message_id` (id devolvido),
@@ -271,6 +298,16 @@ vira `failed`, com `[conferido no painel: não chegou]` no erro.
 `delivery_status`, `quote_status`, `media_status`, `sent_message_id`.
 
 ### Diagnóstico da instância
+
+```bash
+.venv/Scripts/python.exe -m app.evolution_diagnostico
+```
+
+Só estado, em JSON: `reachable`, `api_key_valid`, `instance`, `instance_found`,
+`state`, `webhook` (ligado? aponta para o bot?), `group_configured`,
+`webhook_token_configured` — nunca chave, token, URL, JID ou telefone. Pode
+ser colado num chamado. Sai com 0 quando está tudo pronto, 1 quando falta
+algo e 2 quando o `.env` não tem nem URL/chave/instância (e diz o que falta).
 
 O painel (aba **Status**) e o `/api/health` respondem, sem expor chave nem
 token: a Evolution responde? a chave é aceita? a instância existe e está

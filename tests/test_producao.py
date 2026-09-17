@@ -1656,3 +1656,265 @@ class TestAcaoManualDaEntregaIncerta:
             assert "delivery_manual" in tipos, tipos
         finally:
             s.desligar()
+
+
+class TestAcaoManualSobConcorrencia:
+    """A decisão do operador contra o mundo real: cliques repetidos, duas abas,
+    o estado mudando enquanto ele olha o grupo, um segundo "não chegou"."""
+
+    def _incerta(self, s: Sistema, mid: str) -> dict:
+        s.servidor.roteiro = [recusa(500, "Internal server error")]
+        s.webhook(_pedido("Cliente Teste", CPF_A), mid)
+        assert s.esperar_desfecho(), "a entrega não se resolveu"
+        linha = s.linha(source_message_id=mid) or {}
+        assert linha["delivery_status"] == Delivery.UNCONFIRMED
+        return linha
+
+    @staticmethod
+    def _logado(s: Sistema) -> TestClient:
+        cliente = TestClient(create_app(s.config, s.db, s.hub, s.manager))
+        cliente.__enter__()
+        assert cliente.post("/api/login", data={"password": "senha-de-teste"}).status_code == 200
+        return cliente
+
+    def test_quem_decidiu_e_quando_ficam_gravados(self, tmp_path):
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0QUEM")
+            aba = self._logado(s)
+            try:
+                assert aba.post(f"/api/simulations/{linha['id']}/entrega",
+                                json={"acao": "chegou"}).status_code == 200
+            finally:
+                aba.__exit__(None, None, None)
+            depois = s.linha(id=linha["id"])
+            assert depois["delivery_resolution"] == "manual:chegou"
+            assert depois["delivery_resolved_by"] == "admin"
+            assert depois["delivery_resolved_at"]
+        finally:
+            s.desligar()
+
+    def test_duplo_clique_mesma_aba(self, tmp_path):
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0DUPLO")
+            aba = self._logado(s)
+            try:
+                url = f"/api/simulations/{linha['id']}/entrega"
+                primeiro = aba.post(url, json={"acao": "nao_chegou"})
+                segundo = aba.post(url, json={"acao": "nao_chegou"})
+            finally:
+                aba.__exit__(None, None, None)
+            assert (primeiro.status_code, segundo.status_code) == (200, 409)
+            s.manager._reenviar_pendentes()
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 2, "o duplo clique virou dois reenvios"
+        finally:
+            s.desligar()
+
+    def test_duas_abas_ao_mesmo_tempo(self, tmp_path):
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0ABAS")
+            abas = [self._logado(s), self._logado(s)]
+            largada = threading.Barrier(2)
+            codigos: list[int] = []
+
+            def clicar(aba):
+                largada.wait()
+                codigos.append(aba.post(f"/api/simulations/{linha['id']}/entrega",
+                                        json={"acao": "nao_chegou"}).status_code)
+
+            try:
+                threads = [threading.Thread(target=clicar, args=(aba,)) for aba in abas]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=15)
+            finally:
+                for aba in abas:
+                    aba.__exit__(None, None, None)
+            assert sorted(codigos) == [200, 409], codigos
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 2
+        finally:
+            s.desligar()
+
+    def test_estado_muda_enquanto_o_operador_decide(self, tmp_path):
+        """Aba A abre o detalhe; aba B marca "chegou"; A clica "não chegou": nada sai."""
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0MUDOU")
+            a, b = self._logado(s), self._logado(s)
+            try:
+                detalhe = a.get(f"/api/simulations/{linha['id']}").json()["simulation"]
+                assert detalhe["delivery_status"] == Delivery.UNCONFIRMED
+                assert b.post(f"/api/simulations/{linha['id']}/entrega",
+                              json={"acao": "chegou"}).status_code == 200
+                r = a.post(f"/api/simulations/{linha['id']}/entrega", json={"acao": "nao_chegou"})
+            finally:
+                a.__exit__(None, None, None)
+                b.__exit__(None, None, None)
+            assert r.status_code == 409 and "não está mais incerta" in r.json()["detail"]
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 1
+        finally:
+            s.desligar()
+
+    def test_decisao_depois_de_outro_mecanismo_concluir(self, tmp_path):
+        """A entrega foi resolvida por fora (ex.: a verificação achou a mensagem)."""
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0FORA")
+            s.db.update("simulations", {"delivery_status": Delivery.DELIVERED,
+                                        "replied_at": iso_atras(1)}, {"id": linha["id"]})
+            for acao in ("chegou", "nao_chegou"):
+                r = s.manager.resolver_entrega_incerta(linha["id"], acao)
+                assert r["ok"] is False and "delivered" in r["motivo"]
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 1
+        finally:
+            s.desligar()
+
+    def test_nao_chegou_vale_uma_vez(self, tmp_path):
+        """O reenvio liberado TAMBÉM ficou incerto: sobra só "chegou"."""
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0UMAVEZ")
+            assert s.manager.resolver_entrega_incerta(linha["id"], "nao_chegou")["ok"]
+            s.servidor.roteiro = [recusa(500, "Internal server error")]
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 2
+            assert s.linha(id=linha["id"])["delivery_status"] == Delivery.UNCONFIRMED
+
+            segundo = s.manager.resolver_entrega_incerta(linha["id"], "nao_chegou")
+            assert segundo["ok"] is False and "já houve um reenvio manual" in segundo["motivo"]
+            s.manager._reenviar_pendentes()
+            assert len(s.servidor.envios()) == 2, "um segundo reenvio manual saiu"
+            assert s.manager.resolver_entrega_incerta(linha["id"], "chegou")["ok"] is True
+        finally:
+            s.desligar()
+
+    def test_reenvio_manual_e_a_mesma_solicitacao(self, tmp_path):
+        """Mesmo request_id, mesma mensagem citada, e o Santander não roda de novo."""
+        s = Sistema(tmp_path).ligar()
+        try:
+            linha = self._incerta(s, "3EB0MESMA")
+            assert s.manager.resolver_entrega_incerta(linha["id"], "nao_chegou")["ok"]
+            s.manager._reenviar_pendentes()
+            _rota, reenvio = s.servidor.envios()[-1]
+            assert reenvio["quoted"]["key"]["id"] == "3EB0MESMA"
+            assert linha["request_id"] in reenvio["text"]
+            assert s.db.scalar("SELECT COUNT(*) FROM simulations") == 1
+            assert s.simuladores[0].vistos == [linha["request_id"]], "simulou de novo"
+        finally:
+            s.desligar()
+
+
+class TestReinicioEmCadaPontoDaEntrega:
+    """O processo morre em cada ponto da entrega. Dois objetivos: não simular
+    de novo no Santander sem necessidade, e não duplicar no WhatsApp.
+
+    ====  ==========================================  ================================
+    caso  onde morreu                                 depois do reinício
+    ====  ==========================================  ================================
+    A     antes de gravar ``sending``                 nada saiu: 1 reenvio
+    B     depois de ``sending``, antes do POST        incerta (igual a C no banco)
+    C     durante o POST                              incerta
+    D     API devolveu key.id, antes de persistir     incerta (a prova não foi gravada)
+    E     depois de persistir ``wa_message_id``       entregue, sem reenviar
+    F     depois de ``delivery_status=delivered``     nada muda
+    G     durante a simulação (sem resultado)         simula de novo -- único caso
+    ====  ==========================================  ================================
+    """
+
+    def _entrega_em_curso(self, s: Sistema, **extra) -> int:
+        return TestNuncaDuasRespostas()._linha_em_entrega(s, **extra)
+
+    def _saida(self, s: Sistema, sid: int, status: str, **extra) -> None:
+        TestNuncaDuasRespostas()._saida(s, sid, status, **extra)
+
+    def _depois_do_reinicio(self, s: Sistema) -> dict:
+        s.manager.queue.recover()
+        s.db.execute("UPDATE simulations SET next_delivery_at=?, updated_at=?, finished_at=?",
+                     (iso_atras(9999), iso_atras(9999), iso_atras(9999)))
+        s.manager._reenviar_pendentes()
+        return s.linha(request_id="REQ000700") or {}
+
+    def test_a_antes_de_gravar_sending(self, tmp_path):
+        s = Sistema(tmp_path, com_imagem=False)
+        self._entrega_em_curso(s)
+        s.ligar()
+        try:
+            linha = self._depois_do_reinicio(s)
+            assert len(s.servidor.envios()) == 1, "nada tinha saído: um reenvio é o certo"
+            assert linha["delivery_status"] == Delivery.DELIVERED
+            assert s.simuladores[0].vistos == [], "simulou de novo no Santander"
+        finally:
+            s.desligar()
+
+    @pytest.mark.parametrize("caso", ["B_antes_do_post", "C_durante_o_post",
+                                      "D_key_id_sem_persistir"])
+    def test_b_c_d_sending_sem_prova_fica_incerta(self, tmp_path, caso):
+        """Os três deixam o MESMO rastro no banco: uma saída ``sending`` sem id.
+        Não dá para saber qual aconteceu, então vale o mais seguro."""
+        s = Sistema(tmp_path, com_imagem=False)
+        sid = self._entrega_em_curso(s)
+        self._saida(s, sid, "sending")
+        s.ligar()
+        try:
+            linha = self._depois_do_reinicio(s)
+            assert s.servidor.envios() == [], f"{caso}: reenviou algo que pode ter saído"
+            assert linha["delivery_status"] == Delivery.UNCONFIRMED
+            assert linha["stage"] == Stage.DELIVERY_UNCONFIRMED
+            assert s.simuladores[0].vistos == []
+        finally:
+            s.desligar()
+
+    def test_e_depois_de_persistir_o_id(self, tmp_path):
+        s = Sistema(tmp_path, com_imagem=False)
+        sid = self._entrega_em_curso(s)
+        self._saida(s, sid, "completed", wa_message_id="BAE5PERSISTIDO")
+        s.ligar()
+        try:
+            linha = self._depois_do_reinicio(s)
+            assert s.servidor.envios() == []
+            assert linha["delivery_status"] == Delivery.DELIVERED
+            assert linha["sent_message_id"] == "BAE5PERSISTIDO"
+            assert s.simuladores[0].vistos == []
+        finally:
+            s.desligar()
+
+    def test_f_depois_de_delivered(self, tmp_path):
+        s = Sistema(tmp_path, com_imagem=False)
+        sid = self._entrega_em_curso(s, status=Status.COMPLETED, stage=Stage.COMPLETED,
+                                     delivery_status=Delivery.DELIVERED,
+                                     replied_at=iso_atras(20), sent_message_id="BAE5FIM")
+        self._saida(s, sid, "completed", wa_message_id="BAE5FIM")
+        s.ligar()
+        try:
+            antes = dict(s.linha(request_id="REQ000700"))
+            assert s.manager.queue.recover() == 0
+            s.manager._reenviar_pendentes()
+            depois = s.linha(request_id="REQ000700")
+            assert s.servidor.envios() == []
+            for campo in ("status", "stage", "delivery_status", "sent_message_id", "replied_at"):
+                assert depois[campo] == antes[campo], campo
+            assert s.simuladores[0].vistos == []
+        finally:
+            s.desligar()
+
+    def test_g_durante_a_simulacao_simula_de_novo(self, tmp_path):
+        """Sem resultado gravado não há o que entregar: só aqui o Santander roda de novo."""
+        s = Sistema(tmp_path, com_imagem=False)
+        self._entrega_em_curso(s, result_ok=None, stage=Stage.CONSULTING,
+                               delivery_status="", attempts=0)
+        s.ligar()
+        try:
+            assert s.manager.queue.recover() == 1
+            assert _aguardar(lambda: (s.linha(request_id="REQ000700") or {}).get(
+                "delivery_status") == Delivery.DELIVERED, timeout=20)
+            assert s.simuladores[0].vistos == ["REQ000700"]
+            assert len(s.servidor.envios()) == 1
+        finally:
+            s.desligar()

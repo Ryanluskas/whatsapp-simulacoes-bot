@@ -79,6 +79,10 @@ class SessionManager:
 
 
 def check_password(candidate: str, expected: str) -> bool:
+    # Sem senha configurada o painel NAO abre. Antes, DASHBOARD_PASSWORD vazio
+    # fazia a senha vazia valer: sha256("") == sha256("").
+    if not (expected or "").strip():
+        return False
     return hmac.compare_digest(
         hashlib.sha256((candidate or "").encode("utf-8")).digest(),
         hashlib.sha256((expected or "").encode("utf-8")).digest(),
@@ -186,7 +190,11 @@ def problemas_de_seguranca(config) -> tuple[list[str], list[str]]:
     exposto = esta_exposto(config.web_host)
     achados: list[str] = []
 
-    if _fraca(config.dashboard_password, MINIMO_SENHA, SENHAS_OBVIAS):
+    if not (config.dashboard_password or "").strip():
+        achados.append(
+            "DASHBOARD_PASSWORD vazio: o painel não aceita login até você definir uma "
+            f"senha (mínimo {MINIMO_SENHA} caracteres).")
+    elif _fraca(config.dashboard_password, MINIMO_SENHA, SENHAS_OBVIAS):
         achados.append(
             f"DASHBOARD_PASSWORD é fraca ou padrão (mínimo {MINIMO_SENHA} caracteres). "
             "O painel mostra CPF de cliente.")

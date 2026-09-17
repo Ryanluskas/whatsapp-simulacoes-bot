@@ -95,9 +95,30 @@ class TestConteudoDaImagem:
         aberto = build_result_html(_resultado(), "REQ1", show_client_data=True, tz=TZ)
         assert "529.982.247-25" in aberto
 
+    def test_sem_dado_do_cliente_nenhum_identificador_na_imagem(self):
+        """IMAGE_SHOW_CLIENT_DATA=false: nem nome, nem CPF, nem contrato.
+
+        Antes a flag só mascarava o CPF (``529.***.***-25`` continuava na
+        imagem, com o nome inteiro e os números de contrato). Máscara parcial
+        ainda identifica; a regra agora é nenhum identificador.
+        """
         fechado = build_result_html(_resultado(), "REQ1", show_client_data=False, tz=TZ)
-        assert "529.982.247-25" not in fechado
-        assert "529.***.***-25" in fechado
+        for proibido in ("529.982.247-25", "52998224725", "529.***.***-25", "***.***",
+                         "LUIZ FERNANDO TESTE", "Luiz Fernando Teste",
+                         "7*****56", "7*****36", "7000045656"):
+            assert proibido not in fechado, f"{proibido!r} vazou na imagem"
+        # O resultado financeiro continua lá: é o que o consultor precisa.
+        for necessario in ("R$ 450,00", "R$ 22.079,91", "R$ 18.485,03", "120",
+                           "Contrato 1", "Contrato 2", "DADOS DO CLIENTE OCULTOS"):
+            assert necessario in fechado, f"{necessario!r} sumiu da imagem"
+
+    def test_sem_dado_do_cliente_o_motivo_do_portal_nao_leva_cpf(self):
+        """O motivo do portal entra literal no card -- e pode citar o CPF."""
+        html = build_result_html(
+            _resultado(ok=False, erro="CPF 529.982.247-25 não localizado na base"),
+            "REQ1", show_client_data=False, tz=TZ)
+        assert "529.982.247-25" not in html and "52998224725" not in html
+        assert "não localizado na base" in html
 
     def test_placeholder_lead_nao_vira_nome_de_cliente(self):
         """"Lead" é o marcador de "o consultor não informou" — não é nome.

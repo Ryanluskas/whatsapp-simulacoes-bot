@@ -44,7 +44,7 @@ from pathlib import Path
 from .clock import parse_iso, utc_now
 from .formatter import format_brl
 from .models import SimulationResult
-from .security import format_cpf, mask_cpf
+from .security import format_cpf, redact
 
 LARGURA = 1080
 
@@ -175,11 +175,12 @@ def _motivos_html(result) -> str:
     return f"<div class='motivos'>{linhas}</div>"
 
 
-def _linha_de_contrato(contrato: dict, par: bool) -> str:
+def _linha_de_contrato(contrato: dict, par: bool, rotulo: str = "") -> str:
+    """``rotulo`` no lugar do numero do contrato (IMAGE_SHOW_CLIENT_DATA=false)."""
     classe = " class='par'" if par else ""
     return (
         f"<tr{classe}>"
-        f"<td class='txt'>{escape(_campo(contrato, 'contrato'))}</td>"
+        f"<td class='txt'>{escape(rotulo or _campo(contrato, 'contrato'))}</td>"
         f"<td>{escape(_campo(contrato, 'parcelas'))}</td>"
         f"<td>{escape(_campo(contrato, 'valor_parcela'))}</td>"
         f"<td>{escape(_taxa(contrato))}</td>"
@@ -218,10 +219,14 @@ def build_result_html(
         nome_cliente = "CLIENTE NÃO INFORMADO"
     nome_cliente = nome_cliente.upper()
 
-    cpf_texto = format_cpf(req.cpf) if show_client_data else mask_cpf(req.cpf)
+    # IMAGE_SHOW_CLIENT_DATA=false: NENHUM identificador do cliente na imagem
+    # -- nem nome, nem CPF (nem mascarado), nem numero de contrato. Fica o
+    # resultado financeiro, que e' o que o consultor precisa ver.
+    if not show_client_data:
+        nome_cliente = "DADOS DO CLIENTE OCULTOS"
 
     # ------------------------------------------------------- metadados
-    meta = [escape(f"CPF {cpf_texto}")]
+    meta = [escape(f"CPF {format_cpf(req.cpf)}")] if show_client_data else []
     if getattr(req, "origin", ""):
         meta.append(escape(req.origin))
     selo = _selo_do_banco(banco)
@@ -263,10 +268,15 @@ def build_result_html(
             + "</div>"
         )
 
+    if not show_client_data:
+        # O motivo vem do portal, literal: pode trazer o CPF.
+        valor_html = redact(valor_html)
+
     # -------------------------------------------------------- a tabela
     if contratos:
-        linhas = "".join(_linha_de_contrato(c, i % 2 == 1)
-                         for i, c in enumerate(contratos))
+        linhas = "".join(_linha_de_contrato(
+            c, i % 2 == 1, rotulo="" if show_client_data else f"Contrato {i + 1}")
+            for i, c in enumerate(contratos))
         tabela = (
             "<table class='contratos'><thead><tr>"
             "<th class='txt'>CONTRATO</th><th>PARCELAS</th><th>VALOR PARCELA</th>"

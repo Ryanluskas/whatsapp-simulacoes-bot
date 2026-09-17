@@ -481,8 +481,11 @@ class BotManager:
 
         A troca so' acontece se a linha AINDA estiver ``unconfirmed``, numa
         UPDATE condicional: dois cliques, duas abas ou duas pessoas nao viram
-        dois reenvios. ``ValueError`` = acao invalida; ``LookupError`` = id
-        inexistente; ``{"ok": False}`` = a linha nao esta' mais incerta.
+        dois reenvios. ``nao_chegou`` vale UMA vez por solicitacao: se o
+        reenvio liberado tambem ficar incerto, sobra so' ``chegou`` -- o bot
+        nao entra num ciclo de reenvios manuais sobre uma entrega que ninguem
+        consegue provar. ``ValueError`` = acao invalida; ``LookupError`` = id
+        inexistente; ``{"ok": False}`` = a troca nao pode ser feita (motivo).
         """
         if acao not in self.ACOES_ENTREGA_INCERTA:
             raise ValueError(f"ação desconhecida: {acao or '(vazia)'}; "
@@ -493,13 +496,22 @@ class BotManager:
         linha = dict(linha)
         campos = (self._campos_de_entregue_manual(linha) if acao == "chegou"
                   else self._campos_de_reenvio_manual(linha))
+        campos.update(delivery_resolved_by=(quem or "painel")[:60],
+                      delivery_resolved_at=campos["updated_at"])
         if not self._trocar_se_incerta(simulation_id, campos):
-            agora = self.db.scalar("SELECT delivery_status FROM simulations WHERE id=?",
-                                   (simulation_id,))
-            return {"ok": False,
-                    "motivo": f"a entrega não está mais incerta (agora: {agora or 'sem estado'})"}
+            return {"ok": False, "motivo": self._por_que_nao_troca(simulation_id)}
         self._anunciar_decisao_manual(linha, acao, quem)
         return {"ok": True, "delivery_status": campos["delivery_status"]}
+
+    def _por_que_nao_troca(self, simulation_id: int) -> str:
+        agora = self.db.fetchone(
+            "SELECT delivery_status, delivery_resolution FROM simulations WHERE id=?",
+            (simulation_id,)) or {}
+        if (agora.get("delivery_status") == Delivery.UNCONFIRMED
+                and agora.get("delivery_resolution") == "manual:nao_chegou"):
+            return ("já houve um reenvio manual desta solicitação e ele também ficou "
+                    "incerto; confira o grupo e use 'Chegou' se ela estiver lá")
+        return f"a entrega não está mais incerta (agora: {agora.get('delivery_status') or 'sem estado'})"
 
     @staticmethod
     def _campos_de_entregue_manual(linha: dict) -> dict:
@@ -527,10 +539,14 @@ class BotManager:
 
     def _trocar_se_incerta(self, simulation_id: int, campos: dict) -> bool:
         colunas = ", ".join(f"{coluna}=?" for coluna in campos)
+        # ``nao_chegou`` so' uma vez: a condicao mora na MESMA UPDATE, entao
+        # nem duas abas ao mesmo tempo passam dela.
+        so_uma_vez = ("AND COALESCE(delivery_resolution,'') != 'manual:nao_chegou' "
+                      if campos["delivery_status"] == Delivery.RETRYING else "")
         with self.db.write() as conn:
             cur = conn.execute(
                 f"UPDATE simulations SET {colunas} "
-                " WHERE id=? AND delivery_status=? AND replied_at IS NULL",
+                f" WHERE id=? AND delivery_status=? AND replied_at IS NULL {so_uma_vez}",
                 (*campos.values(), simulation_id, Delivery.UNCONFIRMED))
             if cur.rowcount != 1:
                 return False

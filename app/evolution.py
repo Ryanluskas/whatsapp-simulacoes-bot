@@ -27,6 +27,7 @@ comportamento parecido com o de uma pessoa. Nao remova.
 from __future__ import annotations
 
 import base64
+import re
 import queue
 import threading
 from pathlib import Path
@@ -61,13 +62,20 @@ LICENCA_PENDENTE = "LICENSE_REQUIRED"
 # so' servem para abrir caminho a um reenvio; na ausencia delas, o desfecho
 # e' o que nao reenvia (INCERTA).
 
-#: O corpo fala da citacao: recusa por causa do ``quoted``.
-_MARCAS_DE_CITACAO = ("quoted", "quote", "stanzaid", "contextinfo")
+#: O corpo fala da citacao: recusa por causa do ``quoted``. "quote" sozinho
+#: ficou de fora (casava com qualquer texto e abria caminho para um reenvio),
+#: e "quoted" so' vale como PALAVRA -- "unquoted" nao e' a citacao.
+_MARCAS_DE_CITACAO = ("stanzaid", "contextinfo")
+_CITACAO_COMO_PALAVRA = re.compile(r"(?<![a-z])quoted(?:message)?(?![a-z])")
 
 #: O corpo sugere falha DEPOIS de processar (a mensagem pode ter saido).
+#: Inclui as integracoes que a Evolution dispara depois de enviar: guardar a
+#: midia no S3/MinIO, avisar Chatwoot, RabbitMQ, SQS, websocket.
 _MARCAS_POS_ENVIO = ("prisma", "database", "unique constraint", "chatwoot",
                      "timed out", "timeout", "etimedout", "econnreset",
-                     "socket hang up", "connection closed")
+                     "socket hang up", "connection closed",
+                     "minio", "bucket", "accesskeyid", "s3client", "putobject",
+                     "rabbitmq", "amqp", "sqs", "websocket")
 
 #: O corpo sugere validacao ANTES de enviar (nada saiu).
 _MARCAS_DE_VALIDACAO = ('"exists":false', "requires property", "is not of a type",
@@ -81,9 +89,37 @@ _HTTP_TRANSITORIO = {408, 429, 503}
 _HTTP_PERMANENTE = {401, 403, 404}
 
 
+class Categoria:
+    """O QUE a resposta disse, separado do que o envio faz com isso (``Desfecho``).
+
+    Duas categorias levam ao mesmo desfecho INCERTA de proposito:
+    ``POST_SEND_ERROR`` (o corpo mostra erro depois de enviar) e ``UNCERTAIN``
+    (nao ha' como saber). Separa-las e' o que deixa o log e os testes dizerem
+    POR QUE a mensagem pode ter saido.
+    """
+
+    QUOTE_REJECTED = "QUOTE_REJECTED"            # 400/422 apontando o quoted: nada saiu
+    VALIDATION_REJECTED = "VALIDATION_REJECTED"  # 400/422 de validacao: nada saiu
+    POST_SEND_ERROR = "POST_SEND_ERROR"          # erro depois de enviar: pode ter saido
+    TRANSIENT = "TRANSIENT"                      # nada processado; repetir depois
+    PERMANENT = "PERMANENT"                      # nada processado; repetir nao resolve
+    UNCERTAIN = "UNCERTAIN"                      # sem como saber: pode ter saido
+
+    #: Desfecho de cada categoria -- a unica traducao, num lugar so'.
+    DESFECHO = {
+        QUOTE_REJECTED: Desfecho.CITACAO_RECUSADA,
+        VALIDATION_REJECTED: Desfecho.RECUSADA,
+        POST_SEND_ERROR: Desfecho.INCERTA,
+        TRANSIENT: Desfecho.TRANSITORIA,
+        PERMANENT: Desfecho.PERMANENTE,
+        UNCERTAIN: Desfecho.INCERTA,
+    }
+
+
 class Classificacao(NamedTuple):
     desfecho: str
     motivo: str
+    categoria: str = Categoria.UNCERTAIN
 
     @property
     def transitorio(self) -> bool:
@@ -101,8 +137,8 @@ def classificar_resposta(status_http: int, corpo: str,
     400/422 de validacao        recusada             nao repete (imagem -> texto)
     400/422 sem explicacao      incerta              nao repete, nao cai p/ texto
     401/403/404, licenca        permanente           nao repete
-    408/429/502/503/504         transitoria          repete igual, depois
-    500 e outros 5xx            incerta              nao repete, nao cai p/ texto
+    408/429/503                 transitoria          repete igual, depois
+    500, 502, 504, outros 5xx   incerta              nao repete, nao cai p/ texto
     ==========================  ===================  ==========================
 
     Separar isto do envio e' o que permite testar a politica com uma tabela,
@@ -116,39 +152,50 @@ def classificar_resposta(status_http: int, corpo: str,
     if status_http == 503 and LICENCA_PENDENTE in texto:
         return Classificacao(Desfecho.PERMANENTE,
                              "a instancia da Evolution nao esta ativada -- abra "
-                             "/manager e faca a ativacao da licenca")
+                             "/manager e faca a ativacao da licenca",
+            Categoria.PERMANENT)
     if status_http in _HTTP_PERMANENTE:
         return Classificacao(Desfecho.PERMANENTE,
-                             f"a Evolution recusou ({status_http}): {trecho}")
+                             f"a Evolution recusou ({status_http}): {trecho}",
+            Categoria.PERMANENT)
     if status_http in _HTTP_TRANSITORIO:
         return Classificacao(Desfecho.TRANSITORIA,
-                             f"a Evolution nao processou agora ({status_http}): {trecho}")
+                             f"a Evolution nao processou agora ({status_http}): {trecho}",
+            Categoria.TRANSIENT)
     if status_http >= 500:
         # 500 NAO prova que nada saiu: pode ser erro depois do envio. Mandar
         # de novo (com ou sem citacao) pode duplicar a resposta.
         return Classificacao(Desfecho.INCERTA,
                              f"a Evolution respondeu {status_http}; a mensagem pode ter "
-                             f"saido: {trecho}")
+                             f"saido: {trecho}",
+            Categoria.UNCERTAIN)
     if status_http in (400, 422):
         if any(marca in baixo for marca in _MARCAS_POS_ENVIO):
             return Classificacao(Desfecho.INCERTA,
                                  f"a Evolution respondeu {status_http} com sinal de erro "
-                                 f"depois do envio: {trecho}")
-        if com_citacao and any(marca in compacto for marca in _MARCAS_DE_CITACAO):
+                                 f"depois do envio: {trecho}",
+            Categoria.POST_SEND_ERROR)
+        if com_citacao and (_CITACAO_COMO_PALAVRA.search(baixo)
+                            or any(marca in compacto for marca in _MARCAS_DE_CITACAO)):
             return Classificacao(Desfecho.CITACAO_RECUSADA,
-                                 f"a Evolution recusou a citacao ({status_http}): {trecho}")
+                                 f"a Evolution recusou a citacao ({status_http}): {trecho}",
+            Categoria.QUOTE_REJECTED)
         if any(marca.replace(" ", "") in compacto for marca in _MARCAS_DE_VALIDACAO):
             return Classificacao(Desfecho.RECUSADA,
-                                 f"a Evolution recusou o envio ({status_http}): {trecho}")
+                                 f"a Evolution recusou o envio ({status_http}): {trecho}",
+            Categoria.VALIDATION_REJECTED)
         return Classificacao(Desfecho.INCERTA,
                              f"a Evolution respondeu {status_http} sem dizer o que "
-                             f"recusou; a mensagem pode ter saido: {trecho}")
+                             f"recusou; a mensagem pode ter saido: {trecho}",
+            Categoria.UNCERTAIN)
     if status_http >= 400:
         # 405, 409, 413 (payload grande demais para o proxy)...: rejeitado
         # antes de chegar ao envio.
         return Classificacao(Desfecho.RECUSADA,
-                             f"a Evolution recusou ({status_http}): {trecho}")
-    return Classificacao(Desfecho.INCERTA, f"resposta inesperada ({status_http}): {trecho}")
+                             f"a Evolution recusou ({status_http}): {trecho}",
+            Categoria.VALIDATION_REJECTED)
+    return Classificacao(Desfecho.INCERTA, f"resposta inesperada ({status_http}): {trecho}",
+            Categoria.UNCERTAIN)
 
 
 def classificar_falha_de_transporte(exc: Exception) -> Classificacao:
@@ -164,10 +211,12 @@ def classificar_falha_de_transporte(exc: Exception) -> Classificacao:
     if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
                         httpx.WriteError, httpx.WriteTimeout)):
         return Classificacao(Desfecho.TRANSITORIA,
-                             f"a requisicao nao chegou a Evolution: {exc!r}"[:300])
+                             f"a requisicao nao chegou a Evolution: {exc!r}"[:300],
+            Categoria.TRANSIENT)
     return Classificacao(Desfecho.INCERTA,
                          f"a requisicao foi enviada e a resposta nao veio "
-                         f"({exc.__class__.__name__}); a mensagem pode ter saido"[:300])
+                         f"({exc.__class__.__name__}); a mensagem pode ter saido"[:300],
+            Categoria.UNCERTAIN)
 
 
 class ErroDeEnvio(Exception):
@@ -662,6 +711,56 @@ class EvolutionClient:
             citado = False
             quote_status = QuoteStatus.FALLBACK
 
+        # A partir daqui a Evolution JA' ACEITOU o POST. Qualquer excecao ao ler
+        # a resposta (citacao, evidencia, memoria) nao pode virar "transitorio"
+        # no manager -- isso reenviaria uma mensagem que saiu.
+        try:
+            return self._resultado_aceito(
+                corpo, payload, campo=campo, via=via, tipo_midia=tipo_midia,
+                citado=citado, quote_message_id=quote_message_id,
+                quote_status=quote_status, quote_error=quote_error)
+        except Exception as exc:  # noqa: BLE001 - qualquer falha aqui e' pos-envio
+            return self._aceito_sem_conferir(
+                corpo, exc, via=via, tipo_midia=tipo_midia, citado=citado,
+                quote_message_id=quote_message_id, quote_status=quote_status,
+                quote_error=quote_error)
+
+    def _aceito_sem_conferir(self, corpo, exc: Exception, *, via: str, tipo_midia: str,
+                             citado: bool, quote_message_id: str, quote_status: str,
+                             quote_error: str) -> ResultadoEnvio:
+        """O POST foi aceito e a leitura da resposta quebrou.
+
+        Com ``key.id`` legivel a mensagem saiu (entregue, citacao sem prova);
+        sem ele, incerta. Nunca "transitorio".
+        """
+        try:
+            enviado_id = extrair_key_id(corpo) if isinstance(corpo, dict) else ""
+        except Exception:  # noqa: BLE001
+            enviado_id = ""
+        motivo = (f"a Evolution aceitou o envio, mas a resposta nao pode ser lida "
+                  f"({exc.__class__.__name__})")
+        self._log("WARNING", motivo + ("; a mensagem saiu" if enviado_id
+                                       else "; a mensagem pode ter saído"))
+        situacao = QuoteStatus.UNVERIFIED if citado else quote_status
+        comum = dict(via=via, provider="evolution", quote_status=situacao,
+                     quote_error=quote_error,
+                     quoted_message_id=quote_message_id if citado else "")
+        if enviado_id:
+            return ResultadoEnvio(ok=True, tipo_midia=tipo_midia, desfecho=Desfecho.ENTREGUE,
+                                  enviado_id=enviado_id, motivo="",
+                                  evidencia={"key_id": enviado_id, "desfecho": Desfecho.ENTREGUE,
+                                             "leitura": motivo},
+                                  **comum)
+        return ResultadoEnvio(ok=False, tipo_midia="nenhum", desfecho=Desfecho.INCERTA,
+                              sem_prova=True, motivo=motivo,
+                              evidencia={"transitorio": False, "sem_prova": True,
+                                         "desfecho": Desfecho.INCERTA},
+                              **comum)
+
+    def _resultado_aceito(self, corpo: dict, payload: dict, *, campo: str, via: str,
+                          tipo_midia: str, citado: bool, quote_message_id: str,
+                          quote_status: str, quote_error: str) -> ResultadoEnvio:
+        """Le' a resposta de um POST aceito: prova de entrega e de citacao."""
         http_status = int(corpo.pop("_http_status", 0) or 0)
         enviado_id = extrair_key_id(corpo)
         if citado:

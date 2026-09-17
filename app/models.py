@@ -288,6 +288,13 @@ class ResultadoEnvio:
     #: que e' sobre a ENTREGA.
     quote_error: str = ""
 
+    def __post_init__(self) -> None:
+        # ``quoted_ok`` AFIRMA que a citacao pegou. Com ``quote_status``
+        # informado, so' ``ok`` sustenta essa afirmacao: unverified,
+        # not_applied, fallback e none nunca -- venha de que camada vier.
+        if self.quote_status and self.quote_status != QuoteStatus.OK:
+            object.__setattr__(self, "quoted_ok", False)   # dataclass congelado
+
     def __bool__(self) -> bool:
         """Compatibilidade: o codigo antigo tratava o retorno como booleano."""
         return self.ok

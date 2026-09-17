@@ -103,6 +103,50 @@ class TestOndeORecorteCai:
         """Cada nível a mais aproxima o recorte do topo da página."""
         assert _recorte(navegador, PAGINA)["subidas"] <= 3
 
+    def test_pagina_normal_passa_na_conferencia(self, navegador):
+        r = _recorte(navegador, PAGINA)
+        assert r["dentro_da_tela"] is True and r["sobrepostos"] == 0
+        assert recusar(r) == ""
+
+
+class TestPrintQueNaoPodeSerConferido:
+    """O print é dos PIXELS; a conferência lê o TEXTO do elemento.
+
+    Os três casos abaixo passavam na conferência antiga e mandavam para o grupo
+    uma imagem diferente do texto conferido (achados da revisão independente).
+    Com IMAGEM_DA_RESPOSTA=portal, qualquer um deles agora cai para o card.
+    """
+
+    def test_cabecalho_fixo_do_portal_por_cima_descarta(self, navegador):
+        fixo = ('<header style="position:fixed;top:0;left:0;right:0;height:140px;'
+                'background:#fff;z-index:9">'
+                '<div>Parceiro Santander</div><div>Fulaninha</div></header>')
+        html = f"<!doctype html><html><body style='margin:0'>{fixo}{CARDS}</body></html>"
+        r = _recorte(navegador, html)
+        assert r["achou"] is True
+        assert "Parceiro Santander" not in r["texto"], "o texto conferido não vê o cabeçalho"
+        assert r["sobrepostos"] >= 1
+        assert "fixo" in recusar(r)
+
+    def test_lista_maior_que_a_janela_descarta(self, navegador):
+        longa = CARDS.replace('style="height:300px"', 'style="height:1500px"')
+        r = _recorte(navegador, f"<!doctype html><html><body>{longa}</body></html>")
+        assert r["dentro_da_tela"] is False
+        assert "visível" in recusar(r)
+
+    def test_pagina_rolada_descarta(self, navegador):
+        pagina = navegador.new_page()
+        try:
+            pagina.set_content(f"<!doctype html><html><body>{TOPO}{CLIENTE}{CARDS}"
+                               "<div style='height:2000px'></div></body></html>")
+            pagina.evaluate("window.scrollTo(0, 320)")   # a seção começa em ~264px
+            r = pagina.evaluate(RECORTE_JS, {"ancoras": list(ANCORAS_DO_RESULTADO),
+                                             "cards": "saldo devedor"})
+        finally:
+            pagina.close()
+        assert r["dentro_da_tela"] is False
+        assert recusar(r) != ""
+
     def test_sem_a_tela_de_resultado_nao_ha_recorte(self, navegador):
         r = _recorte(navegador, f"<!doctype html><html><body>{TOPO}{CLIENTE}</body></html>")
         assert r["achou"] is False
@@ -124,7 +168,24 @@ class TestOQueERecusado:
     """
 
     BOM = {"achou": True, "largura": 900, "altura": 400,
+           "dentro_da_tela": True, "sobrepostos": 0, "texto_total": 60,
            "texto": "Selecione os contratos\n7******46\nSaldo devedor R$ 83.585,39"}
+
+    def test_sem_prova_de_que_o_print_e_o_texto_conferido_descarta(self):
+        """Recorte sem as medidas novas: não dá para garantir, então não vai."""
+        antigo = {k: v for k, v in self.BOM.items()
+                  if k not in ("dentro_da_tela", "sobrepostos", "texto_total")}
+        assert recusar(antigo) != ""
+
+    def test_fora_da_tela_descarta(self):
+        assert "visível" in recusar({**self.BOM, "dentro_da_tela": False})
+
+    def test_elemento_fixo_por_cima_descarta(self):
+        assert "fixo" in recusar({**self.BOM, "sobrepostos": 1})
+
+    def test_texto_maior_que_o_conferido_descarta(self):
+        """Só 4000 caracteres voltam para conferência; o resto não foi lido."""
+        assert "grande demais" in recusar({**self.BOM, "texto_total": 4001})
 
     def test_recorte_bom_passa(self):
         assert recusar(self.BOM) == ""
@@ -186,6 +247,7 @@ class TestCapturarNuncaDerruba:
         class ComTopo(self._PaginaSemFoto):
             def evaluate(self, *_a, **_k):
                 return {"achou": True, "x": 0, "y": 0, "largura": 900, "altura": 400,
+                        "dentro_da_tela": True, "sobrepostos": 0, "texto_total": 42,
                         "texto": "Parceiro Santander Fulaninha Saldo devedor"}
 
         destino = tmp_path / "x.png"

@@ -195,6 +195,8 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         # Quem desempatou uma entrega incerta no painel, e como:
         # "manual:chegou" | "manual:nao_chegou". Vazio = ninguem precisou.
         "delivery_resolution": "TEXT DEFAULT ''",
+        "delivery_resolved_by": "TEXT DEFAULT ''",
+        "delivery_resolved_at": "TEXT DEFAULT ''",
     },
     "messages": {
         "request_id": "TEXT",

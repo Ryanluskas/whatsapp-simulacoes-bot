@@ -14,6 +14,8 @@ comprovantes/
 diagnostico/
 # Respostas capturadas da Evolution (JID e telefone reais)
 evolution-respostas/
+# Relatorio de sensibilidade: aponta commits antigos que o GitHub ainda serve
+RELATORIO-SENSIBILIDADE.md
 
 # Perfis de navegador (contêm a sessão do WhatsApp e do banco)
 .whatsapp-profile/

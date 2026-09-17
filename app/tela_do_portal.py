@@ -83,6 +83,8 @@ _CPF = re.compile(r"\d{3}\.?\d{3}\.?\d{3}-?\d{2}")
 _ALTURA_MAXIMA = 2200
 _LARGURA_MAXIMA = 2600
 _MINIMO = 80
+#: Quanto do texto do recorte volta para conferencia (ver RECORTE_JS).
+_TEXTO_CONFERIDO = 4000
 
 
 RECORTE_JS = r"""
@@ -127,8 +129,31 @@ RECORTE_JS = r"""
   }
 
   const r = caixa.getBoundingClientRect();
+
+  // O print e' dos PIXELS, e a conferencia abaixo le' o TEXTO do elemento.
+  // Duas situacoes fazem os dois divergirem, e nas duas o print e' descartado:
+  //  * o elemento nao cabe inteiro na janela (rolagem, lista maior que a
+  //    tela): o print sai cortado ou deslocado;
+  //  * um elemento fixo/sticky de FORA (cabecalho do portal, com o operador)
+  //    cruza a area: ele aparece na imagem sem estar no texto conferido.
+  const dentro = r.left >= 0 && r.top >= 0
+      && r.right <= window.innerWidth + 1 && r.bottom <= window.innerHeight + 1;
+  let sobrepostos = 0;
+  for (const el of document.querySelectorAll('body *')) {
+    if (caixa.contains(el) || el.contains(caixa)) continue;
+    const pos = getComputedStyle(el).position;
+    if (pos !== 'fixed' && pos !== 'sticky') continue;
+    if (!visivel(el)) continue;
+    const q = el.getBoundingClientRect();
+    if (q.right <= r.left || q.left >= r.right || q.bottom <= r.top || q.top >= r.bottom) continue;
+    sobrepostos += 1;
+  }
+
   return {
     achou: true,
+    dentro_da_tela: dentro,
+    sobrepostos,
+    texto_total: (caixa.innerText || '').length,
     x: Math.max(0, Math.floor(r.x)),
     y: Math.max(0, Math.floor(r.y)),
     largura: Math.ceil(r.width),
@@ -167,6 +192,15 @@ def recusar(recorte: dict) -> str:
         # Recorte gigante e' quase sempre "subi ate' o body" -- e ai' o topo
         # da pagina entra junto.
         return f"a área do resultado veio grande demais ({largura}x{altura})"
+
+    # Sem a prova de que o print e' o que foi conferido, nao ha' print. A falta
+    # das chaves tambem recusa: nunca enviar um print potencialmente contaminado.
+    if recorte.get("dentro_da_tela") is not True:
+        return "o recorte sai da área visível (rolagem ou lista maior que a janela)"
+    if int(recorte.get("sobrepostos") if recorte.get("sobrepostos") is not None else 1) > 0:
+        return "há elemento fixo do portal por cima do recorte (cabeçalho ou menu)"
+    if int(recorte.get("texto_total") or 0) > _TEXTO_CONFERIDO:
+        return "o texto do recorte é grande demais para conferir inteiro"
 
     texto = _sem_acento(recorte.get("texto") or "")
     for marca in MARCAS_DO_TOPO:
