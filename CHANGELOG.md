@@ -13,7 +13,17 @@ PR que a introduz.
 
 ## [Não lançado]
 
-Nada ainda.
+### Instalação
+
+- `instalador/`: gera um **`AllanaBot-setup.exe`** (IExpress, que já vem no
+  Windows) para instalar o bot em outro PC sem administrador. Instalador
+  online de ~2 MB: baixa Python, dependências e Chromium na hora, pergunta a
+  senha do painel, gera um `SESSION_SECRET` novo, cria atalhos e registra o
+  desinstalador em *Aplicativos*.
+- O pacote sai de `git archive HEAD` (só o versionado) mais o código do
+  Arqueiro por **lista de permitidos**. Um conferente para a montagem se
+  aparecer credencial, planilha, log ou um número de 11 dígitos fora de
+  comentário.
 
 ## [0.2.0] — 2026-09-17
 

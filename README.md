@@ -42,6 +42,19 @@ histórico leem a mesma fonte, então painel e banco nunca discordam.
 
 ## Como iniciar
 
+### Em outro computador: `AllanaBot-setup.exe`
+
+Para levar o bot a uma máquina nova existe um instalador do Windows, gerado
+com `instalador\montar-setup.ps1` (detalhes em
+[instalador/README.md](instalador/README.md)). Ele não pede administrador,
+instala em `%LOCALAPPDATA%\AllanaBot`, baixa Python/dependências/Chromium,
+pergunta a senha do painel e **gera um `SESSION_SECRET` novo naquela
+máquina** — nenhum segredo viaja dentro do pacote, e dado de cliente também
+não: o empacotador tem uma lista de permitidos e para a montagem se algo
+proibido escapar.
+
+### Nesta máquina, a partir do repositório
+
 Dois cliques em **`iniciar.bat`**.
 
 Ele descobre o Python, cria o ambiente virtual, instala as dependências,
