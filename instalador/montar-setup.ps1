@@ -138,7 +138,20 @@ try {
     # ------------------------------------------------------------- empacota
     Passo "Compactando o pacote"
     $payload = Join-Path $trabalho "payload.zip"
-    Compress-Archive -Path (Join-Path $app "*") -DestinationPath $payload -CompressionLevel Optimal -Force
+    # O antivirus abre os arquivos recem-copiados e o Compress-Archive falha
+    # com "sendo usado por outro processo". Tentar de novo resolve.
+    $tentativas = 0
+    while ($true) {
+        try {
+            Compress-Archive -Path (Join-Path $app "*") -DestinationPath $payload -CompressionLevel Optimal -Force
+            break
+        } catch {
+            $tentativas++
+            if ($tentativas -ge 3) { throw }
+            Write-Host "   arquivo ocupado; tentando de novo ($tentativas/3)" -ForegroundColor DarkGray
+            Start-Sleep -Seconds 3
+        }
+    }
     Copy-Item (Join-Path $Aqui "bootstrap.cmd") $trabalho -Force
     $mb = [math]::Round((Get-Item $payload).Length / 1MB, 1)
     Ok "payload.zip com $mb MB"
