@@ -13,6 +13,10 @@ PR que a introduz.
 
 ## [Não lançado]
 
+Nada ainda.
+
+## [0.3.0] — 2026-09-17
+
 ### Instalação
 
 - `instalador/`: gera um **`AllanaBot-setup.exe`** (IExpress, que já vem no
@@ -139,6 +143,7 @@ Primeira versão marcada: o bot em produção no modo `dom` (WhatsApp Web).
   (`IMAGEM_DA_RESPOSTA=portal`) e correção da conferência da barra de citação
   no WhatsApp Web.
 
-[Não lançado]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/compare/v0.2.0...main
+[Não lançado]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/compare/v0.3.0...main
+[0.3.0]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/releases/tag/v0.1.0
