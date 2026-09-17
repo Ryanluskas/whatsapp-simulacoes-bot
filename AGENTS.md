@@ -73,6 +73,9 @@ contrato (`app/whatsapp_port.py`): `dom` (navegador, `app/whatsapp.py`) e
   com autorização explícita do dono do repositório, dada para aquela operação.
   O seu papel é diagnosticar e preparar os comandos, não executá-los.
 - Commits pequenos, mensagem em português dizendo o **porquê**.
+- Mudança de comportamento entra no `CHANGELOG.md`, em **[Não lançado]**, no
+  mesmo commit. Tags de versão (`vX.Y.Z`) só na `main`, depois do merge, por
+  decisão humana.
 - Não apague backup, branch ou worktree de outra pessoa.
 
 ## Testes
