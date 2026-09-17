@@ -415,11 +415,10 @@ class TestOCitouRealChegaNaMensagem:
             client=httpx.Client(transport=httpx.MockTransport(servidor),
                                 base_url="http://e:8080"),
             renderer=None)
-        cliente.lembrar_original("3EB0PEDIDO", "Ivone 42888832453")
-
         r = cliente.send("120@g.us", "G", "com citação",
                          quote_message_id="3EB0PEDIDO",
-                         texto_sem_citacao="solta\n↩ Ryan")
+                         texto_sem_citacao="solta\n↩ Ryan",
+                         quote_text="Ivone 42888832453")
         assert r.ok and r.quoted_ok
         assert enviados[-1]["text"] == "com citação"
 

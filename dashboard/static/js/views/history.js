@@ -220,8 +220,17 @@ export async function openSimulation(id) {
         row("Margem", s.margin || "—"),
         row("Tempo", fmt.duration(s.processing_seconds)),
         row("Tentativas", `${s.attempts || 0} de ${s.max_attempts || 1}`),
+        row("Entrega", deliveryLabel(s)),
+        row("Citação", QUOTE_LABELS[s.quote_status] || s.quote_status || "—"),
+        s.sent_message_id ? row("ID enviado", h("span.mono", s.sent_message_id)) : null,
       ),
     ),
+    s.delivery_error ? h("div", {
+      style: {
+        marginTop: "12px", padding: "10px 12px", borderRadius: "6px",
+        background: "var(--st-error-bg)", fontSize: "13px",
+      },
+    }, `Entrega: ${s.delivery_error}`) : null,
     s.error_message ? h("div", {
       style: {
         marginTop: "18px", padding: "10px 12px", borderRadius: "6px",
@@ -246,14 +255,16 @@ export async function openSimulation(id) {
       ? h("ul.timeline", data.messages.map((message) => h("li",
         h("span.tl-time", fmt.time(message.created_at)),
         h("span.tl-node", {
-          style: { background: message.direction === "in" ? "var(--st-processing)" : "var(--st-done)" },
+          style: { background: messageColor(message) },
         }),
         h("div.tl-body",
-          h("div.t", message.direction === "in" ? "Recebida"
-            : (message.kind === "image" ? "Enviada · imagem" : "Enviada")),
+          h("div.t", messageTitle(message)),
           h("div.d", { style: { whiteSpace: "pre-wrap" } }, fmt.truncate(message.text, 460)),
-          // O comprovante exato que o consultor recebeu no grupo
-          message.media_url
+          messageEvidence(message) && h("div.d.mono", { style: { fontSize: "12px" } },
+            messageEvidence(message)),
+          // O comprovante exato que o consultor recebeu no grupo -- só quando
+          // ele de fato recebeu. Tentativa que falhou não mostra a imagem.
+          message.media_url && !FAILED_MESSAGE.has(message.status)
             ? h("a", {
               href: message.media_url, target: "_blank", rel: "noopener",
               title: "Abrir a imagem enviada",
@@ -297,4 +308,64 @@ function nodeColor(event) {
   if (event.level === "success") return "var(--st-done)";
   if (event.level === "warning") return "var(--st-queued)";
   return "var(--st-processing)";
+}
+
+// --- entrega ------------------------------------------------------------
+// "Enviada" só quando a camada devolveu prova. Uma tentativa que falhou ou
+// que a API aceitou sem id não pode aparecer como resposta que chegou.
+const FAILED_MESSAGE = new Set(["failed", "unconfirmed", "sending"]);
+
+const DELIVERY_LABELS = {
+  delivered: "Entregue",
+  pending: "Enviando",
+  retrying: "Reenvio pendente",
+  // Pode ter chegado: ninguém vai tentar de novo sozinho, porque uma segunda
+  // mensagem duplicaria a resposta no grupo.
+  unconfirmed: "Entrega incerta — verificar WhatsApp",
+  failed: "Falhou",
+};
+
+const QUOTE_LABELS = {
+  ok: "Citada (confirmada)",
+  unverified: "Citada (sem como conferir)",
+  not_applied: "Saiu citando outra mensagem",
+  fallback: "Recusada — reenviada sem citação",
+  none: "Sem citação",
+  "": "Não avaliada",
+};
+
+function deliveryLabel(s) {
+  const base = DELIVERY_LABELS[s.delivery_status] || (s.replied_at ? "Entregue" : "—");
+  return s.reply_attempts ? `${base} · ${s.reply_attempts} reenvio(s)` : base;
+}
+
+function messageTitle(message) {
+  if (message.direction === "in") return "Recebida";
+  const tipo = message.kind === "image" ? " · imagem" : "";
+  if (message.status === "failed") return `Falhou${tipo}`;
+  if (message.status === "sending") return `Enviando${tipo}…`;
+  if (message.status === "unconfirmed") return `Incerta — verificar WhatsApp${tipo}`;
+  return `Enviada${tipo}`;
+}
+
+function messageColor(message) {
+  if (message.direction === "in") return "var(--st-processing)";
+  if (message.status === "failed") return "var(--st-error)";
+  if (message.status === "unconfirmed" || message.status === "sending") return "var(--st-queued)";
+  return "var(--st-done)";
+}
+
+function messageEvidence(message) {
+  if (message.direction === "in") {
+    return message.wa_message_id ? `id ${message.wa_message_id}` : "";
+  }
+  const partes = [];
+  if (message.attempt) partes.push(`tentativa ${message.attempt}`);
+  if (message.quote_status) partes.push(`citação ${message.quote_status}`);
+  if (message.wa_message_id) partes.push(`id ${message.wa_message_id}`);
+  if (message.http_status) partes.push(`HTTP ${message.http_status}`);
+  if (message.desfecho) partes.push(`desfecho ${message.desfecho}`);
+  if (message.quote_error) partes.push(`citação recusada: ${message.quote_error}`);
+  if (message.error) partes.push(message.error);
+  return partes.join(" · ");
 }

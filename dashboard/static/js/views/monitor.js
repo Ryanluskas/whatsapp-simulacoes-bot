@@ -15,7 +15,7 @@ import { feedRow } from "../feed.js";
 const FILTERS = [
   { id: "all", label: "Tudo" },
   { id: "messages", label: "Mensagens", types: ["message_received", "message_sent", "message_failed"] },
-  { id: "jobs", label: "Simulações", types: ["job_queued", "job_progress", "job_done", "job_error", "job_retry", "request_created"] },
+  { id: "jobs", label: "Simulações", types: ["job_queued", "job_progress", "job_done", "job_error", "job_retry", "request_created", "request_completed", "delivery_retry", "delivery_unconfirmed", "delivery_failed"] },
   { id: "problems", label: "Problemas", levels: ["error", "warning"] },
 ];
 

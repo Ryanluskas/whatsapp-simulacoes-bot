@@ -72,12 +72,19 @@ class WhatsAppPort(Protocol):
     def qr_data_url(self, timeout: float = 20.0) -> str: ...
 
     # ------------------------------------------------------------------- envio
+    #
+    # O CHAMADOR entrega tudo que identifica a resposta: o chat, o id da
+    # mensagem a citar, o texto e o autor dela. A camada nao procura mensagem,
+    # nao olha qual conversa esta' aberta e nao lembra de nada sozinha.
     def send(self, chat_id: str, chat_name: str, text: str,
-             quote_message_id: str = "", timeout: float = 90.0) -> bool: ...
+             quote_message_id: str = "", timeout: float = 90.0,
+             texto_sem_citacao: str = "", quote_text: str = "",
+             quote_participant: str = "") -> ResultadoEnvio: ...
 
     def send_image(self, chat_id: str, chat_name: str, image_path: str | Path,
                    caption: str = "", quote_message_id: str = "",
-                   timeout: float = 120.0) -> bool: ...
+                   timeout: float = 120.0, caption_sem_citacao: str = "",
+                   quote_text: str = "", quote_participant: str = "") -> ResultadoEnvio: ...
 
     def ja_enviado(self, marca: str, timeout: float = 20.0) -> bool: ...
 

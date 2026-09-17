@@ -23,7 +23,9 @@ import pytest
 from app import mensagens
 from app.evolution import (DELAY_HUMANO_MS, EvolutionClient, LICENCA_PENDENTE,
                            classificar_resposta)
+from app.models import Desfecho
 from app.whatsapp_port import METODOS_DO_CONTRATO
+from tests.test_concurrency import png_valido
 
 GRUPO = "120363111222333@g.us"
 ID_ORIGINAL = "3EB0C5A277F7F9B6C599"
@@ -149,11 +151,19 @@ class TestCitacao:
     """Defeito histórico: não citava a mensagem do consultor."""
 
     def test_cita_usando_o_id_que_chegou_no_webhook(self, cliente, espiao):
-        cliente.lembrar_original(ID_ORIGINAL, "Ivone Teste\n42888832453")
-        r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL)
+        """O chamador entrega id, texto e autor; a camada não lembra nada sozinha.
+
+        Antes o texto citado vinha de um dicionário em RAM preenchido pelo
+        webhook -- depois de reiniciar, a citação saía vazia.
+        """
+        r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL,
+                         quote_text="Ivone Teste\n42888832453",
+                         quote_participant="5562999990000@s.whatsapp.net")
         assert r.ok and r.quoted_ok
         citada = espiao.ultimo["quoted"]
         assert citada["key"]["id"] == ID_ORIGINAL
+        assert citada["key"]["remoteJid"] == GRUPO
+        assert citada["key"]["participant"] == "5562999990000@s.whatsapp.net"
         assert citada["message"]["conversation"] == "Ivone Teste\n42888832453"
 
     def test_sem_id_nao_manda_campo_quoted(self, cliente, espiao):
@@ -188,29 +198,42 @@ class TestFalhaNuncaEhSilenciosa:
         assert not r.ok
         assert "key.id" in r.motivo
 
-    @pytest.mark.parametrize("status,transitorio", [
-        (500, True), (502, True), (503, True), (429, True),
-        (400, False), (401, False), (404, False),
+    @pytest.mark.parametrize("status,desfecho", [
+        # nada saiu, repetir a MESMA requisição depois pode dar certo
+        (429, Desfecho.TRANSITORIA), (502, Desfecho.TRANSITORIA),
+        (503, Desfecho.TRANSITORIA), (504, Desfecho.TRANSITORIA),
+        # a mensagem PODE ter saído: não se manda outra
+        (500, Desfecho.INCERTA),
+        # nada saiu e repetir não resolve
+        (401, Desfecho.PERMANENTE), (403, Desfecho.PERMANENTE), (404, Desfecho.PERMANENTE),
     ])
-    def test_classifica_para_saber_se_reenvia(self, status, transitorio):
-        assert classificar_resposta(status, "detalhe")[0] is transitorio
+    def test_classifica_para_saber_se_reenvia(self, status, desfecho):
+        assert classificar_resposta(status, "detalhe").desfecho == desfecho
+
+    def test_400_so_e_recusa_quando_a_evolution_diz_o_que_recusou(self):
+        """Um 400 opaco pode ser erro DEPOIS do envio: não vira "nada saiu"."""
+        assert classificar_resposta(400, 'requires property "number"').desfecho == Desfecho.RECUSADA
+        assert classificar_resposta(400, "Bad Request").desfecho == Desfecho.INCERTA
 
     def test_licenca_pendente_e_nomeada_e_nao_reenvia(self):
         """503 comum é transitório; este 503 específico não adianta repetir."""
-        transitorio, motivo = classificar_resposta(
-            503, json.dumps({"error": LICENCA_PENDENTE}))
-        assert transitorio is False, "reenviar não ativa licença nenhuma"
-        assert "/manager" in motivo, "a mensagem tem de dizer o que fazer"
+        classificacao = classificar_resposta(503, json.dumps({"error": LICENCA_PENDENTE}))
+        assert classificacao.desfecho == Desfecho.PERMANENTE, "reenviar não ativa licença"
+        assert classificacao.transitorio is False
+        assert "/manager" in classificacao.motivo, "a mensagem tem de dizer o que fazer"
 
-    def test_erro_500_volta_marcado_como_transitorio(self, png):
+    def test_erro_500_nao_e_transitorio_e_sim_incerto(self, png):
+        """O defeito que este teste trava: 500 disparava um segundo envio."""
         espiao = Espiao(httpx.Response(500, text="boom"))
         c = EvolutionClient("http://e:8080", "k", "allana", GRUPO,
                             client=httpx.Client(transport=httpx.MockTransport(espiao),
                                                 base_url="http://e:8080"),
                             renderer=None)
-        r = c.send_image(GRUPO, "g", png, caption="x")
+        r = c.send_image(GRUPO, "g", png, caption="x", quote_message_id=ID_ORIGINAL)
         assert not r.ok
-        assert r.evidencia["transitorio"] is True
+        assert r.desfecho == Desfecho.INCERTA
+        assert r.sem_prova is True and r.transitorio is False
+        assert len(espiao.chamadas) == 1, "tentou de novo depois de um 500"
 
     def test_erro_400_registra_o_corpo_inteiro(self):
         """A Evolution explica bem o que recusou -- jogar fora custa uma noite."""
@@ -416,7 +439,7 @@ class TestAQuedaParaTextoFuncionaNasDuasCamadas:
             def render_png(self, html, path, width=900, timeout=60.0):
                 destino = Path(path)
                 destino.parent.mkdir(parents=True, exist_ok=True)
-                destino.write_bytes(b"\x89PNG\r\n\x1a\n")
+                destino.write_bytes(png_valido())
                 return str(destino)
 
             def send_image(self, *a, **k):
@@ -433,7 +456,7 @@ class TestAQuedaParaTextoFuncionaNasDuasCamadas:
             def render_png(self, html, path, width=900, timeout=60.0):
                 destino = Path(path)
                 destino.parent.mkdir(parents=True, exist_ok=True)
-                destino.write_bytes(b"\x89PNG\r\n\x1a\n")
+                destino.write_bytes(png_valido())
                 return str(destino)
 
             def send_image(self, *a, **k):
@@ -450,7 +473,7 @@ class TestAQuedaParaTextoFuncionaNasDuasCamadas:
             def render_png(self, html, path, width=900, timeout=60.0):
                 destino = Path(path)
                 destino.parent.mkdir(parents=True, exist_ok=True)
-                destino.write_bytes(b"\x89PNG\r\n\x1a\n")
+                destino.write_bytes(png_valido())
                 return str(destino)
 
             def send_image(self, *a, **k):

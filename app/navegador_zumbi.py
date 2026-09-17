@@ -110,6 +110,37 @@ def donos_do_perfil(perfil: Path | str) -> list[dict]:
     return [p for p in encontrados if p["pid"] > 0]
 
 
+#: Pedaços de caminho que só existem no perfil REAL de um navegador instalado.
+#: Um perfil do bot nunca mora aqui; o navegador do dia a dia do operador, sim.
+_PERFIS_PESSOAIS = (
+    ("bravesoftware", "brave-browser", "user data"),
+    ("google", "chrome", "user data"),
+    ("microsoft", "edge", "user data"),
+    ("chromium", "user data"),
+)
+
+
+def perfil_pessoal(perfil: Path | str) -> bool:
+    """O caminho é (ou está dentro de) o perfil real de um navegador instalado?
+
+    Se alguém apontar ``WHATSAPP_PROFILE_DIR`` ou ``SIMULATOR_PROFILE_DIR``
+    para o ``User Data`` do Brave, "encerrar quem segura o perfil" seria
+    fechar o navegador pessoal do operador -- com as abas dele. Nesse caso a
+    limpeza não roda.
+    """
+    import re
+
+    # Separar à mão, e não com Path: o caminho é do Windows, e o teste (ou o
+    # container) pode rodar noutro sistema, onde "\" não separa nada.
+    partes = [p for p in re.split(r"[\\/]+", str(perfil).lower()) if p]
+    for trecho in _PERFIS_PESSOAIS:
+        tamanho = len(trecho)
+        for i in range(len(partes) - tamanho + 1):
+            if tuple(partes[i:i + tamanho]) == trecho:
+                return True
+    return False
+
+
 def encerrar_orfaos(perfil: Path | str, on_log=None) -> int:
     """Encerra os navegadores que sobraram segurando o perfil.
 
@@ -127,6 +158,15 @@ def encerrar_orfaos(perfil: Path | str, on_log=None) -> int:
                 pass
 
     if os.name != "nt":
+        return 0
+
+    if perfil_pessoal(perfil):
+        registrar(
+            "WARNING",
+            f"O perfil '{perfil}' é o de um navegador instalado, não um perfil do "
+            "bot. Não vou encerrar processo nenhum nele: seria fechar o navegador "
+            "pessoal do operador. Use um perfil próprio (sincronizar_perfis.ps1).",
+        )
         return 0
 
     donos = donos_do_perfil(perfil)

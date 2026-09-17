@@ -270,7 +270,30 @@ class SimulatorService(ThreadActor):
         if executable:
             launch_kwargs["executable_path"] = executable
 
-        self._context = self._playwright.chromium.launch_persistent_context(**launch_kwargs)
+        try:
+            self._context = self._playwright.chromium.launch_persistent_context(**launch_kwargs)
+        except Exception as exc:
+            if not _perfil_ocupado(str(exc)):
+                self._close_browser()
+                raise
+            # Um navegador de uma execucao morta ainda segura o perfil (o
+            # Chromium aceita um processo por perfil). So' os que declaram
+            # EXATAMENTE este perfil sao encerrados -- e nunca o perfil real
+            # de um navegador instalado. Uma tentativa, nao um laco.
+            from .navegador_zumbi import encerrar_orfaos
+
+            if not encerrar_orfaos(profile, on_log=self._log):
+                self._close_browser()
+                raise
+            try:
+                self._context = self._playwright.chromium.launch_persistent_context(
+                    **launch_kwargs)
+            except Exception:
+                # Sem isto o Playwright desta thread ficava iniciado, e o
+                # proximo `sync_playwright().start()` na mesma thread falha
+                # com "Sync API inside the asyncio loop".
+                self._close_browser()
+                raise
         try:
             self._context.grant_permissions(
                 ["geolocation"], origin="https://www.parceirosantander.com.br"
@@ -702,6 +725,15 @@ def traduzir_erro_do_portal(textos: list[str]) -> tuple[str, bool]:
         if limpo:
             return limpo[:200], False
     return "", False
+
+
+def _perfil_ocupado(mensagem: str) -> bool:
+    """O Chromium recusou abrir porque outro processo segura o perfil?"""
+    texto = (mensagem or "").lower()
+    return any(sinal in texto for sinal in (
+        "processsingleton", "user data directory is already in use",
+        "profile appears to be in use", "target page, context or browser has been closed",
+    ))
 
 
 def _safe(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:

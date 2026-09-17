@@ -21,6 +21,8 @@ O texto da página vem de `debug_cards.txt`, capturado do portal de verdade.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from playwright.sync_api import sync_playwright
 
@@ -221,6 +223,7 @@ class TestOPrintVemNaFrenteDoCard:
         config = _config(tmp_path, send_image=True, imagem_da_resposta=imagem)
         db = Database(config.db_path)
         manager = BotManager(config, db, EventHub(db))
+        manager.comprovantes_dir = tmp_path / "comprovantes"
         manager.whatsapp = whatsapp
         return manager
 
@@ -230,43 +233,60 @@ class TestOPrintVemNaFrenteDoCard:
 
         msg = IncomingMessage(message_id="3EB0X", chat_id="g@g.us", chat_name="g",
                               sender_id="55@s.whatsapp.net", sender_name="Ryan",
-                              text="Ivone\n42888832453")
-        pedido = ParsedRequest(consultant_name="Ryan", cpf="42888832453",
+                              text="Jose\n52998224725")
+        pedido = ParsedRequest(consultant_name="Ryan", cpf="52998224725",
                                bank="Santander", contract="",
-                               customer_name="Ivone Teste")
+                               customer_name="Jose da Silva")
         job = SimulationJob(request_id="REQ000900", request=pedido, message=msg,
                             simulation_id=1)
         return SimulationResult(job=job, ok=True, status="Sim",
                                 reduction_value=4913.52, portal_png=portal_png)
 
+    @staticmethod
+    def _foto(tmp_path, dados=None):
+        from tests.test_concurrency import png_valido
+
+        foto = tmp_path / "REQ000900_portal.png"
+        foto.write_bytes(dados if dados is not None else png_valido(7, 5, b"portal"))
+        return foto
+
     class _Whatsapp:
         def __init__(self):
             self.enviada = ""
+            self.bytes_enviados = b""
             self.renderizou = False
 
         def render_png(self, html, path, width=900, timeout=60.0):
             from pathlib import Path
 
+            from tests.test_concurrency import png_valido
+
             self.renderizou = True
             destino = Path(path)
             destino.parent.mkdir(parents=True, exist_ok=True)
-            destino.write_bytes(b"\x89PNG\r\n\x1a\n")
+            destino.write_bytes(png_valido(4, 3, b"card"))
             return str(destino)
 
         def send_image(self, *, image_path, **k):
+            from pathlib import Path
+
             from app.models import ResultadoEnvio
 
             self.enviada = str(image_path)
-            return ResultadoEnvio(ok=True, via="imagem", tipo_midia="imagem")
+            self.bytes_enviados = Path(image_path).read_bytes()
+            return ResultadoEnvio(ok=True, via="imagem", tipo_midia="imagem",
+                                  evidencia={"key_id": "3EB0PROVA"})
 
     def test_com_print_o_card_nem_e_montado(self, tmp_path):
-        foto = tmp_path / "REQ000900_portal.png"
-        foto.write_bytes(b"\x89PNG\r\n\x1a\n")
+        foto = self._foto(tmp_path)
         wa = self._Whatsapp()
         manager = self._manager(tmp_path, wa)
         assert manager._send_result_image(self._resultado(str(foto))) is True
-        assert wa.enviada == str(foto)
         assert wa.renderizou is False, "montou o card à toa"
+        assert wa.bytes_enviados == foto.read_bytes(), "não foi o print que saiu"
+        # Vai com o nome do pedido, na pasta de comprovantes: é o que amarra a
+        # imagem ao REQ (e o que o painel e o reenvio procuram).
+        assert Path(wa.enviada) == tmp_path / "comprovantes" / "REQ000900.png"
 
     def test_sem_print_o_card_entra_no_lugar(self, tmp_path):
         """O recorte recusado não pode deixar o consultor sem imagem."""
@@ -283,9 +303,19 @@ class TestOPrintVemNaFrenteDoCard:
         assert manager._send_result_image(self._resultado(caminho)) is True
         assert wa.renderizou is True
 
+    def test_print_truncado_cai_para_o_card(self, tmp_path):
+        """Um print quebrado nunca vai para o grupo: o card entra no lugar."""
+        from tests.test_concurrency import png_valido
+
+        foto = self._foto(tmp_path, png_valido(7, 5, b"portal")[:-20])
+        wa = self._Whatsapp()
+        manager = self._manager(tmp_path, wa)
+        assert manager._send_result_image(self._resultado(str(foto))) is True
+        assert wa.renderizou is True
+        assert wa.bytes_enviados != foto.read_bytes()
+
     def test_quem_prefere_o_card_continua_com_o_card(self, tmp_path):
-        foto = tmp_path / "REQ000900_portal.png"
-        foto.write_bytes(b"\x89PNG\r\n\x1a\n")
+        foto = self._foto(tmp_path)
         wa = self._Whatsapp()
         manager = self._manager(tmp_path, wa, imagem="card")
         assert manager._send_result_image(self._resultado(str(foto))) is True

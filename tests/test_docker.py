@@ -191,8 +191,9 @@ class TestGuardaDeExposicao:
             "WEB_HOST": "0.0.0.0",
             "WEB_PORT": "8899",
             "DASHBOARD_PASSWORD": "admin",
+            "SESSION_SECRET": "segredo-de-teste-bem-longo-mesmo",
             "SIMULATOR_MODE": "remote",
-            "AGENT_TOKEN": "x",
+            "AGENT_TOKEN": "token-de-agente-bem-longo",
             "SIM_BOT_PATH": str(tmp_path / "sem-bot"),
             "DB_PATH": str(tmp_path / "t.db"),
             "STATE_PATH": str(tmp_path / "s.json"),
@@ -218,11 +219,39 @@ class TestGuardaDeExposicao:
         assert entrada.main(
             ["--env", self._env(tmp_path, DASHBOARD_PASSWORD=senha)]) == 2
 
+    @pytest.mark.parametrize("chave,valor", [
+        ("SESSION_SECRET", ""),                    # cookie de sessão forjável
+        ("SESSION_SECRET", "troque-por-um-valor-longo-e-aleatorio"),   # placeholder
+        ("AGENT_TOKEN", "x"),                      # token curto no modo remoto
+    ])
+    def test_recusa_exposto_com_segredo_fraco(self, tmp_path, monkeypatch, chave, valor):
+        """Exposto na rede, segredo fraco é recusa de partida -- não aviso."""
+        import main as entrada
+
+        for nome in ("WEB_HOST", "DASHBOARD_PASSWORD", "SIMULATOR_MODE",
+                     "SESSION_SECRET", "AGENT_TOKEN"):
+            monkeypatch.delenv(nome, raising=False)
+        env = self._env(tmp_path, DASHBOARD_PASSWORD="uma-senha-de-verdade", **{chave: valor})
+        assert entrada.main(["--env", env]) == 2
+
+    def test_em_localhost_os_defaults_passam_com_aviso(self, tmp_path, monkeypatch):
+        """Desenvolvimento não pode virar cerimônia: em 127.0.0.1 sobe."""
+        import main as entrada
+
+        for nome in ("WEB_HOST", "DASHBOARD_PASSWORD", "SIMULATOR_MODE",
+                     "SESSION_SECRET", "AGENT_TOKEN"):
+            monkeypatch.delenv(nome, raising=False)
+        monkeypatch.setattr(entrada.uvicorn, "run", lambda *a, **k: None)
+        env = self._env(tmp_path, WEB_HOST="127.0.0.1", DASHBOARD_PASSWORD="admin",
+                        SESSION_SECRET="", AGENT_TOKEN="x")
+        assert entrada.main(["--env", env]) == 0
+
     def test_com_senha_propria_a_guarda_libera(self, tmp_path, monkeypatch):
         """Não pode barrar quem configurou direito — só chega a subir o servidor."""
         import main as entrada
 
-        for chave in ("WEB_HOST", "DASHBOARD_PASSWORD", "SIMULATOR_MODE"):
+        for chave in ("WEB_HOST", "DASHBOARD_PASSWORD", "SIMULATOR_MODE",
+                      "SESSION_SECRET", "AGENT_TOKEN"):
             monkeypatch.delenv(chave, raising=False)
 
         # Corta em uvicorn.run: interessa saber que a guarda deixou passar.

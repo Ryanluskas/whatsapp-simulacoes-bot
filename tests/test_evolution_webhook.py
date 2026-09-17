@@ -24,7 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import Database
-from app.evolution_webhook import MemoriaDeIds, extrair_texto, interpretar
+from app.evolution_webhook import extrair_texto, interpretar
 from app.events import EventHub
 from app.manager import BotManager
 from app.web import create_app
@@ -160,44 +160,51 @@ class TestIdentificacaoDoConsultor:
 
 # ----------------------------------------------------------------- 11: dedup
 class TestReentregaNaoDuplica:
-    """A Evolution reentrega quando não recebe 200 a tempo."""
+    """A Evolution reentrega quando não recebe 200 a tempo.
 
-    def test_o_mesmo_id_so_passa_uma_vez(self):
-        memoria = MemoriaDeIds()
-        assert memoria.ja_visto("3EB0AAA") is False
-        assert memoria.ja_visto("3EB0AAA") is True
-        assert memoria.ja_visto("3EB0BBB") is False
+    A trava era um dicionário em RAM (`MemoriaDeIds`): um reinício apagava a
+    memória e a reentrega virava segunda simulação. Agora a trava é a própria
+    gravação da mensagem no banco (`Database.registrar_entrada`).
+    """
 
-    def test_id_vazio_nunca_trava(self):
+    @staticmethod
+    def _dados(message_id: str) -> dict:
+        return {"chat_id": GRUPO, "wa_message_id": message_id, "text": "x",
+                "created_at": "2026-09-16T12:00:00Z"}
+
+    def test_o_mesmo_id_so_passa_uma_vez(self, tmp_path):
+        db = Database(tmp_path / "t.db")
+        assert db.registrar_entrada(self._dados("3EB0AAA"))["novo"] is True
+        assert db.registrar_entrada(self._dados("3EB0AAA"))["novo"] is False
+        assert db.registrar_entrada(self._dados("3EB0BBB"))["novo"] is True
+
+    def test_id_vazio_nunca_trava(self, tmp_path):
         """Senão a primeira mensagem sem id bloquearia todas as seguintes."""
-        memoria = MemoriaDeIds()
-        assert memoria.ja_visto("") is False
-        assert memoria.ja_visto("") is False
+        db = Database(tmp_path / "t.db")
+        assert db.registrar_entrada(self._dados(""))["novo"] is True
+        assert db.registrar_entrada(self._dados(""))["novo"] is True
 
-    def test_a_memoria_nao_cresce_sem_limite(self):
-        memoria = MemoriaDeIds(limite=10)
-        for i in range(50):
-            memoria.ja_visto(f"id-{i}")
-        assert len(memoria._vistos) <= 10
+    def test_a_trava_sobrevive_a_reinicio(self, tmp_path):
+        """O defeito da versão em RAM: reiniciar esquecia o que já tinha entrado."""
+        assert Database(tmp_path / "t.db").registrar_entrada(self._dados("3EB0R"))["novo"]
+        assert not Database(tmp_path / "t.db").registrar_entrada(self._dados("3EB0R"))["novo"]
 
-    def test_duas_entregas_ao_mesmo_tempo(self):
+    def test_duas_entregas_ao_mesmo_tempo(self, tmp_path):
         """Consultar e marcar em passos separados abriria uma janela entre eles."""
-        import threading
-
-        memoria = MemoriaDeIds()
+        db = Database(tmp_path / "t.db")
         resultados: list[bool] = []
         trava = threading.Barrier(8)
 
         def corre():
             trava.wait()
-            resultados.append(memoria.ja_visto("mesmo-id"))
+            resultados.append(db.registrar_entrada(self._dados("mesmo-id"))["novo"])
 
         threads = [threading.Thread(target=corre) for _ in range(8)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
-        assert resultados.count(False) == 1, "exatamente uma entrega pode passar"
+        assert resultados.count(True) == 1, "exatamente uma entrega pode passar"
 
 
 # ------------------------------------------------------------ 15, 16: a rota
@@ -207,10 +214,6 @@ class FilaFalsa(FakeWhatsApp):
     def __init__(self):
         super().__init__()
         self.inbox = queue.Queue()
-        self.originais: dict[str, str] = {}
-
-    def lembrar_original(self, message_id, texto):
-        self.originais[message_id] = texto
 
 
 @pytest.fixture()
@@ -252,10 +255,18 @@ class TestARotaDoWebhook:
         assert "42888832453" in mensagem.text
 
     def test_guarda_o_texto_original_para_citar(self, sistema):
-        """A Evolution monta `quoted` com o key.id E o conteúdo citado."""
+        """A Evolution monta `quoted` com o key.id E o conteúdo citado.
+
+        O texto fica NO BANCO, antes do 200: a memória em RAM que existia
+        antes sumia no reinício, e a citação saía vazia.
+        """
         client, manager = sistema
         client.post("/webhook/whatsapp", json=_payload(), headers=CABECALHO)
-        assert "42888832453" in manager.whatsapp.originais["3EB0AAA"]
+        linha = manager.db.fetchone(
+            "SELECT * FROM messages WHERE direction='in' AND wa_message_id='3EB0AAA'")
+        assert linha is not None, "a mensagem não foi gravada antes de aceitar"
+        assert "42888832453" in linha["text"]
+        assert linha["chat_id"] == GRUPO
 
     def test_reentrega_do_mesmo_payload_rende_uma_mensagem_so(self, sistema):
         client, manager = sistema

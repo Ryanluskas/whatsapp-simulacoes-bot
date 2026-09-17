@@ -23,6 +23,10 @@ const ICON = {
   queue_recovered: "refresh",
   message_sent: "send",
   message_failed: "alert",
+  request_completed: "check",
+  delivery_retry: "refresh",
+  delivery_unconfirmed: "alert",   // entrega incerta: alguém precisa conferir
+  delivery_failed: "ban",
   whatsapp_connected: "plug",
   whatsapp_disconnected: "plugOff",
 };
@@ -77,6 +81,6 @@ function stateOf(event) {
 
 /** Um evento vale a pena virar toast? Só o que exige reação do operador. */
 export function shouldNotify(event) {
-  return ["job_error", "message_failed", "whatsapp_disconnected", "job_interrupted"]
+  return ["job_error", "message_failed", "whatsapp_disconnected", "job_interrupted", "delivery_failed", "delivery_unconfirmed"]
     .includes(event.type);
 }

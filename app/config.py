@@ -114,6 +114,8 @@ class Config:
     mask_cpf_in_ui: bool
     timezone: str
     retention_days: int
+    #: Onde ficam os PNGs enviados. None = ``<projeto>/comprovantes``.
+    comprovantes_dir: Path | None = None
 
     tz: ZoneInfo = field(init=False, repr=False, compare=False)
 
@@ -241,4 +243,6 @@ def load_config(env_file: str | Path | None = None) -> Config:
         mask_cpf_in_ui=_flag("MASK_CPF_IN_UI", "true"),
         timezone=os.getenv("TIMEZONE", "America/Sao_Paulo").strip() or "America/Sao_Paulo",
         retention_days=_int("RETENTION_DAYS", 180, minimum=7),
+        comprovantes_dir=(_path("COMPROVANTES_DIR", "comprovantes")
+                          if os.getenv("COMPROVANTES_DIR", "").strip() else None),
     )
