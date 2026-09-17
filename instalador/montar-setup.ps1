@@ -41,7 +41,9 @@ $ARQUEIRO_PERMITIDO = @(
 # Se qualquer um destes aparecer no pacote, a montagem para.
 $PROIBIDOS = @(
     "credenciais.ini", "credentials.json", "token.json", ".env", "bot.db",
-    "*.xlsx", "*.csv", "bot_log*.txt", "*.pem", "*.key", "*.pfx", "state.json"
+    "*.xlsx", "*.csv", "bot_log*.txt", "*.pem", "*.key", "*.pfx", "state.json",
+    # o proprio setup da montagem anterior nao pode entrar no pacote novo
+    "*.exe"
 )
 
 function Passo($t) { Write-Host "`n>> $t" -ForegroundColor Cyan }
@@ -66,7 +68,11 @@ try {
     # instalador\instalador e o bootstrap nao acha o instalar.ps1.
     $destInst = Join-Path $app "instalador"
     New-Item -ItemType Directory -Force -Path $destInst | Out-Null
-    Get-ChildItem -LiteralPath $Aqui -Exclude @("dist", "*.sed") | ForEach-Object {
+    # -Exclude nao filtra pasta com -LiteralPath: sem este Where-Object, o
+    # dist\AllanaBot-setup.exe da montagem anterior entrava dentro do pacote.
+    Get-ChildItem -LiteralPath $Aqui | Where-Object {
+        $_.Name -ne "dist" -and $_.Extension -ne ".sed"
+    } | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $destInst -Recurse -Force
     }
 

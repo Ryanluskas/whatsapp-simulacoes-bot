@@ -15,6 +15,15 @@ PR que a introduz.
 
 Nada ainda.
 
+## [0.3.1] — 2026-09-17
+
+### Corrigido
+
+- O empacotador metia o `AllanaBot-setup.exe` da montagem anterior dentro do
+  pacote novo (o `-Exclude` não filtra pasta quando o caminho vem por
+  `-LiteralPath`): o instalador dobrava de tamanho a cada montagem. Agora a
+  pasta `dist/` fica de fora e o conferente recusa qualquer `.exe` no pacote.
+
 ## [0.3.0] — 2026-09-17
 
 ### Instalação
@@ -143,7 +152,8 @@ Primeira versão marcada: o bot em produção no modo `dom` (WhatsApp Web).
   (`IMAGEM_DA_RESPOSTA=portal`) e correção da conferência da barra de citação
   no WhatsApp Web.
 
-[Não lançado]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/compare/v0.3.0...main
+[Não lançado]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/compare/v0.3.1...main
+[0.3.1]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Ryanluskas/whatsapp-simulacoes-bot/releases/tag/v0.1.0
