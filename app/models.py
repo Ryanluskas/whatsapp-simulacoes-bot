@@ -144,6 +144,23 @@ class QuoteStatus:
     FALLBACK = "fallback"
 
 
+class EnvioSemProva(RuntimeError):
+    """A camada falhou DEPOIS de disparar o envio: a mensagem pode ter saido.
+
+    Quem recebe trata como entrega incerta -- nem texto por cima, nem reenvio
+    automatico. Qualquer excecao com ``sem_prova = True`` vale o mesmo (ex.:
+    ``ActorTimeout`` de um comando que chegou a comecar).
+    """
+
+    sem_prova = True
+
+
+class EnvioNaoSaiu(RuntimeError):
+    """Prova de que nada saiu (ex.: a pre-visualizacao continua aberta)."""
+
+    sem_prova = False
+
+
 class Desfecho:
     """Como terminou UMA requisicao a API do WhatsApp.
 

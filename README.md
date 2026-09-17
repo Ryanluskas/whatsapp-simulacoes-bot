@@ -205,6 +205,12 @@ As cópias são independentes: o seu Brave do dia a dia continua livre, e nada
 que o bot faça mexe na sua navegação. Em compensação elas **não se atualizam
 sozinhas** — rode o script de novo depois de trocar a senha do banco.
 
+**Um processo por perfil e por banco.** O `main.py` se recusa a subir (e diz o
+PID) se outro processo já usa o mesmo perfil do WhatsApp **ou o mesmo banco**
+(`DB_PATH`). A trava do banco fica ao lado dele, então vale também para dois
+checkouts ou duas portas apontando para o mesmo arquivo — o `recover()` de um
+segundo processo reclassificaria as entregas em curso do primeiro.
+
 ---
 
 ## Docker
@@ -372,7 +378,7 @@ Santander falsos, incluindo matar o processo no meio da fila):
 Ele **não** substitui validar no grupo de teste com a Evolution de verdade —
 ver [MIGRACAO-EVOLUTION.md](MIGRACAO-EVOLUTION.md).
 
-São **1150 testes** (mais um que só roda com respostas reais da Evolution
+São **1175 testes** (mais um que só roda com respostas reais da Evolution
 capturadas). Cobrem, entre outros: identificação do consultor pelo
 telefone, isolamento de thread do Playwright, execução de 1/2/5 solicitações
 simultâneas sem cruzar resultados, tentativas e erros permanentes, recuperação
@@ -384,6 +390,7 @@ Os que valem destaque, porque nasceram de defeitos reais em produção:
 | Arquivo | O que trava |
 |---|---|
 | `test_producao.py` | O fluxo de produção na camada Evolution, e **a regra de não duplicar**: 500/timeout/2xx-sem-id viram entrega incerta sem segunda mensagem; 400/422 que apontam o `quoted` viram um único envio sem citação; 429/503 repetem COM citação; queda entre o POST e a gravação não vira reenvio; um `message_id` = uma solicitação; PNG validado e do pedido certo; dois consultores simultâneos sem cruzar |
+| `test_audit_adversarial.py` | Os caminhos raros que duplicavam ou perdiam resposta: comando do navegador que estoura o tempo na fila (não roda depois), falha depois do clique em "enviar" (vira incerta, sem texto por cima), leitura do DOM que marcava como visto antes de gravar, dois processos no mesmo banco, vigia e reenvio órfão, 2xx com `status: "ERROR"` |
 | `test_contrato_entrega.py` | O contrato de entrega como tabela: a categoria e o desfecho de cada resposta HTTP e falha de transporte, `quoted_ok` só com prova em todos os estados, exceção depois do POST aceito, senha vazia que não abre o painel, diagnóstico e observador sem dado pessoal |
 | `test_contrato_evolution.py` | A leitura da resposta da Evolution: acha `key.id` e `stanzaId` em níveis diferentes, e **nunca inventa um `ok`** quando não acha |
 | `test_leitura_dom.py` | Roda o JS num **Chromium de verdade** contra as gerações de HTML que o WhatsApp já serviu: leitura de mensagens, escolha do grupo, menu de contexto, anexo de foto, e a garantia de que o bot **nunca lê nem encaminha as próprias mensagens** |
@@ -655,6 +662,15 @@ O resto do sistema não sabe qual camada está em uso. Fila, banco, painel,
 parser, consultores e a automação do Santander são idênticos nos dois modos —
 o contrato está em [`app/whatsapp_port.py`](app/whatsapp_port.py) e há um
 teste que compara as assinaturas das duas implementações.
+
+**A regra de não duplicar vale nos dois modos.** No `dom`, falha depois do
+clique em "enviar" (página fechada, erro do navegador) só vira "não saiu" se a
+pré-visualização continuar aberta; senão o bot procura a mensagem no chat e,
+sem achar, marca **entrega incerta** em vez de mandar o texto por cima. Um
+comando do navegador que estoura o tempo **ainda na fila** é cancelado (nunca
+roda depois); se já tinha começado, também vira entrega incerta. E a leitura
+grava cada pedido no banco **antes** de marcá-lo como visto: uma queda com o
+pedido na fila não o perde mais.
 
 O modo `dom` **não foi apagado**: ele é o plano de retorno até a Evolution
 provar que entrega no grupo real. Para migrar, siga

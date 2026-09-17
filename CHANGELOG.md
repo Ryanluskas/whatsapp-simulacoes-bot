@@ -71,6 +71,22 @@ Evolution, WhatsApp e Santander de verdade** (ver `ROTEIRO-TESTE-REAL.md`).
 
 - A imagem da Evolution no `docker-compose.yml` apontava para uma tag
   inexistente (`v2.4.1`); agora `v2.3.7`.
+- **Modo `dom`, resposta duplicada:** comando do navegador que estourava o
+  tempo ainda na fila rodava depois (imagem chegando minutos após o texto);
+  agora é cancelado. Falha depois do clique em "enviar" deixou de mandar o
+  texto por cima: vira entrega incerta, salvo prova de que nada saiu.
+- **Modo `dom`, pedido perdido:** a leitura marcava a mensagem como vista antes
+  de gravá-la; uma queda com o pedido na fila o perdia. Agora grava primeiro.
+- **Dois processos no mesmo banco:** a trava era só por perfil do navegador;
+  agora também por `DB_PATH`, antes de qualquer `recover()`.
+- **Falso "entregue" na Evolution:** 2xx com `key.id` e `status: "ERROR"` vira
+  entrega incerta.
+- Reenvio que parava no meio ficava `pending` até o próximo reinício; o laço
+  de reenvio agora o reavalia pelo que está gravado.
+- Vigia da fila: a foto do que está em execução passou a ser tirada antes da
+  consulta das linhas presas.
+- Timers de nova tentativa não se acumulam mais em memória.
+- O log de envio mascara o telefone do participante.
 
 ## [0.1.0] — 2026-09-16
 

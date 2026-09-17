@@ -167,6 +167,22 @@ def main(argv: list[str] | None = None) -> int:
         log.error("Recusando iniciar: %s", conflito)
         return 1
 
+    # E um processo por BANCO. A trava do perfil mora em `.locks/` DENTRO do
+    # checkout: dois checkouts (ou duas portas) com o mesmo DB_PATH subiam
+    # juntos, e o `recover()` do segundo -- que roda antes de o servidor abrir
+    # a porta -- reclassificava as entregas em curso do primeiro. Uma entrega
+    # renderizando a imagem virava "reenvio": duas respostas no grupo. A trava
+    # do banco fica AO LADO do banco, entao qualquer processo que o abra colide.
+    banco = Path(config.db_path).resolve()
+    trava_do_banco = TravaDeInstancia(banco, rotulo="bot (main.py)", pasta=banco.parent)
+    try:
+        trava_do_banco.adquirir()
+    except InstanciaEmUso as conflito:
+        print(explicar(conflito, banco), flush=True)
+        log.error("Recusando iniciar: outro processo usa o mesmo banco (%s)", conflito)
+        trava.liberar()
+        return 1
+
     db = Database(config.db_path)
     hub = EventHub(db)
     manager = BotManager(config, db, hub)
@@ -209,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
         # sinal nao passa pelo atexit em todos os casos, e um lock orfao faria
         # o proximo boot recusar subir sem motivo.
         trava.liberar()
+        trava_do_banco.liberar()
     return 0
 
 

@@ -68,6 +68,20 @@ COMPROVANTES_DIR = ROOT / "comprovantes"
 COMPROVANTES_DIR.mkdir(exist_ok=True)
 
 
+def _mascarar_jid(jid: str | None) -> str:
+    """``5562900000001@s.whatsapp.net`` -> ``5562*****0001@s.whatsapp.net``.
+
+    O log de envio vai para o painel e para arquivo; o telefone do consultor
+    nao precisa ir inteiro para reconstruir uma entrega.
+    """
+    if not jid:
+        return "-"
+    numero, arroba, dominio = str(jid).partition("@")
+    if len(numero) <= 8:
+        return f"{numero[:2]}***{arroba}{dominio}"
+    return f"{numero[:4]}*****{numero[-4:]}{arroba}{dominio}"
+
+
 def _curto(exc: BaseException) -> str:
     texto = str(exc).strip()
     return texto.splitlines()[0][:160] if texto else exc.__class__.__name__
@@ -236,6 +250,7 @@ class BotManager:
             bot_self_name=config.bot_self_name,
             on_status=self._on_whatsapp_status,
             on_log=registrar,
+            on_incoming=self._receber_do_navegador,
         )
 
     def start(self) -> None:
@@ -308,7 +323,31 @@ class BotManager:
             except Exception as exc:
                 self.log("ERROR", "sistema", f"Falha no reenvio: {_curto(exc)}")
 
+    #: Reenvio `pending` parado ha' mais que isto, com o laco livre, e' orfao:
+    #: `_reenviar_um` levantou no meio (ex.: banco travado ao gravar o desfecho).
+    _REENVIO_ORFAO_SEGUNDOS = 600.0
+
+    def _resolver_reenvios_orfaos(self) -> int:
+        """Reenvio que ficou `pending` com o sistema no ar.
+
+        O laco de reenvio e' uma thread so': quando ele comeca uma varredura,
+        nenhum `_reenviar_um` esta' em curso. Uma linha `pending` com status
+        final e parada ha' minutos foi largada por uma excecao -- e antes
+        ficava assim ate' o proximo reinicio, com o consultor sem resposta e
+        sem nada no painel. A decisao e' a de sempre: pelo que esta' gravado.
+        """
+        orfas = self.db.fetchall(
+            "SELECT * FROM simulations WHERE delivery_status=? AND status NOT IN (?, ?) "
+            "   AND replied_at IS NULL AND COALESCE(updated_at, created_at) < ?",
+            (Delivery.PENDING, Status.QUEUED, Status.PROCESSING,
+             iso_atras(self._REENVIO_ORFAO_SEGUNDOS)))
+        for linha in orfas:
+            self.queue._resolver_entrega_interrompida(
+                dict(linha), "o reenvio parou no meio", manter_status=True)
+        return len(orfas)
+
     def _reenviar_pendentes(self) -> None:
+        self._resolver_reenvios_orfaos()
         # Dois tipos de linha entram aqui:
         #
         # * `retrying` -- a primeira entrega falhou por motivo passageiro. O
@@ -702,6 +741,20 @@ class BotManager:
                     "request_id": registro.get("request_id") or ""}
         self.whatsapp.inbox.put(message)
         return {"aceita": True, "entrada_id": registro["id"]}
+
+    def _receber_do_navegador(self, message: IncomingMessage) -> None:
+        """Porta DURAVEL do modo dom -- o equivalente de ``receber_mensagem``.
+
+        Chamada pela leitura ANTES de marcar a mensagem como vista: se o
+        processo cair com o pedido ainda na fila em memoria, o boot o retoma
+        (``_retomar_entradas``) em vez de perde-lo. Nossas proprias mensagens
+        nem sao gravadas (senao ficariam `received` para sempre).
+        """
+        if self._e_mensagem_nossa(message.text):
+            return
+        registro = self._registrar_entrada(message)
+        if registro["novo"] or registro.get("status") == ENTRADA_RECEBIDA:
+            self.whatsapp.inbox.put(message)
 
     def _registrar_entrada(self, message: IncomingMessage) -> dict:
         """Grava a mensagem recebida (uma vez so'). Ver ``Database.registrar_entrada``."""
@@ -1187,12 +1240,15 @@ class BotManager:
                      f"{job.request_id}: não consegui registrar a etapa {stage}: {_curto(exc)}",
                      request_id=job.request_id)
 
-    def _evidencia(self, resultado, erro: str, message: IncomingMessage) -> dict:
+    def _evidencia(self, resultado, erro: str, message: IncomingMessage,
+                   talvez_saiu: bool = False) -> dict:
         """O que a camada devolveu, num formato so' -- para o banco e o log.
 
         A camada Evolution classifica cada envio (``desfecho``). Excecao e
         retorno booleano (camada dom, dublês) nao dizem nada: contam como
-        transitorios, que e' o comportamento antigo dessas camadas.
+        transitorios -- EXCETO excecao marcada ``sem_prova`` (``talvez_saiu``):
+        a camada falhou depois de disparar o envio, ou o comando do navegador
+        estourou o tempo ja' em execucao. Isso e' entrega incerta.
         """
         tipado = hasattr(resultado, "evidencia")
         evidencia = (getattr(resultado, "evidencia", None) or {}) if tipado else {}
@@ -1208,6 +1264,8 @@ class BotManager:
                              or evidencia.get("sem_prova", False))
         else:
             transitorio, sem_prova = True, False
+        if talvez_saiu and not ok:
+            transitorio, sem_prova, desfecho = False, True, Desfecho.INCERTA
         quote_status = getattr(resultado, "quote_status", "") or ""
         if desfecho and tipado:
             # A camada classificou: ela sabe qual id foi na requisicao final.
@@ -1256,7 +1314,7 @@ class BotManager:
             f"provider={evid['provider']} http={evid['http_status'] or '-'} "
             f"desfecho={resultado} origin_message_id={message.message_id or '-'} "
             f"quote_message_id={evid['quoted_message_id'] or '-'} "
-            f"quote_participant={message.participant or '-'} "
+            f"quote_participant={_mascarar_jid(message.participant)} "
             f"quote_status={evid['quote_status'] or '-'} "
             f"sent_message_id={evid['enviado_id'] or '-'}{motivo}{citacao}",
             request_id=request_id, consultant=consultor,
@@ -1322,6 +1380,7 @@ class BotManager:
         ok = False
         error = ""
         resultado = None
+        talvez_saiu = False
         try:
             resultado = self.whatsapp.send(
                 chat_id=message.chat_id,
@@ -1339,8 +1398,9 @@ class BotManager:
             self._anotar_citacao(resultado, request_id, consultant_name)
         except Exception as exc:
             error = str(exc)[:240] or exc.__class__.__name__
+            talvez_saiu = bool(getattr(exc, "sem_prova", False))
 
-        evid = self._evidencia(resultado, error, message)
+        evid = self._evidencia(resultado, error, message, talvez_saiu=talvez_saiu)
         registro.update(evid, ok=ok)
         saiu = self._versao_que_saiu(resultado, text, texto_sem_citacao)
         self._log_de_envio("texto", request_id, message, evid, tentativa, ok, consultant_name)
@@ -1701,6 +1761,7 @@ class BotManager:
         # de seguranca que garante resposta ao consultor -- parar de funcionar
         # justamente na camada nova.
         envio = None
+        talvez_saiu = False
         try:
             envio = self.whatsapp.send_image(
                 chat_id=job.message.chat_id,
@@ -1714,10 +1775,11 @@ class BotManager:
             )
         except Exception as exc:
             motivo = _curto(exc)
+            talvez_saiu = bool(getattr(exc, "sem_prova", False))
         else:
             motivo = "" if envio else (getattr(envio, "motivo", "") or "a camada não explicou")
 
-        evid = self._evidencia(envio, motivo, job.message)
+        evid = self._evidencia(envio, motivo, job.message, talvez_saiu=talvez_saiu)
         registro.update(evid, ok=bool(envio))
         # A legenda que REALMENTE saiu: com citação sai a curta, sem citação
         # sai a que leva o nome do consultor. Gravar a versão errada faria o

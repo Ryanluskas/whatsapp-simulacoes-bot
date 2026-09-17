@@ -786,6 +786,18 @@ class EvolutionClient:
                            "desfecho": Desfecho.INCERTA},
                 **comum)
 
+        if str(corpo.get("status") or "").strip().upper() == "ERROR":
+            # key.id com status ERROR: a mensagem foi criada na instancia, mas
+            # o WhatsApp nao a aceitou (WAMessageStatus.ERROR do Baileys). Nao
+            # e' prova de entrega -- e tambem nao prova que nao chegou.
+            return ResultadoEnvio(
+                ok=False, tipo_midia="nenhum", desfecho=Desfecho.INCERTA, sem_prova=True,
+                motivo=f"a Evolution devolveu o id {enviado_id} com status ERROR; a "
+                       "mensagem pode não ter chegado",
+                evidencia={**evidencia, "key_id": enviado_id, "transitorio": False,
+                           "sem_prova": True, "desfecho": Desfecho.INCERTA},
+                **comum)
+
         self._lembrar_envio(payload.get(campo, ""))
         return ResultadoEnvio(
             ok=True, tipo_midia=tipo_midia, desfecho=Desfecho.ENTREGUE,

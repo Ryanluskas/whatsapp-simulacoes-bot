@@ -1347,7 +1347,10 @@ class TestUmSoPontoDeDisparo:
 
         from app.whatsapp import WhatsAppService
 
-        fonte = inspect.getsource(WhatsAppService._enviar_imagem)
+        # O disparo mora no auxiliar que separa "antes" de "depois de enviar"
+        # (falha depois do clique vira EnvioSemProva); a regra vale para os dois.
+        fonte = (inspect.getsource(WhatsAppService._enviar_imagem)
+                 + inspect.getsource(WhatsAppService._disparar_e_confirmar_imagem))
         assert "_disparar_envio" in fonte
         assert 'keyboard.press("Enter")' not in fonte, (
             "voltou a apertar Enter direto — o laboratório perde o freio")

@@ -209,6 +209,7 @@ Travado em `tests/test_contrato_entrega.py`.
 |---|---|---|---|---|
 | 2xx com `key.id` | — | `delivered` | grava o id; fim | não |
 | 2xx sem `key.id` | UNCERTAIN | `unconfirmed` | nada por cima, nada de reenvio | não (decisão manual) |
+| 2xx com `key.id` e `status: "ERROR"` | — | `unconfirmed` | a mensagem foi criada, o WhatsApp não a aceitou; nada de reenvio | não (decisão manual) |
 | 2xx com corpo ilegível | UNCERTAIN | `unconfirmed` | idem | não |
 | POST aceito e a leitura da resposta quebra (exceção) | — | `delivered` com `key.id` legível; senão `unconfirmed` | nunca "transitório" | não |
 | 400/422 apontando o `quoted` (palavra `quoted`, `stanzaId`, `contextInfo`) | QUOTE_REJECTED | `delivered` se o envio sem citação sair | UM envio SEM citação, com `↩ consultor` | não: a recusa prova que nada saiu |

@@ -135,6 +135,13 @@ class QueueService:
 
     def _resolver_presas(self) -> int:
         limite = iso_atras(self.job_timeout + self._FOLGA_SOBRE_O_TIMEOUT)
+        # A foto do que esta' RODANDO vem ANTES da consulta. Na ordem inversa,
+        # um job que terminava entre as duas leituras aparecia como "preso"
+        # com uma linha ja' velha, e a entrega concluida era reavaliada em
+        # cima de dados antigos. Nesta ordem, quem roda ja' estava ativo na
+        # foto, e quem terminou ja' nao esta' `processing` na consulta.
+        with self._lock:
+            rodando = set(self._active)
         presas = self.db.fetchall(
             "SELECT * FROM simulations "
             " WHERE status = ? "
@@ -143,8 +150,6 @@ class QueueService:
             (Status.PROCESSING, limite),
         )
         resolvidas = 0
-        with self._lock:
-            rodando = set(self._active)
         for linha in presas:
             row = dict(linha)
             if row.get("request_id") in rodando:
@@ -738,7 +743,14 @@ class QueueService:
         # A espera acontece num timer, NÃO nesta thread. Antes era um
         # time.sleep() no despachante: com um worker, a fila inteira congelava
         # por 8s a cada falha recuperável e outros consultores esperavam à toa.
-        atraso = threading.Timer(RETRY_BACKOFF_SECONDS, self._pending.put, args=(retry_job,))
+        def reenfileirar() -> None:
+            # Sai do conjunto ao disparar: antes cada nova tentativa deixava o
+            # Timer (com o job dentro) guardado ate' o processo parar.
+            with self._lock:
+                self._timers.discard(atraso)
+            self._pending.put(retry_job)
+
+        atraso = threading.Timer(RETRY_BACKOFF_SECONDS, reenfileirar)
         atraso.daemon = True
         with self._lock:
             self._timers.add(atraso)
