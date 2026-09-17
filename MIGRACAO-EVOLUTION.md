@@ -28,11 +28,12 @@ WhatsApp por engenharia reversa. **Existe risco de banimento do número.** O
 código já mantém `delay` de 1,2 s entre envios por esse motivo — não remova.
 Se puder, use um número que não seja o seu principal.
 
-**2. Licença.** Da v2.4.0 em diante a instância precisa ser ativada contra o
-servidor da Evolution Foundation antes de servir tráfego. Sem isso **todo
-endpoint responde 503** e você vai caçar erro de payload que não existe. A
-ativação é gratuita e sem limite de instâncias, mas é um passo manual no
-`/manager`. A imagem está presa em `v2.4.1` no `docker-compose.yml`.
+**2. Versão e licença.** A imagem está presa em `v2.3.7` no
+`docker-compose.yml`: é a última estável publicada no Docker Hub (a `v2.4.1`
+que constava aqui não existe; a 2.4.0 só saiu como release candidate). A
+v2.3.7 sobe sem ativação de licença. Se um dia subir para a 2.4, a instância
+precisa ser ativada no `/manager` contra o servidor da Evolution Foundation —
+sem isso **todo endpoint responde 503**, e o `evolution_check` avisa.
 
 **3. LID.** O WhatsApp está trocando os identificadores: o remetente pode
 chegar como `@lid` em vez de `@s.whatsapp.net`, e aí o número antes do `@`
@@ -64,8 +65,9 @@ Suba (a Evolution está em perfil próprio, não sobe junto com o painel):
 docker compose --profile evolution up -d
 ```
 
-**Abra `http://localhost:8080/manager` e faça a ativação da licença.** Não
-pule: sem ela, tudo abaixo responde 503.
+Na v2.3.7 não há ativação de licença. (Na 2.4+, abra
+`http://localhost:8080/manager` e ative antes de tudo: sem isso, tudo abaixo
+responde 503.)
 
 Crie a instância:
 

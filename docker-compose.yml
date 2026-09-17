@@ -82,7 +82,10 @@ services:
   evolution:
     # Tag FIXA, nunca `latest`: uma atualizacao silenciosa da imagem muda
     # variaveis de ambiente entre releases e derruba a instancia sem aviso.
-    image: evoapicloud/evolution-api:v2.4.1
+    # v2.3.7 e' a ultima ESTAVEL publicada (a v2.4.1 que estava aqui nao
+    # existe no Docker Hub; a 2.4.0 so' saiu como release candidate). Subida e
+    # conferida de verdade: responde, cria instancia e gera QR.
+    image: evoapicloud/evolution-api:v2.3.7
     container_name: allana-evolution
     profiles: ["evolution"]
     restart: unless-stopped
