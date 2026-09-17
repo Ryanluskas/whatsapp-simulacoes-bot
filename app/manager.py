@@ -1568,6 +1568,11 @@ class BotManager:
         para o card, nunca vai quebrado para o grupo.
         """
         job = result.job
+        if not self.config.image_show_client_data:
+            # O print e' a TELA do banco: nome e CPF do cliente vao como
+            # pixels, e nao ha' como mascara-los. ``IMAGE_SHOW_CLIENT_DATA=false``
+            # vale para a imagem inteira -- entao sai o card, que mascara.
+            return False
         do_portal = Path(result.portal_png) if result.portal_png else None
         if not (self.config.imagem_da_resposta == "portal"
                 and do_portal and do_portal.is_file()):

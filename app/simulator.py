@@ -531,6 +531,11 @@ class SimulatorService(ThreadActor):
         """
         if self._page is None:
             return ""
+        if not self.config.image_show_client_data:
+            # O print nao pode ser usado (ver BotManager._print_do_portal):
+            # nem se tira. Um PNG com CPF e nome parado no disco, para nada,
+            # e' so' mais um lugar de onde o dado vaza.
+            return ""
         destino = ROOT / "comprovantes" / f"{job.request_id}_portal.png"
         caminho, motivo = tela_do_portal.capturar(self._page, destino)
         if motivo:

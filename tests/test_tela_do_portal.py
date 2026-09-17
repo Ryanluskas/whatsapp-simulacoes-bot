@@ -321,3 +321,61 @@ class TestOPrintVemNaFrenteDoCard:
         assert manager._send_result_image(self._resultado(str(foto))) is True
         assert wa.renderizou is True
         assert wa.enviada.endswith("REQ000900.png")
+
+    def test_sem_dado_do_cliente_o_print_nao_sai(self, tmp_path):
+        """IMAGE_SHOW_CLIENT_DATA=false vale para a imagem INTEIRA.
+
+        O print é a tela do banco: nome e CPF vão como pixels e não há como
+        mascarar. Antes a flag só valia para o card, e o print -- o padrão --
+        saía com tudo à mostra.
+        """
+        from dataclasses import replace
+
+        foto = self._foto(tmp_path)
+        wa = self._Whatsapp()
+        htmls = []
+        renderizar = wa.render_png
+        wa.render_png = lambda html, path, **k: (htmls.append(html), renderizar(html, path, **k))[1]
+        manager = self._manager(tmp_path, wa)
+        manager.config = replace(manager.config, image_show_client_data=False)
+
+        assert manager._send_result_image(self._resultado(str(foto))) is True
+        assert wa.renderizou is True, "mandou o print da tela, com o dado do cliente"
+        assert wa.bytes_enviados != foto.read_bytes()
+        assert "52998224725" not in htmls[0] and "529.982.247-25" not in htmls[0], (
+            "o card também tem de sair mascarado")
+
+
+class TestSimuladorSoFotografaQuandoOPrintPodeSair:
+    """Com IMAGE_SHOW_CLIENT_DATA=false o print nem é tirado: um PNG com CPF
+    parado no disco, sem uso, é só mais um lugar de onde o dado vaza."""
+
+    def _chamar(self, tmp_path, monkeypatch, mostrar: bool):
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        from app import simulator as modulo
+        from app.models import IncomingMessage, ParsedRequest, SimulationJob
+        from tests.test_concurrency import _config
+
+        capturas = []
+        monkeypatch.setattr(modulo.tela_do_portal, "capturar",
+                            lambda pagina, destino, *a, **k: (capturas.append(destino)
+                                                             or (str(destino), "")))
+        falso = SimpleNamespace(_page=object(), _log=lambda *a, **k: None,
+                                config=replace(_config(tmp_path), image_show_client_data=mostrar))
+        msg = IncomingMessage(message_id="3EB0Y", chat_id="g@g.us", chat_name="g",
+                              sender_id="55@s.whatsapp.net", sender_name="Ryan", text="x")
+        job = SimulationJob(request_id="REQ000901", message=msg, simulation_id=1,
+                            request=ParsedRequest(consultant_name="Ryan", cpf="52998224725",
+                                                  bank="Santander", contract="",
+                                                  customer_name="Jose da Silva"))
+        return modulo.SimulatorService._fotografar_o_resultado(falso, job), capturas
+
+    def test_flag_false_nao_fotografa(self, tmp_path, monkeypatch):
+        caminho, capturas = self._chamar(tmp_path, monkeypatch, mostrar=False)
+        assert caminho == "" and capturas == []
+
+    def test_flag_true_continua_fotografando(self, tmp_path, monkeypatch):
+        caminho, capturas = self._chamar(tmp_path, monkeypatch, mostrar=True)
+        assert caminho.endswith("REQ000901_portal.png") and len(capturas) == 1

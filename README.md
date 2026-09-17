@@ -582,6 +582,10 @@ consultores isso é um vazamento. Por isso:
 
 `app/tela_do_portal.py`, testes em `tests/test_tela_do_portal.py`.
 
+**`IMAGE_SHOW_CLIENT_DATA=false` desliga o print.** A tela do banco mostra
+nome e CPF como pixels, sem como mascarar. Com a flag em `false` o print nem
+é tirado, e a resposta sai com o card, que mascara.
+
 > **Ainda não rodou contra o portal.** Exige uma sessão logada do Santander,
 > que não havia quando isto foi escrito. Os testes montam a página com o
 > texto real de `debug_cards.txt`, topo do operador incluído, para exercitar
