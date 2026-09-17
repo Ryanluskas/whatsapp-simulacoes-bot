@@ -415,12 +415,14 @@ class TestOCitouRealChegaNaMensagem:
             client=httpx.Client(transport=httpx.MockTransport(servidor),
                                 base_url="http://e:8080"),
             renderer=None)
-        cliente.lembrar_original("3EB0PEDIDO", "Ivone 42888832453")
-
         r = cliente.send("120@g.us", "G", "com citação",
                          quote_message_id="3EB0PEDIDO",
-                         texto_sem_citacao="solta\n↩ Ryan")
-        assert r.ok and r.quoted_ok
+                         texto_sem_citacao="solta\n↩ Ryan",
+                         quote_text="Cliente Teste 52998224725")
+        # A requisição foi COM `quoted`, então saiu a versão curta. Sem
+        # stanzaId na resposta, a citação fica `unverified` -- e `quoted_ok`
+        # não afirma o que não foi provado.
+        assert r.ok and r.quote_status == "unverified" and r.quoted_ok is False
         assert enviados[-1]["text"] == "com citação"
 
     def test_as_duas_camadas_aceitam_o_mesmo_parametro(self):

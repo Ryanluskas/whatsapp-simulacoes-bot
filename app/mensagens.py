@@ -311,12 +311,16 @@ def duas_versoes(montar, *args, consultor: str = "", **kwargs) -> tuple[str, str
             montar(*args, consultor=consultor, citou=False, **kwargs))
 
 
-def resultado_reenviado(linha: dict, mascarar: bool = True) -> str:
+def resultado_reenviado(linha: dict, mascarar: bool = True,
+                        consultor: str = "", citou: bool = True) -> str:
     """Reenvio: monta a partir do que ficou no banco.
 
     Mesmo formato do texto -- o consultor nao deveria ter de aprender dois
     jeitos de ler a mesma coisa. So' a ultima linha muda, para ele nao achar
     que simulamos duas vezes.
+
+    ``consultor``/``citou``: como em ``texto``. Sem citacao, o reenvio leva o
+    "↩ consultor" -- senao ele cai solto no grupo sem dizer de quem e'.
     """
     cpf_bruto = linha.get("cpf") or ""
     cpf = mask_cpf(cpf_bruto) if mascarar else cpf_bruto
@@ -350,7 +354,9 @@ def resultado_reenviado(linha: dict, mascarar: bool = True) -> str:
 
     linhas.append("_reenvio — a primeira não saiu_")
     if request_id:
-        linhas.append(f"_{request_id}_")
+        linhas.extend(_rodape(request_id, consultor, citou))
+    elif not citou and consultor:
+        linhas.append(f"↩ {consultor}")
     return "\n".join(linhas)
 
 

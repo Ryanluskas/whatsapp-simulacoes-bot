@@ -7,6 +7,15 @@ state.json
 logs/
 # Imagens enviadas ao grupo — contêm dados de cliente
 comprovantes/
+# Capturas de diagnóstico do WhatsApp Web (HTML/JSON/PNG da conversa REAL:
+# CPF, nome, telefone, id de mensagem e token de página). As ferramentas
+# que geram isso continuam versionadas (ferramentas/dump_dom.py); o que
+# sai do git é o material capturado.
+diagnostico/
+# Respostas capturadas da Evolution (JID e telefone reais)
+evolution-respostas/
+# Relatorio de sensibilidade: aponta commits antigos que o GitHub ainda serve
+RELATORIO-SENSIBILIDADE.md
 
 # Perfis de navegador (contêm a sessão do WhatsApp e do banco)
 .whatsapp-profile/

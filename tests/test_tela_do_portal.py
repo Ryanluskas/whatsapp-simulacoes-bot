@@ -21,6 +21,8 @@ O texto da página vem de `debug_cards.txt`, capturado do portal de verdade.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from playwright.sync_api import sync_playwright
 
@@ -101,6 +103,50 @@ class TestOndeORecorteCai:
         """Cada nível a mais aproxima o recorte do topo da página."""
         assert _recorte(navegador, PAGINA)["subidas"] <= 3
 
+    def test_pagina_normal_passa_na_conferencia(self, navegador):
+        r = _recorte(navegador, PAGINA)
+        assert r["dentro_da_tela"] is True and r["sobrepostos"] == 0
+        assert recusar(r) == ""
+
+
+class TestPrintQueNaoPodeSerConferido:
+    """O print é dos PIXELS; a conferência lê o TEXTO do elemento.
+
+    Os três casos abaixo passavam na conferência antiga e mandavam para o grupo
+    uma imagem diferente do texto conferido (achados da revisão independente).
+    Com IMAGEM_DA_RESPOSTA=portal, qualquer um deles agora cai para o card.
+    """
+
+    def test_cabecalho_fixo_do_portal_por_cima_descarta(self, navegador):
+        fixo = ('<header style="position:fixed;top:0;left:0;right:0;height:140px;'
+                'background:#fff;z-index:9">'
+                '<div>Parceiro Santander</div><div>Fulaninha</div></header>')
+        html = f"<!doctype html><html><body style='margin:0'>{fixo}{CARDS}</body></html>"
+        r = _recorte(navegador, html)
+        assert r["achou"] is True
+        assert "Parceiro Santander" not in r["texto"], "o texto conferido não vê o cabeçalho"
+        assert r["sobrepostos"] >= 1
+        assert "fixo" in recusar(r)
+
+    def test_lista_maior_que_a_janela_descarta(self, navegador):
+        longa = CARDS.replace('style="height:300px"', 'style="height:1500px"')
+        r = _recorte(navegador, f"<!doctype html><html><body>{longa}</body></html>")
+        assert r["dentro_da_tela"] is False
+        assert "visível" in recusar(r)
+
+    def test_pagina_rolada_descarta(self, navegador):
+        pagina = navegador.new_page()
+        try:
+            pagina.set_content(f"<!doctype html><html><body>{TOPO}{CLIENTE}{CARDS}"
+                               "<div style='height:2000px'></div></body></html>")
+            pagina.evaluate("window.scrollTo(0, 320)")   # a seção começa em ~264px
+            r = pagina.evaluate(RECORTE_JS, {"ancoras": list(ANCORAS_DO_RESULTADO),
+                                             "cards": "saldo devedor"})
+        finally:
+            pagina.close()
+        assert r["dentro_da_tela"] is False
+        assert recusar(r) != ""
+
     def test_sem_a_tela_de_resultado_nao_ha_recorte(self, navegador):
         r = _recorte(navegador, f"<!doctype html><html><body>{TOPO}{CLIENTE}</body></html>")
         assert r["achou"] is False
@@ -122,7 +168,24 @@ class TestOQueERecusado:
     """
 
     BOM = {"achou": True, "largura": 900, "altura": 400,
+           "dentro_da_tela": True, "sobrepostos": 0, "texto_total": 60,
            "texto": "Selecione os contratos\n7******46\nSaldo devedor R$ 83.585,39"}
+
+    def test_sem_prova_de_que_o_print_e_o_texto_conferido_descarta(self):
+        """Recorte sem as medidas novas: não dá para garantir, então não vai."""
+        antigo = {k: v for k, v in self.BOM.items()
+                  if k not in ("dentro_da_tela", "sobrepostos", "texto_total")}
+        assert recusar(antigo) != ""
+
+    def test_fora_da_tela_descarta(self):
+        assert "visível" in recusar({**self.BOM, "dentro_da_tela": False})
+
+    def test_elemento_fixo_por_cima_descarta(self):
+        assert "fixo" in recusar({**self.BOM, "sobrepostos": 1})
+
+    def test_texto_maior_que_o_conferido_descarta(self):
+        """Só 4000 caracteres voltam para conferência; o resto não foi lido."""
+        assert "grande demais" in recusar({**self.BOM, "texto_total": 4001})
 
     def test_recorte_bom_passa(self):
         assert recusar(self.BOM) == ""
@@ -184,6 +247,7 @@ class TestCapturarNuncaDerruba:
         class ComTopo(self._PaginaSemFoto):
             def evaluate(self, *_a, **_k):
                 return {"achou": True, "x": 0, "y": 0, "largura": 900, "altura": 400,
+                        "dentro_da_tela": True, "sobrepostos": 0, "texto_total": 42,
                         "texto": "Parceiro Santander Fulaninha Saldo devedor"}
 
         destino = tmp_path / "x.png"
@@ -221,6 +285,7 @@ class TestOPrintVemNaFrenteDoCard:
         config = _config(tmp_path, send_image=True, imagem_da_resposta=imagem)
         db = Database(config.db_path)
         manager = BotManager(config, db, EventHub(db))
+        manager.comprovantes_dir = tmp_path / "comprovantes"
         manager.whatsapp = whatsapp
         return manager
 
@@ -230,43 +295,60 @@ class TestOPrintVemNaFrenteDoCard:
 
         msg = IncomingMessage(message_id="3EB0X", chat_id="g@g.us", chat_name="g",
                               sender_id="55@s.whatsapp.net", sender_name="Ryan",
-                              text="Ivone\n42888832453")
-        pedido = ParsedRequest(consultant_name="Ryan", cpf="42888832453",
+                              text="Jose\n52998224725")
+        pedido = ParsedRequest(consultant_name="Ryan", cpf="52998224725",
                                bank="Santander", contract="",
-                               customer_name="Ivone Teste")
+                               customer_name="Jose da Silva")
         job = SimulationJob(request_id="REQ000900", request=pedido, message=msg,
                             simulation_id=1)
         return SimulationResult(job=job, ok=True, status="Sim",
                                 reduction_value=4913.52, portal_png=portal_png)
 
+    @staticmethod
+    def _foto(tmp_path, dados=None):
+        from tests.test_concurrency import png_valido
+
+        foto = tmp_path / "REQ000900_portal.png"
+        foto.write_bytes(dados if dados is not None else png_valido(7, 5, b"portal"))
+        return foto
+
     class _Whatsapp:
         def __init__(self):
             self.enviada = ""
+            self.bytes_enviados = b""
             self.renderizou = False
 
         def render_png(self, html, path, width=900, timeout=60.0):
             from pathlib import Path
 
+            from tests.test_concurrency import png_valido
+
             self.renderizou = True
             destino = Path(path)
             destino.parent.mkdir(parents=True, exist_ok=True)
-            destino.write_bytes(b"\x89PNG\r\n\x1a\n")
+            destino.write_bytes(png_valido(4, 3, b"card"))
             return str(destino)
 
         def send_image(self, *, image_path, **k):
+            from pathlib import Path
+
             from app.models import ResultadoEnvio
 
             self.enviada = str(image_path)
-            return ResultadoEnvio(ok=True, via="imagem", tipo_midia="imagem")
+            self.bytes_enviados = Path(image_path).read_bytes()
+            return ResultadoEnvio(ok=True, via="imagem", tipo_midia="imagem",
+                                  evidencia={"key_id": "3EB0PROVA"})
 
     def test_com_print_o_card_nem_e_montado(self, tmp_path):
-        foto = tmp_path / "REQ000900_portal.png"
-        foto.write_bytes(b"\x89PNG\r\n\x1a\n")
+        foto = self._foto(tmp_path)
         wa = self._Whatsapp()
         manager = self._manager(tmp_path, wa)
         assert manager._send_result_image(self._resultado(str(foto))) is True
-        assert wa.enviada == str(foto)
         assert wa.renderizou is False, "montou o card à toa"
+        assert wa.bytes_enviados == foto.read_bytes(), "não foi o print que saiu"
+        # Vai com o nome do pedido, na pasta de comprovantes: é o que amarra a
+        # imagem ao REQ (e o que o painel e o reenvio procuram).
+        assert Path(wa.enviada) == tmp_path / "comprovantes" / "REQ000900.png"
 
     def test_sem_print_o_card_entra_no_lugar(self, tmp_path):
         """O recorte recusado não pode deixar o consultor sem imagem."""
@@ -283,11 +365,79 @@ class TestOPrintVemNaFrenteDoCard:
         assert manager._send_result_image(self._resultado(caminho)) is True
         assert wa.renderizou is True
 
+    def test_print_truncado_cai_para_o_card(self, tmp_path):
+        """Um print quebrado nunca vai para o grupo: o card entra no lugar."""
+        from tests.test_concurrency import png_valido
+
+        foto = self._foto(tmp_path, png_valido(7, 5, b"portal")[:-20])
+        wa = self._Whatsapp()
+        manager = self._manager(tmp_path, wa)
+        assert manager._send_result_image(self._resultado(str(foto))) is True
+        assert wa.renderizou is True
+        assert wa.bytes_enviados != foto.read_bytes()
+
     def test_quem_prefere_o_card_continua_com_o_card(self, tmp_path):
-        foto = tmp_path / "REQ000900_portal.png"
-        foto.write_bytes(b"\x89PNG\r\n\x1a\n")
+        foto = self._foto(tmp_path)
         wa = self._Whatsapp()
         manager = self._manager(tmp_path, wa, imagem="card")
         assert manager._send_result_image(self._resultado(str(foto))) is True
         assert wa.renderizou is True
         assert wa.enviada.endswith("REQ000900.png")
+
+    def test_sem_dado_do_cliente_o_print_nao_sai(self, tmp_path):
+        """IMAGE_SHOW_CLIENT_DATA=false vale para a imagem INTEIRA.
+
+        O print é a tela do banco: nome e CPF vão como pixels e não há como
+        mascarar. Antes a flag só valia para o card, e o print -- o padrão --
+        saía com tudo à mostra.
+        """
+        from dataclasses import replace
+
+        foto = self._foto(tmp_path)
+        wa = self._Whatsapp()
+        htmls = []
+        renderizar = wa.render_png
+        wa.render_png = lambda html, path, **k: (htmls.append(html), renderizar(html, path, **k))[1]
+        manager = self._manager(tmp_path, wa)
+        manager.config = replace(manager.config, image_show_client_data=False)
+
+        assert manager._send_result_image(self._resultado(str(foto))) is True
+        assert wa.renderizou is True, "mandou o print da tela, com o dado do cliente"
+        assert wa.bytes_enviados != foto.read_bytes()
+        assert "52998224725" not in htmls[0] and "529.982.247-25" not in htmls[0], (
+            "o card também tem de sair mascarado")
+
+
+class TestSimuladorSoFotografaQuandoOPrintPodeSair:
+    """Com IMAGE_SHOW_CLIENT_DATA=false o print nem é tirado: um PNG com CPF
+    parado no disco, sem uso, é só mais um lugar de onde o dado vaza."""
+
+    def _chamar(self, tmp_path, monkeypatch, mostrar: bool):
+        from dataclasses import replace
+        from types import SimpleNamespace
+
+        from app import simulator as modulo
+        from app.models import IncomingMessage, ParsedRequest, SimulationJob
+        from tests.test_concurrency import _config
+
+        capturas = []
+        monkeypatch.setattr(modulo.tela_do_portal, "capturar",
+                            lambda pagina, destino, *a, **k: (capturas.append(destino)
+                                                             or (str(destino), "")))
+        falso = SimpleNamespace(_page=object(), _log=lambda *a, **k: None,
+                                config=replace(_config(tmp_path), image_show_client_data=mostrar))
+        msg = IncomingMessage(message_id="3EB0Y", chat_id="g@g.us", chat_name="g",
+                              sender_id="55@s.whatsapp.net", sender_name="Ryan", text="x")
+        job = SimulationJob(request_id="REQ000901", message=msg, simulation_id=1,
+                            request=ParsedRequest(consultant_name="Ryan", cpf="52998224725",
+                                                  bank="Santander", contract="",
+                                                  customer_name="Jose da Silva"))
+        return modulo.SimulatorService._fotografar_o_resultado(falso, job), capturas
+
+    def test_flag_false_nao_fotografa(self, tmp_path, monkeypatch):
+        caminho, capturas = self._chamar(tmp_path, monkeypatch, mostrar=False)
+        assert caminho == "" and capturas == []
+
+    def test_flag_true_continua_fotografando(self, tmp_path, monkeypatch):
+        caminho, capturas = self._chamar(tmp_path, monkeypatch, mostrar=True)
+        assert caminho.endswith("REQ000901_portal.png") and len(capturas) == 1

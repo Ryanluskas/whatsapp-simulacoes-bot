@@ -36,7 +36,8 @@ from playwright.sync_api import sync_playwright
 
 from .actor import ThreadActor
 from .clock import now_iso
-from .models import IncomingMessage, ResultadoEnvio
+from .models import (EnvioNaoSaiu, EnvioSemProva, IncomingMessage, QuoteStatus,
+                     ResultadoEnvio)
 from .navegador_zumbi import encerrar_orfaos
 from .state_store import StateStore
 
@@ -880,16 +881,26 @@ GEOMETRIA_DA_LINHA_JS = r"""
 
   // Reserva: pelo texto. O data-id muda de formato entre versoes do
   // WhatsApp, o texto do pedido nao.
+  //
+  // So' vale se o texto apontar UMA linha. Antes pegava a ultima parecida:
+  // dois pedidos com o mesmo cliente (ou o mesmo comeco de texto) faziam a
+  // resposta citar a mensagem de OUTRO consultor. Na duvida, nao cita -- a
+  // resposta sai sem citacao e com o nome de quem pediu.
+  let ambigua = 0;
   if (!linha && textoAlvo) {
     const alvo = norm(textoAlvo).slice(0, 24);
     if (alvo) {
-      const linhas = [...document.querySelectorAll('div[role="row"]')];
-      for (let i = linhas.length - 1; i >= 0; i--) {
-        if (norm(linhas[i].innerText).includes(alvo)) { linha = linhas[i]; via = 'texto'; break; }
-      }
+      const parecidas = [...document.querySelectorAll('div[role="row"]')]
+        .filter((el) => norm(el.innerText).includes(alvo));
+      if (parecidas.length === 1) { linha = parecidas[0]; via = 'texto'; }
+      else ambigua = parecidas.length;
     }
   }
 
+  if (!linha && ambigua > 1) {
+    return { achou: false, via: '',
+             motivo: `o texto casa com ${ambigua} mensagens; nao cito por aproximacao` };
+  }
   if (!linha) return { achou: false, via: '', motivo: 'a mensagem nao esta na tela' };
 
   linha.setAttribute('data-allana-linha', '1');
@@ -1508,6 +1519,7 @@ class WhatsAppService(ThreadActor):
         read_limit: int = 30,
         on_status: Callable[[WhatsAppStatus], None] | None = None,
         on_log: Callable[[str, str], None] | None = None,
+        on_incoming: Callable[[IncomingMessage], None] | None = None,
     ) -> None:
         super().__init__("whatsapp")
         self.profile_dir = Path(profile_dir)
@@ -1523,6 +1535,9 @@ class WhatsAppService(ThreadActor):
         self.read_limit = max(10, read_limit)
         self._on_status = on_status
         self._on_log = on_log
+        # Porta DURAVEL: grava a mensagem antes de a leitura marca-la como
+        # vista (ver `_poll_messages`). Sem ela, fica o caminho antigo, so' RAM.
+        self._on_incoming = on_incoming
 
         self.inbox: "queue.Queue[IncomingMessage]" = queue.Queue()
 
@@ -1632,7 +1647,8 @@ class WhatsAppService(ThreadActor):
             return False
 
     def send(self, chat_id: str, chat_name: str, text: str, quote_message_id: str = "",
-             timeout: float = 90.0, texto_sem_citacao: str = "") -> ResultadoEnvio:
+             timeout: float = 90.0, texto_sem_citacao: str = "", quote_text: str = "",
+             quote_participant: str = "") -> ResultadoEnvio:
         """Envia texto para um chat especifico. Executado na thread dona.
 
         ``texto_sem_citacao`` e' a MESMA resposta escrita para se sustentar
@@ -1640,6 +1656,9 @@ class WhatsAppService(ThreadActor):
         e' ``mensagens.py``; aqui so' se escolhe qual sai, e a escolha so'
         pode ser feita DEPOIS de tentar citar. Sem isso o manager teria de
         adivinhar antes do envio se a citacao ia funcionar.
+
+        ``quote_text``/``quote_participant`` existem pelo contrato comum com a
+        camada Evolution. Aqui (legado) a citacao e' feita na tela pelo id.
         """
         return self.call(self._do_send, chat_id, chat_name, text, quote_message_id,
                          texto_sem_citacao, timeout=timeout)
@@ -1653,6 +1672,8 @@ class WhatsAppService(ThreadActor):
         quote_message_id: str = "",
         timeout: float = 120.0,
         caption_sem_citacao: str = "",
+        quote_text: str = "",
+        quote_participant: str = "",
     ) -> ResultadoEnvio:
         """Envia uma imagem com legenda. Levanta excecao se nao conseguir.
 
@@ -2208,18 +2229,30 @@ class WhatsAppService(ThreadActor):
                 continue
             _chat_jid, sender_jid = parse_data_id(message_id)
             stamp, sender_name = parse_pre_plain(row.get("meta", ""))
-            self.state.mark_seen(message_id)
-            self.inbox.put(
-                IncomingMessage(
-                    message_id=message_id,
-                    chat_id=chat_id,
-                    chat_name=chat_name,
-                    sender_id=sender_jid or "desconhecido",
-                    sender_name=sender_name or "Consultor",
-                    text=text,
-                    timestamp=stamp,
-                )
+            mensagem = IncomingMessage(
+                message_id=message_id,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                sender_id=sender_jid or "desconhecido",
+                sender_name=sender_name or "Consultor",
+                text=text,
+                timestamp=stamp,
             )
+            if self._on_incoming is None:
+                self.state.mark_seen(message_id)
+                self.inbox.put(mensagem)
+                continue
+            # GRAVAR ANTES DE MARCAR COMO VISTA. Na ordem antiga (marca no
+            # state.json, depois fila em RAM), uma queda com o pedido ainda
+            # na fila -- comum com o ator ocupado enviando -- o perdia: o
+            # proximo boot o via como "ja' visto" e ninguem respondia.
+            try:
+                self._on_incoming(mensagem)
+            except Exception as exc:  # noqa: BLE001 - tenta de novo no proximo ciclo
+                self._log("ERROR", f"Não consegui gravar a mensagem {message_id}: "
+                                   f"{_short(exc)}. Tento de novo na próxima leitura.")
+                continue
+            self.state.mark_seen(message_id)
 
     # ------------------------------------------------------------------ envio
     def _ja_esta_no_chat(self, texto: str) -> bool:
@@ -2404,11 +2437,29 @@ class WhatsAppService(ThreadActor):
         # mensagem no meio do texto.
         self._page.keyboard.insert_text(text)
         self._page.wait_for_timeout(120)
-        self._page.keyboard.press("Enter")
-        self._page.wait_for_timeout(450)
+        entregue = ResultadoEnvio(ok=True, via="texto", quoted_ok=citou,
+                                  tipo_midia="nenhum", provider="dom",
+                                  quote_status=self._situacao_da_citacao(quote_message_id, citou))
+        # A partir do Enter o texto pode ter saido: falha daqui em diante nao
+        # e' "nao enviou" -- e' EnvioSemProva, salvo se o texto estiver no chat.
+        try:
+            self._page.keyboard.press("Enter")
+            self._page.wait_for_timeout(450)
+        except Exception as exc:  # noqa: BLE001
+            if self._ja_esta_no_chat(text):
+                self._lembrar_do_que_enviamos(text)
+                return entregue
+            raise EnvioSemProva(
+                f"falha depois de enviar o texto ({_short(exc)}); ele pode ter saído") from exc
         self._lembrar_do_que_enviamos(text)
-        return ResultadoEnvio(ok=True, via="texto", quoted_ok=citou,
-                              tipo_midia="nenhum")
+        return entregue
+
+    def _situacao_da_citacao(self, quote_message_id: str, citou: bool) -> str:
+        """Traduz o ``citou`` da tela para o vocabulario comum de evidencia."""
+        if not (self.reply_quote and quote_message_id):
+            return QuoteStatus.NONE
+        # Aqui "citou" ja' e' a barra de citacao CONFIRMADA no rodape.
+        return QuoteStatus.OK if citou else QuoteStatus.FALLBACK
 
     def _citar(self, message_id: str, tipo: str) -> bool:
         """Cita a mensagem e REGISTRA quando nao consegue.
@@ -3109,6 +3160,29 @@ class WhatsAppService(ThreadActor):
                 raise RuntimeError(
                     "não consegui escrever a legenda; não vou enviar o card mudo")
 
+        entregue = ResultadoEnvio(ok=True, via=self._ultima_via_de_envio or "imagem",
+                                  quoted_ok=citou, tipo_midia="imagem",
+                                  legenda_ok=legenda_ok, provider="dom",
+                                  quote_status=self._situacao_da_citacao(quote_message_id, citou))
+        # DAQUI EM DIANTE a imagem pode ter saido. Qualquer falha que nao
+        # PROVE o contrario (a pre-visualizacao aberta prova) vira
+        # EnvioSemProva: o manager nao manda o texto por cima.
+        try:
+            return self._disparar_e_confirmar_imagem(image_path, caption, entregue)
+        except EnvioNaoSaiu:
+            raise
+        except Exception as exc:  # noqa: BLE001 - qualquer falha depois do clique
+            if caption and self._ja_esta_no_chat(caption):
+                self._log("INFO", "Falha depois de enviar a imagem, mas a legenda está "
+                                  "no chat. Não vou reenviar em texto.")
+                self._lembrar_do_que_enviamos(caption)
+                return entregue
+            raise EnvioSemProva(
+                f"falha depois de disparar o envio da imagem ({_short(exc)}); "
+                "a imagem pode ter saído") from exc
+
+    def _disparar_e_confirmar_imagem(self, image_path: str, caption: str,
+                                     entregue: ResultadoEnvio) -> ResultadoEnvio:
         self._disparar_envio()
 
         # Confirma que a pre-visualizacao fechou - se ela continuar na tela, o
@@ -3128,8 +3202,8 @@ class WhatsAppService(ThreadActor):
                     "está no chat. Não vou reenviar em texto.",
                 )
                 self._lembrar_do_que_enviamos(caption)
-                return True
-            raise RuntimeError("a pré-visualização da imagem não fechou; envio não confirmado")
+                return entregue
+            raise EnvioNaoSaiu("a pré-visualização da imagem não fechou; envio não confirmado")
         self._page.wait_for_timeout(400)
         # A legenda tambem e' mensagem nossa: registrar para nao rele-la no
         # ciclo seguinte e responder a si mesmo.
@@ -3153,9 +3227,7 @@ class WhatsAppService(ThreadActor):
                     "Não consegui confirmar que a última mensagem é imagem "
                     f"(ícones: {saida.get('icones')}).",
                 )
-        return ResultadoEnvio(ok=True, via=self._ultima_via_de_envio or "imagem",
-                              quoted_ok=citou, tipo_midia="imagem",
-                              legenda_ok=legenda_ok)
+        return entregue
 
     #: O rotulo do campo de legenda, sem o sufixo do compositor.
     _ROTULOS_DA_LEGENDA = ("Digite uma mensagem", "Type a message",

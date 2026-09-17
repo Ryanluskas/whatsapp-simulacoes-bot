@@ -23,7 +23,9 @@ import pytest
 from app import mensagens
 from app.evolution import (DELAY_HUMANO_MS, EvolutionClient, LICENCA_PENDENTE,
                            classificar_resposta)
+from app.models import Desfecho, QuoteStatus
 from app.whatsapp_port import METODOS_DO_CONTRATO
+from tests.test_concurrency import png_valido
 
 GRUPO = "120363111222333@g.us"
 ID_ORIGINAL = "3EB0C5A277F7F9B6C599"
@@ -149,11 +151,22 @@ class TestCitacao:
     """Defeito histórico: não citava a mensagem do consultor."""
 
     def test_cita_usando_o_id_que_chegou_no_webhook(self, cliente, espiao):
-        cliente.lembrar_original(ID_ORIGINAL, "Ivone Teste\n42888832453")
-        r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL)
-        assert r.ok and r.quoted_ok
+        """O chamador entrega id, texto e autor; a camada não lembra nada sozinha.
+
+        Antes o texto citado vinha de um dicionário em RAM preenchido pelo
+        webhook -- depois de reiniciar, a citação saía vazia.
+        """
+        r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL,
+                         quote_text="Ivone Teste\n42888832453",
+                         quote_participant="5562999990000@s.whatsapp.net")
+        # A resposta falsa padrão não traz stanzaId: a citação foi PEDIDA, mas
+        # não há prova de que pegou. `quoted_ok` só afirma com prova.
+        assert r.ok and r.quote_status == QuoteStatus.UNVERIFIED
+        assert r.quoted_ok is False
         citada = espiao.ultimo["quoted"]
         assert citada["key"]["id"] == ID_ORIGINAL
+        assert citada["key"]["remoteJid"] == GRUPO
+        assert citada["key"]["participant"] == "5562999990000@s.whatsapp.net"
         assert citada["message"]["conversation"] == "Ivone Teste\n42888832453"
 
     def test_sem_id_nao_manda_campo_quoted(self, cliente, espiao):
@@ -164,8 +177,46 @@ class TestCitacao:
     def test_id_desconhecido_ainda_cita(self, cliente, espiao):
         """Se o texto original se perdeu, citar pelo id ainda é melhor que nada."""
         r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id="ID_QUE_NAO_GUARDEI")
-        assert r.quoted_ok
         assert espiao.ultimo["quoted"]["key"]["id"] == "ID_QUE_NAO_GUARDEI"
+        assert r.quote_status == QuoteStatus.UNVERIFIED and r.quoted_ok is False
+
+    def test_quoted_ok_so_com_stanza_igual_ao_pedido(self, cliente, espiao):
+        """O único caminho para `quoted_ok=True`: a API devolve o stanzaId pedido."""
+        espiao.resposta = httpx.Response(201, json={
+            "key": {"id": "3EB0RESPOSTA", "remoteJid": GRUPO, "fromMe": True},
+            "message": {"extendedTextMessage": {
+                "text": "resposta", "contextInfo": {"stanzaId": ID_ORIGINAL}}}})
+        r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL)
+        assert r.quote_status == QuoteStatus.OK and r.quoted_ok is True
+
+    def test_stanza_de_outra_mensagem_nao_e_quoted_ok(self, cliente, espiao):
+        espiao.resposta = httpx.Response(201, json={
+            "key": {"id": "3EB0RESPOSTA", "remoteJid": GRUPO, "fromMe": True},
+            "message": {"extendedTextMessage": {
+                "text": "resposta", "contextInfo": {"stanzaId": "3EB0OUTRA"}}}})
+        r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL)
+        assert r.ok and r.quote_status == QuoteStatus.NOT_APPLIED and r.quoted_ok is False
+
+    def test_unverified_nao_e_registrada_como_citacao_recusada(self, tmp_path):
+        """Sem stanzaId a citação é INCERTA, não recusada: o log não pode mentir."""
+        from app.db import Database
+        from app.events import EventHub
+        from app.manager import BotManager
+        from app.models import ResultadoEnvio
+        from tests.test_concurrency import _config
+
+        config = _config(tmp_path)
+        db = Database(config.db_path)
+        manager = BotManager(config, db, EventHub(db))
+        manager._anotar_citacao(
+            ResultadoEnvio(ok=True, via="texto", provider="evolution",
+                           quote_status=QuoteStatus.UNVERIFIED, quoted_ok=False,
+                           enviado_id="3EB0RESPOSTA"),
+            "REQ000001", "Ryan")
+        mensagens_de_log = [linha["message"] for linha in db.fetchall(
+            "SELECT message FROM logs WHERE request_id='REQ000001'")]
+        assert any("NÃO confirmada" in m for m in mensagens_de_log), mensagens_de_log
+        assert not any("RECUSADA" in m for m in mensagens_de_log), mensagens_de_log
 
 
 # --------------------------------------------------------- 3-7: falhar alto
@@ -188,29 +239,42 @@ class TestFalhaNuncaEhSilenciosa:
         assert not r.ok
         assert "key.id" in r.motivo
 
-    @pytest.mark.parametrize("status,transitorio", [
-        (500, True), (502, True), (503, True), (429, True),
-        (400, False), (401, False), (404, False),
+    @pytest.mark.parametrize("status,desfecho", [
+        # nada saiu, repetir a MESMA requisição depois pode dar certo
+        (429, Desfecho.TRANSITORIA), (503, Desfecho.TRANSITORIA),
+        # a mensagem PODE ter saído: não se manda outra. 502/504 vêm de um
+        # proxy na frente da Evolution -- ela pode ter recebido e enviado.
+        (500, Desfecho.INCERTA), (502, Desfecho.INCERTA), (504, Desfecho.INCERTA),
+        # nada saiu e repetir não resolve
+        (401, Desfecho.PERMANENTE), (403, Desfecho.PERMANENTE), (404, Desfecho.PERMANENTE),
     ])
-    def test_classifica_para_saber_se_reenvia(self, status, transitorio):
-        assert classificar_resposta(status, "detalhe")[0] is transitorio
+    def test_classifica_para_saber_se_reenvia(self, status, desfecho):
+        assert classificar_resposta(status, "detalhe").desfecho == desfecho
+
+    def test_400_so_e_recusa_quando_a_evolution_diz_o_que_recusou(self):
+        """Um 400 opaco pode ser erro DEPOIS do envio: não vira "nada saiu"."""
+        assert classificar_resposta(400, 'requires property "number"').desfecho == Desfecho.RECUSADA
+        assert classificar_resposta(400, "Bad Request").desfecho == Desfecho.INCERTA
 
     def test_licenca_pendente_e_nomeada_e_nao_reenvia(self):
         """503 comum é transitório; este 503 específico não adianta repetir."""
-        transitorio, motivo = classificar_resposta(
-            503, json.dumps({"error": LICENCA_PENDENTE}))
-        assert transitorio is False, "reenviar não ativa licença nenhuma"
-        assert "/manager" in motivo, "a mensagem tem de dizer o que fazer"
+        classificacao = classificar_resposta(503, json.dumps({"error": LICENCA_PENDENTE}))
+        assert classificacao.desfecho == Desfecho.PERMANENTE, "reenviar não ativa licença"
+        assert classificacao.transitorio is False
+        assert "/manager" in classificacao.motivo, "a mensagem tem de dizer o que fazer"
 
-    def test_erro_500_volta_marcado_como_transitorio(self, png):
+    def test_erro_500_nao_e_transitorio_e_sim_incerto(self, png):
+        """O defeito que este teste trava: 500 disparava um segundo envio."""
         espiao = Espiao(httpx.Response(500, text="boom"))
         c = EvolutionClient("http://e:8080", "k", "allana", GRUPO,
                             client=httpx.Client(transport=httpx.MockTransport(espiao),
                                                 base_url="http://e:8080"),
                             renderer=None)
-        r = c.send_image(GRUPO, "g", png, caption="x")
+        r = c.send_image(GRUPO, "g", png, caption="x", quote_message_id=ID_ORIGINAL)
         assert not r.ok
-        assert r.evidencia["transitorio"] is True
+        assert r.desfecho == Desfecho.INCERTA
+        assert r.sem_prova is True and r.transitorio is False
+        assert len(espiao.chamadas) == 1, "tentou de novo depois de um 500"
 
     def test_erro_400_registra_o_corpo_inteiro(self):
         """A Evolution explica bem o que recusou -- jogar fora custa uma noite."""
@@ -236,6 +300,19 @@ class TestFalhaNuncaEhSilenciosa:
         r = c.send(GRUPO, "g", "oi")
         assert not r.ok
         assert r.evidencia["transitorio"] is True
+
+    def test_erro_de_leitura_da_resposta_e_incerto(self):
+        """A requisição subiu e a resposta veio quebrada: pode ter saído."""
+        def quebrada(request):
+            raise httpx.DecodingError("gzip cortado", request=request)
+        c = EvolutionClient("http://e:8080", "k", "allana", GRUPO,
+                            client=httpx.Client(transport=httpx.MockTransport(quebrada),
+                                                base_url="http://e:8080"),
+                            renderer=None)
+        r = c.send(GRUPO, "g", "oi")
+        assert not r.ok
+        assert r.desfecho == Desfecho.INCERTA and r.sem_prova is True
+        assert r.evidencia["transitorio"] is False
 
     def test_a_chave_nunca_aparece_no_motivo(self):
         espiao = Espiao(httpx.Response(401, text="unauthorized"))
@@ -416,7 +493,7 @@ class TestAQuedaParaTextoFuncionaNasDuasCamadas:
             def render_png(self, html, path, width=900, timeout=60.0):
                 destino = Path(path)
                 destino.parent.mkdir(parents=True, exist_ok=True)
-                destino.write_bytes(b"\x89PNG\r\n\x1a\n")
+                destino.write_bytes(png_valido())
                 return str(destino)
 
             def send_image(self, *a, **k):
@@ -433,7 +510,7 @@ class TestAQuedaParaTextoFuncionaNasDuasCamadas:
             def render_png(self, html, path, width=900, timeout=60.0):
                 destino = Path(path)
                 destino.parent.mkdir(parents=True, exist_ok=True)
-                destino.write_bytes(b"\x89PNG\r\n\x1a\n")
+                destino.write_bytes(png_valido())
                 return str(destino)
 
             def send_image(self, *a, **k):
@@ -450,7 +527,7 @@ class TestAQuedaParaTextoFuncionaNasDuasCamadas:
             def render_png(self, html, path, width=900, timeout=60.0):
                 destino = Path(path)
                 destino.parent.mkdir(parents=True, exist_ok=True)
-                destino.write_bytes(b"\x89PNG\r\n\x1a\n")
+                destino.write_bytes(png_valido())
                 return str(destino)
 
             def send_image(self, *a, **k):

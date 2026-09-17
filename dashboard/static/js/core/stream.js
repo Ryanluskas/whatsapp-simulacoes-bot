@@ -14,6 +14,7 @@ const EVENTS = [
   "consultant_identified", "request_created", "request_rejected",
   "job_queued", "job_progress", "job_done", "job_error", "job_retry",
   "job_interrupted", "queue_recovered",
+  "request_completed", "delivery_retry", "delivery_unconfirmed", "delivery_manual", "delivery_failed",
   "whatsapp_status", "whatsapp_connected", "whatsapp_disconnected",
   "metrics", "queue_update", "log",
 ];

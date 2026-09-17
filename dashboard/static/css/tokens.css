@@ -1,97 +1,102 @@
 /* ==========================================================================
-   ALLANA — tokens do sistema de design
+   ALLANA BOT — tokens do sistema de design
    --------------------------------------------------------------------------
-   Sistema white-label: a base é neutra fria e serve a qualquer empresa; toda
-   a identidade vive numa ÚNICA rampa de marca. Trocar de cliente = trocar os
-   nove valores de --brand-*, e nada mais.
+   Este é o ÚNICO arquivo com valores de cor. O resto do CSS e do JavaScript
+   usa os papéis semânticos abaixo (var(--...)), nunca HEX solto.
 
-   As cores não foram escolhidas por gosto — passaram pelo validador do método
-   de visualização (banda de luminosidade OKLCH, piso de croma, separação sob
-   protanopia/deuteranopia e contraste contra a superfície real #131519):
+   Proporção de uso (ver "ALLANA BOT UI PRINCIPLE" no AGENTS.md):
+     70% navy/preto ...... estrutura (--bg, --surface*, --border)
+     15% branco/cinza .... leitura (--text, --text-secondary, --muted)
+     10% vermelho ........ identidade e ação importante (--allana-red*)
+      5% lilás ........... detalhe e acento (--lilac*, --purple-dark)
 
-     rampa de marca (índigo, hue 278) .. ótimo medido: é o ponto da roda de
-        cores com MAIOR distância das 5 cores de estado (ΔE 13,7 visão normal
-        / 10,8 sob daltonismo). Nenhum outro tom se afasta mais.
-     estados (5 slots, nesta ordem) .... TODAS as checagens passam
-        pior par adjacente ΔE 15,9 (deutan) — alvo ≥ 8
-        pior par visão normal ΔE 24,1 — piso ≥ 15
-     rampa de gráficos (ordinal) ....... TODAS as checagens passam
-     tinta sobre superfície ............ 16,6:1 / 10,0:1 / 5,9:1
+   Contraste medido (WCAG) sobre --surface (#12121C):
+     --text 17,1:1 · --text-secondary 7,7:1 · --muted 3,8:1
+     --allana-red-soft 5,7:1 · --error 5,7:1 · --warning 11,4:1
+     --success 10,7:1 · --info 7,9:1 · --lilac 8,9:1
+     --allana-red 4,1:1 (não serve para texto pequeno)
+   Texto claro sobre fundo vermelho:
+     --allana-red 4,2:1 (reprova AA) · --accent-solid 5,2:1 · hover 5,9:1
 
-   REGRA: a cor de marca é CROMO (logo, trilho ativo, botão, foco). Ela nunca
-   codifica dado. Quem codifica estado são os tokens --st-*, e quem codifica
-   magnitude é a rampa --chart-*. Misturar os três quebra a leitura.
-
-   A ORDEM dos slots de estado é o mecanismo de segurança para daltonismo.
-   Não reordene sem rodar o validador de novo.
+   REGRAS
+   - --muted fica abaixo de 4,5:1: só para placeholder, ícone decorativo,
+     separador e texto desabilitado. Texto que precisa ser lido usa
+     --text-secondary.
+   - Texto vermelho usa --allana-red-soft. O vermelho puro fica para marca,
+     fio de navegação ativo e detalhes grandes; botão usa --accent-solid,
+     que mistura o vermelho com o escuro da própria paleta para o texto
+     passar de 4,5:1.
+   - Vermelho NÃO significa erro. Erro é --error, sempre acompanhado de ícone
+     e texto — estado nunca é comunicado só por cor.
    ========================================================================== */
 
 :root {
   color-scheme: dark;
 
-  /* ---------------------------------------------------------- superfícies */
-  --plane:        #0B0C0E;   /* fundo da página */
-  --surface:      #131519;   /* card e superfície dos gráficos (validada) */
-  --surface-2:    #1A1D22;   /* elevado: modal, hover, cabeçalho de tabela */
-  --surface-3:    #22262D;   /* campos de formulário */
-  --surface-sunk: #0E1013;   /* console, áreas recuadas */
+  /* ------------------------------------------------------------- paleta */
+  --bg:               #0B0B12;
+  --surface:          #12121C;
+  --surface-2:        #181824;
+  --surface-hover:    #20202E;
+  --border:           #29293A;
 
-  --line:         #262A31;   /* fio de 1px */
-  --line-2:       #333842;   /* fio mais presente */
-  --grid:         #202429;   /* linhas de grade dos gráficos */
+  --text:             #F5F5F7;
+  --text-secondary:   #A6A6B3;
+  --muted:            #707080;
 
-  /* ----------------------------------------------------------------- tinta */
-  --ink:          #F2F4F7;   /* 16,6:1 */
-  --ink-2:        #B9C0CB;   /* 10,0:1 */
-  --ink-3:        #8A93A1;   /*  5,9:1 — eixos, legendas, texto secundário */
+  --allana-red:       #E51F3E;
+  --allana-red-dark:  #A9142B;
+  --allana-red-soft:  #FF4A63;
 
-  /* ============================ MARCA ====================================
-     Para outra empresa, troque só estes nove valores e rode o validador:
-       python scripts/validate_palette.py "<600>,<500>,<300>" --mode dark \
-              --surface "#131519"
-     O passo 600 precisa de ≥ 3:1 (fundo de botão) e o 300 de ≥ 4,5:1 (texto).
-     ===================================================================== */
-  --brand-900: #2C287E;
-  --brand-800: #3D3BA1;
-  --brand-700: #4E4CC3;
-  --brand-600: #5D5FD7;   /* fundo de botão primário — 3,6:1 */
-  --brand-500: #6E74E6;   /* acento, trilho ativo, foco — 4,6:1 */
-  --brand-400: #848CF3;
-  --brand-300: #9FA9FC;   /* texto e links sobre superfície — 8,3:1 */
-  --brand-200: #C1C9FF;
-  --brand-100: #DCE2FF;
+  --lilac:            #B8A7FF;
+  --lilac-soft:       #DDD6FF;
+  --purple-dark:      #5C4BA8;
 
-  /* Papéis semânticos: o resto do CSS usa ESTES, nunca os números acima. */
-  --brand:       var(--brand-500);
-  --brand-solid: var(--brand-600);
-  --brand-text:  var(--brand-300);
-  --brand-wash:  rgba(110, 116, 230, 0.12);
-  --brand-ring:  rgba(110, 116, 230, 0.42);
+  --success:          #4ADE80;
+  --warning:          #F5C451;
+  --error:            #F05D6B;
+  --info:             #7EA7FF;
 
-  /* ------------------------------------------------- estados (validados) */
-  /* ordem de slot: erro > processando > aguardando > consultando > concluído */
-  --st-error:      #E05A5A;
-  --st-processing: #4C93D6;
-  --st-queued:     #B5871F;
-  --st-consulting: #9C4F96;
-  --st-done:       #3FAA6C;
-  --st-idle:       #7B828F;
+  /* -------------------------------------------- derivados (sem HEX novo) */
+  --bg-sunk:        color-mix(in srgb, var(--bg) 82%, black);
+  --border-strong:  color-mix(in srgb, var(--border) 70%, var(--muted));
+  --overlay:        color-mix(in srgb, var(--bg) 76%, transparent);
+  --topbar-glass:   color-mix(in srgb, var(--bg) 86%, transparent);
 
-  /* Fundos tênues para chips e faixas — a cor pura fica na marca, não no bloco */
-  --st-error-bg:      rgba(224, 90, 90, 0.13);
-  --st-processing-bg: rgba(76, 147, 214, 0.13);
-  --st-queued-bg:     rgba(181, 135, 31, 0.14);
-  --st-consulting-bg: rgba(156, 79, 150, 0.15);
-  --st-done-bg:       rgba(63, 170, 108, 0.13);
-  --st-idle-bg:       rgba(123, 130, 143, 0.13);
+  --accent:         var(--allana-red);
+  --accent-solid:   color-mix(in srgb, var(--allana-red) 55%, var(--allana-red-dark));
+  --accent-hover:   color-mix(in srgb, var(--allana-red) 30%, var(--allana-red-dark));
+  --accent-press:   var(--allana-red-dark);
+  --accent-text:    var(--allana-red-soft);
+  --accent-wash:    color-mix(in srgb, var(--allana-red) 12%, transparent);
+  --on-accent:      var(--text);
 
-  /* ------------------------- rampa ordinal de gráficos (validada) ------- */
-  /* Uma cor só, do escuro ao claro. A ordem se lê na própria luminosidade. */
-  --chart-1: #4E4CC3;
-  --chart-2: #6568E1;
-  --chart-3: #8088F5;
-  --chart-4: #9FA9FC;
-  --chart-5: #C1C9FF;
+  --focus:          var(--lilac);
+  --detail:         var(--lilac);
+  --detail-wash:    color-mix(in srgb, var(--lilac) 10%, transparent);
+
+  --success-wash:   color-mix(in srgb, var(--success) 12%, transparent);
+  --warning-wash:   color-mix(in srgb, var(--warning) 12%, transparent);
+  --error-wash:     color-mix(in srgb, var(--error) 13%, transparent);
+  --info-wash:      color-mix(in srgb, var(--info) 12%, transparent);
+  --neutral-wash:   color-mix(in srgb, var(--muted) 16%, transparent);
+
+  --success-line:   color-mix(in srgb, var(--success) 34%, transparent);
+  --warning-line:   color-mix(in srgb, var(--warning) 38%, transparent);
+  --error-line:     color-mix(in srgb, var(--error) 38%, transparent);
+  --info-line:      color-mix(in srgb, var(--info) 34%, transparent);
+
+  /* ------------------------------------------------------------ gráficos */
+  /* Série de dados é lilás (detalhe), nunca vermelho: vermelho é marca e
+     ação, e num gráfico seria lido como "problema". Rampa ordinal do escuro
+     ao claro. */
+  --chart-series: var(--lilac);
+  --chart-1: var(--purple-dark);
+  --chart-2: color-mix(in srgb, var(--purple-dark) 60%, var(--lilac));
+  --chart-3: color-mix(in srgb, var(--purple-dark) 25%, var(--lilac));
+  --chart-4: var(--lilac);
+  --chart-5: var(--lilac-soft);
+  --chart-grid: color-mix(in srgb, var(--border) 70%, transparent);
 
   /* -------------------------------------------------------------- espaço */
   --s-1:  4px;
@@ -104,43 +109,37 @@
   --s-10: 40px;
   --s-12: 48px;
 
-  --r-sm:   6px;
-  --r:      10px;
-  --r-lg:   14px;
+  --r-sm:   8px;
+  --r:      12px;
+  --r-lg:   16px;
   --r-full: 999px;
 
   /* ---------------------------------------------------------- tipografia */
-  /* Sans do sistema em tudo, inclusive nos números grandes. A hierarquia vem
-     de peso e entreletras, não de uma segunda família — é o que separa um
-     painel financeiro sério de um enfeitado. */
   --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
           "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas,
                "Liberation Mono", monospace;
 
-  --t-xs:  11px;
-  --t-sm:  12px;
-  --t-md:  13px;
-  --t-base:14px;
-  --t-lg:  16px;
-  --t-xl:  19px;
-  --t-2xl: 24px;
-  --t-3xl: 32px;
-  --t-hero:48px;
+  --t-meta:  12px;   /* metadado, rótulo de coluna */
+  --t-meta-lg: 13px;
+  --t-body:  14px;   /* texto corrido */
+  --t-body-lg: 15px;
+  --t-h3:    16px;   /* título de card */
+  --t-h2:    20px;   /* título de seção */
+  --t-h1:    24px;   /* título da página */
+  --t-metric: 28px;  /* número de métrica */
 
-  --track-tight: -0.02em;
-  --track-wide:   0.08em;
-  --track-caps:   0.12em;
+  --track-caps: 0.06em;
 
   /* ------------------------------------------------------------- sombras */
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-2: 0 8px 24px -8px rgba(0, 0, 0, 0.7);
-  --shadow-3: 0 24px 60px -16px rgba(0, 0, 0, 0.8);
+  --shadow-1: 0 1px 2px color-mix(in srgb, black 40%, transparent);
+  --shadow-2: 0 10px 28px -10px color-mix(in srgb, black 70%, transparent);
+  --shadow-3: 0 28px 64px -18px color-mix(in srgb, black 80%, transparent);
 
   /* ----------------------------------------------------------- movimento */
-  --dur-1: 120ms;
+  --dur-1: 150ms;
   --dur-2: 180ms;
-  --dur-3: 280ms;
+  --dur-3: 220ms;
   --ease: cubic-bezier(0.32, 0.08, 0.24, 1);
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
@@ -150,12 +149,11 @@
   --z-modal:  80;
   --z-toast:  100;
 
-  --sidebar-w: 240px;
-  --topbar-h:  62px;
+  --sidebar-w: 248px;
+  --topbar-h:  68px;
 }
 
-/* Quem pediu menos movimento recebe menos movimento — inclusive nas
-   transições de rota e nos pulsos de status. */
+/* Quem pediu menos movimento recebe menos movimento. */
 @media (prefers-reduced-motion: reduce) {
   :root {
     --dur-1: 0ms;

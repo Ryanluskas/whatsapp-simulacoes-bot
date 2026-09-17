@@ -8,24 +8,27 @@
 
 import { h, mount, replaceKeepingScroll } from "../core/dom.js";
 import * as fmt from "../core/format.js";
+import { icon } from "../core/icons.js";
 import * as store from "../core/store.js";
-import { badge, chip, empty, statusDot } from "../core/ui.js";
+import { WHATSAPP_LABEL, stateBadge } from "../core/status.js";
+import { card, chip, empty, statusDot } from "../core/ui.js";
 import { feedRow } from "../feed.js";
 
 const FILTERS = [
   { id: "all", label: "Tudo" },
   { id: "messages", label: "Mensagens", types: ["message_received", "message_sent", "message_failed"] },
-  { id: "jobs", label: "Simulações", types: ["job_queued", "job_progress", "job_done", "job_error", "job_retry", "request_created"] },
+  { id: "jobs", label: "Simulações", types: ["job_queued", "job_progress", "job_done", "job_error", "job_retry", "request_created", "request_completed", "delivery_retry", "delivery_unconfirmed", "delivery_manual", "delivery_failed"] },
   { id: "problems", label: "Problemas", levels: ["error", "warning"] },
 ];
 
 export function render(root) {
   let filter = "all";
-  let paused = false;
+  let pausado = false;
 
   const body = h("div.console-body", { tabindex: "0", role: "log", "aria-label": "Fluxo de eventos ao vivo" });
   const livePill = h("span.live-pill");
-  const pauseBtn = h("button.btn.sm.ghost", { type: "button", onclick: togglePause }, "Pausar");
+  const pauseBtn = h("button.btn.sm.ghost", { type: "button", onclick: alternarPausa },
+    icon("pause", 14), "Pausar");
 
   const segButtons = FILTERS.map((f) =>
     h("button", {
@@ -34,53 +37,51 @@ export function render(root) {
       onclick: () => {
         filter = f.id;
         segButtons.forEach((b, i) => b.setAttribute("aria-pressed", String(FILTERS[i].id === filter)));
-        drawFeed(store.get("feed"));
+        desenharFeed(store.get("feed"));
       },
     }, f.label));
 
-  const connCard = h("div.card");
-  const activeCard = h("div.card");
-  const statsCard = h("div.card");
+  const conexao = card("WhatsApp");
+  const execucao = card("Em execução");
+  const numeros = card("Hoje");
 
   mount(root,
-    h("div.section-head",
-      h("h3", "Monitor"),
-      h("span.hint", "mensagem → consultor → fila → simulação → resposta"),
-    ),
     h("div.monitor",
       h("div.console",
         h("div.console-head",
           h("span.title", "Fluxo operacional"),
-          h("div.seg", segButtons),
+          h("div.seg", { role: "group", "aria-label": "Filtrar eventos" }, segButtons),
           pauseBtn,
           livePill,
         ),
         body,
       ),
-      h("div.grid", { style: { gap: "16px" } }, connCard, activeCard, statsCard),
+      h("div.stack", conexao.node, execucao.node, numeros.node),
     ),
   );
 
-  function togglePause() {
-    paused = !paused;
-    pauseBtn.textContent = paused ? "Retomar" : "Pausar";
-    pauseBtn.classList.toggle("primary", paused);
-    if (!paused) drawFeed(store.get("feed"));
+  function alternarPausa() {
+    pausado = !pausado;
+    mount(pauseBtn, icon(pausado ? "send" : "pause", 14), pausado ? "Retomar" : "Pausar");
+    pauseBtn.classList.toggle("primary", pausado);
+    pauseBtn.classList.toggle("ghost", !pausado);
+    if (!pausado) desenharFeed(store.get("feed"));
   }
 
-  function matches(event) {
-    const rule = FILTERS.find((f) => f.id === filter);
-    if (!rule || rule.id === "all") return true;
-    if (rule.types) return rule.types.includes(event.type);
-    if (rule.levels) return rule.levels.includes(event.level);
+  function combina(event) {
+    const regra = FILTERS.find((f) => f.id === filter);
+    if (!regra || regra.id === "all") return true;
+    if (regra.types) return regra.types.includes(event.type);
+    if (regra.levels) return regra.levels.includes(event.level);
     return true;
   }
 
-  function drawFeed(items) {
-    if (paused) return;
-    const visible = items.filter(matches);
-    if (!visible.length) {
+  function desenharFeed(items) {
+    if (pausado) return;
+    const visiveis = items.filter(combina);
+    if (!visiveis.length) {
       mount(body, empty({
+        allana: filter === "all",
         mark: "monitor",
         title: filter === "all" ? "Aguardando atividade" : "Nada neste filtro",
         desc: filter === "all"
@@ -89,97 +90,82 @@ export function render(root) {
       }));
       return;
     }
-    replaceKeepingScroll(body, h("div.feed", visible.map(feedRow)));
+    replaceKeepingScroll(body, h("div.feed", visiveis.map(feedRow)));
   }
 
-  function drawConnection(wa) {
-    const connected = wa.connected;
-    mount(connCard,
-      h("header", h("h3", "WhatsApp")),
+  function desenharConexao(wa) {
+    const estado = wa.state || (wa.connected ? "connected" : "disconnected");
+    conexao.set(
       h("div", { style: { display: "flex", alignItems: "center", gap: "12px", marginBottom: "14px" } },
-        statusDot(wa.state, { large: true, pulse: connected }),
+        statusDot(estado, { large: true, pulse: Boolean(wa.connected) }),
         h("div",
-          h("strong", { style: { fontSize: "16px" } }, stateLabel(wa.state)),
-          h("div.muted", { style: { fontSize: "12px" } },
-            wa.phone || wa.chat_name || wa.group_name || "—"),
+          h("strong", { style: { fontSize: "var(--t-h3)" } }, WHATSAPP_LABEL[estado] || "Desconhecido"),
+          h("div.muted", { style: { fontSize: "var(--t-meta)" } },
+            wa.chat_name || wa.group_name || wa.phone || "—"),
         ),
       ),
-      h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } },
+      h("div.toolbar", { style: { marginBottom: 0 } },
         chip("Recebidas", fmt.int(wa.received)),
         chip("Enviadas", fmt.int(wa.sent)),
-        connected && chip("Online há", fmt.uptime(wa.online_since)),
+        wa.connected ? chip("Online há", fmt.uptime(wa.online_since)) : null,
       ),
-      wa.last_error && !connected
-        ? h("div.muted", { style: { marginTop: "12px", fontSize: "12px" } }, wa.last_error)
+      wa.last_error && !wa.connected
+        ? h("p.muted", { style: { marginTop: "12px", fontSize: "var(--t-meta)" } }, wa.last_error)
         : null,
     );
   }
 
-  function drawActive(queue) {
-    const running = (queue.items || []).filter((i) => i.status === "processing");
-    mount(activeCard,
-      h("header", h("h3", "Em execução"), h("span.hint", `${queue.depth || 0} na fila`)),
-      running.length
-        ? h("div.grid", { style: { gap: "10px" } }, running.map((item) =>
-          h("div", { style: { display: "grid", gap: "6px" } },
-            h("div", { style: { display: "flex", gap: "8px", alignItems: "center" } },
-              badge(item.stage, item.stage_label),
-              h("span.mono.muted", { style: { fontSize: "11px" } }, item.request_id),
-            ),
-            h("div", { style: { fontSize: "13px" } }, item.consultant_name || "—"),
-            h("div.muted", { style: { fontSize: "12px" } },
-              `contrato ${item.contract || "—"}`,
-              item.elapsed_seconds ? ` · ${fmt.duration(item.elapsed_seconds)}` : "",
-              item.attempts > 1 ? ` · tentativa ${item.attempts}` : ""),
-          )))
-        : empty({ mark: "clock", title: "Ocioso", desc: "Nenhuma simulação em execução." }),
-    );
+  function desenharExecucao(queue) {
+    const rodando = (queue.items || []).filter((i) => i.status === "processing");
+    execucao.setHint(`${queue.depth || 0} na fila`);
+    execucao.set(rodando.length
+      ? h("div.stack", rodando.map((item) =>
+        h("div",
+          h("div", { style: { display: "flex", gap: "8px", alignItems: "center", marginBottom: "4px" } },
+            stateBadge(item.stage, item.stage_label),
+            h("span.mono.muted", { style: { fontSize: "var(--t-meta)" } }, item.request_id),
+          ),
+          h("div", item.consultant_name || "—"),
+          h("div.cell-sub",
+            `contrato ${item.contract || "—"}`,
+            item.elapsed_seconds ? ` · ${fmt.duration(item.elapsed_seconds)}` : "",
+            item.attempts > 1 ? ` · tentativa ${item.attempts}` : ""),
+        )))
+      : empty({ compact: true, mark: "clock", title: "Ocioso", desc: "Nenhuma simulação em execução." }));
   }
 
-  function drawStats(metrics) {
+  function desenharNumeros(metrics) {
     const k = metrics?.kpis;
-    mount(statsCard,
-      h("header", h("h3", "Hoje")),
-      k
-        ? h("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" } },
-          chip("Solicitações", fmt.int(k.today)),
-          chip("Concluídas", fmt.int(k.today_completed)),
-          chip("Erros", fmt.int(k.errors)),
-          chip("Tempo médio", fmt.duration(k.avg_seconds)),
-        )
-        : h("div.muted", "Carregando…"),
-    );
+    numeros.set(k
+      ? h("div.toolbar", { style: { marginBottom: 0 } },
+        chip("Solicitações", fmt.int(k.today)),
+        chip("Concluídas", fmt.int(k.today_completed)),
+        chip("Erros", fmt.int(k.errors)),
+        chip("Tempo médio", fmt.duration(k.avg_seconds)),
+      )
+      : h("p.muted", "Carregando…"));
   }
 
-  function drawLive(stream) {
-    livePill.dataset.live = String(stream.connected);
+  function desenharAoVivo(s) {
+    livePill.dataset.live = String(s.connected);
     mount(livePill,
-      statusDot(stream.connected ? "connected" : "error", { pulse: stream.connected }),
-      stream.connected ? "AO VIVO" : "RECONECTANDO",
+      statusDot(null, { tone: s.connected ? "success" : "error", pulse: s.connected }),
+      s.connected ? "AO VIVO" : "RECONECTANDO",
     );
   }
 
-  drawFeed(store.get("feed"));
-  drawConnection(store.get("whatsapp"));
-  drawActive(store.get("queue"));
-  drawStats(store.get("metrics"));
-  drawLive(store.get("stream"));
+  desenharFeed(store.get("feed"));
+  desenharConexao(store.get("whatsapp"));
+  desenharExecucao(store.get("queue"));
+  desenharNumeros(store.get("metrics"));
+  desenharAoVivo(store.get("stream"));
 
   const off = [
-    store.subscribe("feed", drawFeed),
-    store.subscribe("whatsapp", drawConnection),
-    store.subscribe("queue", drawActive),
-    store.subscribe("metrics", drawStats),
-    store.subscribe("stream", drawLive),
+    store.subscribe("feed", desenharFeed),
+    store.subscribe("whatsapp", desenharConexao),
+    store.subscribe("queue", desenharExecucao),
+    store.subscribe("metrics", desenharNumeros),
+    store.subscribe("stream", desenharAoVivo),
   ];
   return () => off.forEach((fn) => fn());
-}
-
-export function stateLabel(state) {
-  return {
-    connected: "Conectado",
-    disconnected: "Desconectado",
-    qr: "Aguardando QR Code",
-    starting: "Conectando…",
-  }[state] || "Desconhecido";
 }

@@ -40,7 +40,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import analytics
 from .clock import now_iso, range_bounds
-from .evolution_webhook import MemoriaDeIds, interpretar
+from .evolution_webhook import interpretar_todos
 from .config import Config
 from .db import Database
 from .events import EventHub
@@ -120,6 +120,10 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
                 status_code=429,
                 detail=f"muitas tentativas, aguarde {login_limiter.retry_after(client)}s",
             )
+        if not (config.dashboard_password or "").strip():
+            raise HTTPException(
+                status_code=401,
+                detail="painel sem senha configurada: defina DASHBOARD_PASSWORD no .env")
         if not check_password(password, config.dashboard_password):
             manager.log("WARNING", "auth", f"Tentativa de login inválida de {client}.")
             raise HTTPException(status_code=401, detail="senha inválida")
@@ -153,16 +157,28 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
         except Exception:
             whatsapp = "unknown"
         simulators = [s for s in manager.simulators if getattr(s, "running", False)]
-        return {
-            "status": "ok",
-            "services": {
-                "web": True,
-                "whatsapp": whatsapp,
-                "simulators_running": len(simulators),
-                "simulators_total": len(manager.simulators),
-                "queue_depth": manager.queue.depth(),
-            },
+        servicos = {
+            "web": True,
+            "whatsapp": whatsapp,
+            "simulators_running": len(simulators),
+            "simulators_total": len(manager.simulators),
+            "queue_depth": manager.queue.depth(),
         }
+        # Diagnostico da Evolution: so' booleanos e estado, para responder
+        # "por que está ligado e não responde?" sem sessão e sem expor nada.
+        try:
+            diagnostico = manager.diagnostico_do_whatsapp().get("evolution")
+        except Exception:
+            diagnostico = None
+        if diagnostico:
+            servicos["evolution"] = {
+                chave: diagnostico.get(chave) for chave in (
+                    "evolution_api_reachable", "api_key_valid", "instance_found",
+                    "evolution_state", "group_configured", "webhook_configured",
+                    "webhook_points_to_bot", "webhook_token_configured",
+                    "last_webhook_at", "checked_at")
+            }
+        return {"status": "ok", "services": servicos}
 
     @api.get("/api/session")
     async def session(request: Request):
@@ -241,8 +257,13 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
         row = db.fetchone("SELECT * FROM simulations WHERE id=?", (sim_id,))
         if not row:
             raise HTTPException(status_code=404, detail="simulação não encontrada")
+        # A evidencia de cada envio vai junto: qual mensagem foi citada, qual
+        # id o WhatsApp deu a resposta, a tentativa e o status HTTP. E' o que
+        # permite reconstruir um incidente sem abrir o banco na mao.
         messages = db.fetchall(
-            "SELECT id, direction, kind, text, media_path, status, created_at, consultant_name "
+            "SELECT id, direction, kind, text, media_path, status, created_at, consultant_name, "
+            "       wa_message_id, provider, attempt, origin_message_id, quoted_message_id, "
+            "       quote_status, quote_error, desfecho, http_status, media_id, error "
             "FROM messages WHERE simulation_id=? ORDER BY id ASC",
             (sim_id,),
         )
@@ -266,6 +287,35 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
             "contracts": contracts,
         }
 
+    @api.post("/api/simulations/{sim_id}/entrega")
+    async def resolver_entrega(sim_id: int, request: Request, usuario: str = Auth):
+        """Entrega incerta: o operador olhou o grupo e diz se chegou.
+
+        ``{"acao": "chegou"}`` fecha como entregue sem enviar nada;
+        ``{"acao": "nao_chegou"}`` libera um reenvio. 409 quando a entrega
+        ja' nao esta' incerta (outro clique ou outra aba chegou antes).
+        """
+        # So' JSON de verdade. Um <form enctype="text/plain"> de outra pagina
+        # do mesmo site monta um corpo parecido sem preflight; exigir o
+        # Content-Type fecha esse caminho.
+        tipo = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if tipo != "application/json":
+            raise HTTPException(status_code=415, detail="envie application/json")
+        try:
+            dados = await request.json()
+        except ValueError:
+            dados = {}
+        acao = str((dados if isinstance(dados, dict) else {}).get("acao") or "")
+        try:
+            resultado = manager.resolver_entrega_incerta(sim_id, acao, quem=usuario)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if not resultado["ok"]:
+            raise HTTPException(status_code=409, detail=resultado["motivo"])
+        return resultado
+
     @api.get("/api/comprovantes/{nome}")
     async def comprovante(nome: str, _: str = Auth):
         """Serve a imagem enviada ao grupo.
@@ -275,8 +325,9 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
         """
         if not re.fullmatch(r"REQ\d{1,12}\.png", nome):
             raise HTTPException(status_code=404, detail="não encontrado")
-        caminho = (COMPROVANTES_DIR / nome).resolve()
-        if not caminho.is_file() or caminho.parent != COMPROVANTES_DIR.resolve():
+        pasta = Path(getattr(manager, "comprovantes_dir", COMPROVANTES_DIR))
+        caminho = (pasta / nome).resolve()
+        if not caminho.is_file() or caminho.parent != pasta.resolve():
             raise HTTPException(status_code=404, detail="não encontrado")
         return FileResponse(caminho, media_type="image/png")
 
@@ -351,8 +402,6 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
     # Autenticacao propria, como a do agente. Ela recebe dado de cliente (nome
     # e CPF) e ENFILEIRA trabalho: deixa-la aberta seria dar a qualquer um na
     # rede o poder de mandar o bot simular o que quisesse.
-    memoria_de_ids = MemoriaDeIds()
-
     def require_webhook(request: Request) -> None:
         esperado = config.evolution_webhook_token
         if not esperado:
@@ -375,10 +424,12 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
         except Exception:
             raise HTTPException(status_code=400, detail="corpo não é JSON")
 
-        leitura = interpretar(payload, config.evolution_group_jid,
-                              config.whatsapp_group_name)
+        # A Evolution ALCANCOU o bot: e' o sinal que o diagnostico mostra.
+        manager.registrar_webhook()
+        leituras = interpretar_todos(payload, config.evolution_group_jid,
+                                     config.whatsapp_group_name)
 
-        if leitura.motivo == "connection.update":
+        if leituras[0].motivo == "connection.update":
             # A instancia caiu ou voltou. Refletir no painel na hora, em vez de
             # esperar o vigia: "conectado na tela e mudo no grupo" foi o pior
             # cenario da camada antiga.
@@ -388,32 +439,35 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
                             f"A instância da Evolution caiu (state={estado}).")
             return {"ok": True, "acao": "connection.update"}
 
-        if not leitura:
-            # 200 de proposito: ignorar nao e' erro, e devolver 4xx faria a
-            # Evolution reentregar para sempre uma mensagem que nunca vamos
-            # querer.
-            return {"ok": True, "ignorado": leitura.motivo}
+        respostas = []
+        for leitura in leituras:
+            if not leitura:
+                # 200 de proposito: ignorar nao e' erro, e devolver 4xx faria a
+                # Evolution reentregar para sempre uma mensagem que nunca vamos
+                # querer.
+                respostas.append({"ok": True, "ignorado": leitura.motivo})
+                continue
 
-        mensagem = leitura.mensagem
-        if memoria_de_ids.ja_visto(mensagem.message_id):
-            # Reentrega. Sem esta trava vira uma segunda simulacao do mesmo CPF
-            # e uma segunda resposta no grupo.
-            return {"ok": True, "ignorado": "já processado"}
+            if leitura.aviso:
+                manager.log("WARNING", "whatsapp", leitura.aviso)
 
-        if leitura.aviso:
-            manager.log("WARNING", "whatsapp", leitura.aviso)
+            # GRAVAR ANTES DE RESPONDER 200. A gravacao e' a trava contra
+            # reentrega (no banco, sobrevive a reinicio) e e' o que permite
+            # retomar a mensagem se o processo cair antes de trata-la. Se ela
+            # falhar, a excecao vira 500 e a Evolution reentrega -- que e'
+            # exatamente o comportamento certo.
+            recebida = manager.receber_mensagem(leitura.mensagem)
+            if recebida.get("aceita"):
+                respostas.append({"ok": True, "request": "enfileirada",
+                                  "message_id": leitura.mensagem.message_id})
+            else:
+                respostas.append({"ok": True, "ignorado": "já processado",
+                                  "message_id": leitura.mensagem.message_id,
+                                  "request_id": recebida.get("request_id", "")})
 
-        # O texto original fica guardado para montar a citacao no envio: a
-        # Evolution monta `quoted` com o key.id E o conteudo citado.
-        lembrar = getattr(manager.whatsapp, "lembrar_original", None)
-        if lembrar:
-            lembrar(mensagem.message_id, mensagem.text)
-
-        # Entregar pela MESMA fila que a camada antiga usa. E' o que permitiu
-        # nao tocar no laco de leitura do manager -- ele nao sabe de onde a
-        # mensagem veio.
-        manager.whatsapp.inbox.put(mensagem)
-        return {"ok": True, "request": "enfileirada"}
+        if len(respostas) == 1:
+            return respostas[0]
+        return {"ok": True, "mensagens": respostas}
 
     # -------------------------------------------------------- consultores
     @api.get("/api/consultants")

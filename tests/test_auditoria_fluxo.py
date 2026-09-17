@@ -327,8 +327,14 @@ class TestRetryNaoDuplica:
         import inspect
 
         from app.whatsapp import WhatsAppService
-        fonte = inspect.getsource(WhatsAppService._enviar_imagem)
+        # A confirmação mora em `_disparar_e_confirmar_imagem` (o trecho depois
+        # do clique); `_enviar_imagem` repete a checagem para QUALQUER falha
+        # depois do clique. As duas têm de procurar no chat antes de desistir.
+        fonte = inspect.getsource(WhatsAppService._disparar_e_confirmar_imagem)
         assert "_ja_esta_no_chat" in fonte, (
             "sem essa checagem, uma confirmação falha duplica a resposta")
         assert fonte.index("_ja_esta_no_chat") < fonte.index("envio não confirmado"), (
             "a checagem tem de vir ANTES de desistir")
+        envio = inspect.getsource(WhatsAppService._enviar_imagem)
+        assert envio.index("_ja_esta_no_chat") < envio.index("raise EnvioSemProva"), (
+            "falha depois do clique tem de procurar no chat antes de declarar incerta")

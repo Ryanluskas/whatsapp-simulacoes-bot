@@ -105,6 +105,9 @@ class Painel:
     def result(self, request_id: str, resultado: SimulationResult) -> bool:
         status, _ = self._post("/api/agent/result", {
             "request_id": request_id,
+            # Amarra o resultado a ESTA simulacao, e nao so' ao numero REQ.
+            "simulation_id": resultado.job.simulation_id,
+            "attempt": resultado.job.attempt,
             "ok": resultado.ok,
             "status": resultado.status,
             "error": resultado.error,
@@ -115,6 +118,7 @@ class Painel:
             "installment_sum": resultado.installment_sum,
             "installment_count": resultado.installment_count,
             "debt_sum": resultado.debt_sum,
+            "motivos": list(resultado.motivos or ()),
         })
         return status == 200
 

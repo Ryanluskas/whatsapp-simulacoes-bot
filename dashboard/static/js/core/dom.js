@@ -42,6 +42,11 @@ export const svg = (tag, props = {}) => {
     else if (key.startsWith("on") && typeof value === "function") {
       el.addEventListener(key.slice(2).toLowerCase(), value);
     } else if (key === "text") el.textContent = value;
+    // Cor de token (var(--...)) não vale como atributo de apresentação do
+    // SVG; como propriedade CSS vale. Assim os gráficos seguem tokens.css.
+    else if ((key === "fill" || key === "stroke") && String(value).startsWith("var(")) {
+      el.style.setProperty(key, value);
+    }
     else el.setAttribute(key, value);
   }
   return el;

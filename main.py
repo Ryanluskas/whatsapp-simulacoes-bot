@@ -24,6 +24,7 @@ from app.db import Database
 from app.events import EventHub
 from app.instancia import InstanciaEmUso, TravaDeInstancia, explicar
 from app.manager import BotManager
+from app.security import esta_exposto, problemas_de_seguranca
 from app.web import create_app
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -123,30 +124,24 @@ def main(argv: list[str] | None = None) -> int:
         load_dotenv(args.env, override=True)
     config = load_config(args.env)
 
-    if not config.session_secret or config.session_secret == "trocar-este-segredo":
-        log.warning(
-            "SESSION_SECRET não definido no .env: as sessões do painel serão "
-            "invalidadas a cada reinício."
-        )
-
-    # Senha padrão em localhost é descuido; escutando em todas as interfaces
-    # (que é como o container roda) é um painel com CPF de cliente aberto para
-    # quem alcançar a porta. Aí não é aviso, é parada.
-    senha_padrao = config.dashboard_password in {"admin", "", "senha", "123456"}
-    exposto = config.web_host not in {"127.0.0.1", "localhost", "::1"}
-    if senha_padrao and exposto:
-        log.error(
-            "RECUSANDO INICIAR: o painel escutaria em %s (acessível pela rede) "
-            "com a senha padrão. Defina DASHBOARD_PASSWORD no .env com uma "
-            "senha própria e suba de novo.",
-            config.web_host,
-        )
+    # A regra, dita em voz alta no log: em localhost os defaults passam com
+    # aviso (desenvolvimento); escutando na rede — que é como o container roda —
+    # configuração fraca é RECUSA DE PARTIDA. O painel mostra CPF de cliente.
+    problemas, avisos = problemas_de_seguranca(config)
+    if esta_exposto(config.web_host):
+        log.info("Painel EXPOSTO na rede (WEB_HOST=%s): exigindo senha e segredos fortes.",
+                 config.web_host)
+    else:
+        log.info("Painel em %s (só esta máquina): defaults aceitos para desenvolvimento.",
+                 config.web_host)
+    for aviso in avisos:
+        log.warning("%s (aceito porque o painel só escuta em %s)", aviso, config.web_host)
+    if problemas:
+        for problema in problemas:
+            log.error("RECUSANDO INICIAR: %s", problema)
+        log.error("Corrija o .env e suba de novo. Gere segredos com: "
+                  'python -c "import secrets; print(secrets.token_urlsafe(32))"')
         return 2
-    if senha_padrao:
-        log.warning(
-            "DASHBOARD_PASSWORD ainda é o valor padrão. Troque no .env — sem isso "
-            "o sistema se recusa a subir exposto na rede (Docker)."
-        )
     if not Path(config.sim_bot_path, "bot.py").exists():
         log.warning(
             "bot.py não encontrado em %s. O painel sobe, mas as simulações vão falhar "
@@ -170,6 +165,22 @@ def main(argv: list[str] | None = None) -> int:
     except InstanciaEmUso as conflito:
         print(explicar(conflito, config.whatsapp_profile_dir), flush=True)
         log.error("Recusando iniciar: %s", conflito)
+        return 1
+
+    # E um processo por BANCO. A trava do perfil mora em `.locks/` DENTRO do
+    # checkout: dois checkouts (ou duas portas) com o mesmo DB_PATH subiam
+    # juntos, e o `recover()` do segundo -- que roda antes de o servidor abrir
+    # a porta -- reclassificava as entregas em curso do primeiro. Uma entrega
+    # renderizando a imagem virava "reenvio": duas respostas no grupo. A trava
+    # do banco fica AO LADO do banco, entao qualquer processo que o abra colide.
+    banco = Path(config.db_path).resolve()
+    trava_do_banco = TravaDeInstancia(banco, rotulo="bot (main.py)", pasta=banco.parent)
+    try:
+        trava_do_banco.adquirir()
+    except InstanciaEmUso as conflito:
+        print(explicar(conflito, banco), flush=True)
+        log.error("Recusando iniciar: outro processo usa o mesmo banco (%s)", conflito)
+        trava.liberar()
         return 1
 
     db = Database(config.db_path)
@@ -214,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
         # sinal nao passa pelo atexit em todos os casos, e um lock orfao faria
         # o proximo boot recusar subir sem motivo.
         trava.liberar()
+        trava_do_banco.liberar()
     return 0
 
 

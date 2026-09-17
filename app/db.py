@@ -134,6 +134,8 @@ CREATE INDEX IF NOT EXISTS idx_sim_contract    ON simulations(contract);
 CREATE INDEX IF NOT EXISTS idx_msg_created     ON messages(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_msg_simulation  ON messages(simulation_id);
 CREATE INDEX IF NOT EXISTS idx_msg_waid        ON messages(wa_message_id);
+CREATE INDEX IF NOT EXISTS idx_sim_source_msg  ON simulations(source_message_id);
+CREATE INDEX IF NOT EXISTS idx_sim_delivery    ON simulations(delivery_status);
 CREATE INDEX IF NOT EXISTS idx_evt_created     ON events(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_evt_request     ON events(request_id);
 CREATE INDEX IF NOT EXISTS idx_log_created     ON logs(created_at DESC);
@@ -170,6 +172,31 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "queued_at": "TEXT",
         "replied_at": "TEXT",
         "updated_at": "TEXT",
+        # --- origem: o que a resposta precisa, sem depender de memoria ---
+        # Com isto a citacao sobrevive a reinicio: o texto citado e o autor
+        # vinham de um dicionario em RAM, e depois de reiniciar a citacao
+        # saia vazia.
+        "chat_name": "TEXT DEFAULT ''",
+        "participant": "TEXT DEFAULT ''",
+        "source_timestamp": "TEXT DEFAULT ''",
+        # --- entrega, separada do resultado (ver models.Delivery) ---
+        # 1/0 quando a simulacao terminou; NULL enquanto nao. E' o que impede
+        # um reinicio no meio da ENTREGA de simular de novo no portal.
+        "result_ok": "INTEGER",
+        "delivery_status": "TEXT DEFAULT ''",
+        "delivery_error": "TEXT DEFAULT ''",
+        "next_delivery_at": "TEXT",
+        "sent_message_id": "TEXT DEFAULT ''",
+        "quote_status": "TEXT DEFAULT ''",
+        # Por que a CITACAO foi recusada. Separado de delivery_error: citacao
+        # recusada nao e' entrega falha (ver models.QuoteStatus).
+        "quote_error": "TEXT DEFAULT ''",
+        "media_status": "TEXT DEFAULT ''",
+        # Quem desempatou uma entrega incerta no painel, e como:
+        # "manual:chegou" | "manual:nao_chegou". Vazio = ninguem precisou.
+        "delivery_resolution": "TEXT DEFAULT ''",
+        "delivery_resolved_by": "TEXT DEFAULT ''",
+        "delivery_resolved_at": "TEXT DEFAULT ''",
     },
     "messages": {
         "request_id": "TEXT",
@@ -178,8 +205,40 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "wa_message_id": "TEXT",
         "consultant_id": "INTEGER",
         "media_path": "TEXT",
+        # --- entrada: tudo que identifica a mensagem original ---
+        "chat_name": "TEXT DEFAULT ''",
+        "sender_name": "TEXT DEFAULT ''",
+        "participant": "TEXT DEFAULT ''",
+        "wa_timestamp": "TEXT DEFAULT ''",
+        # --- saida: evidencia de cada tentativa de envio ---
+        "provider": "TEXT DEFAULT ''",
+        "attempt": "INTEGER",
+        "origin_message_id": "TEXT DEFAULT ''",
+        "quoted_message_id": "TEXT DEFAULT ''",
+        "quote_status": "TEXT DEFAULT ''",
+        "quote_error": "TEXT DEFAULT ''",
+        # Como a requisicao terminou (models.Desfecho): entregue, incerta,
+        # transitoria, recusada... E' o que diz se a mensagem PODE ter saido.
+        "desfecho": "TEXT DEFAULT ''",
+        "http_status": "INTEGER",
+        "media_id": "TEXT DEFAULT ''",
+        "error": "TEXT DEFAULT ''",
+        "response_excerpt": "TEXT DEFAULT ''",
     },
 }
+
+#: Estados da mensagem RECEBIDA (``messages.status`` com ``direction='in'``).
+#: ``received`` e' "gravada, ainda nao tratada": e' o que o boot retoma.
+ENTRADA_RECEBIDA = "received"
+ENTRADA_IGNORADA = "ignored"      # conversa comum, nao e' pedido
+ENTRADA_RECUSADA = "rejected"     # pedido sem dado ou de banco nao atendido
+ENTRADA_SOLICITACAO = "request"   # virou uma solicitacao (REQ)
+ENTRADA_EXPIRADA = "expired"      # ficou sem tratar tempo demais
+
+#: ``messages.status`` de uma SAIDA gravada antes de chamar a API. Se o
+#: processo cair durante a chamada, a linha fica assim -- e e' ela que avisa
+#: o proximo boot que a mensagem PODE ter saido (ver jobs.QueueService).
+ENVIO_EM_CURSO = "sending"
 
 
 class Database:
@@ -255,6 +314,12 @@ class Database:
             "UPDATE consultants SET wa_id=NULL, phone='' "
             "WHERE phone IN ('false','true') OR wa_id IN ('false','true')"
         )
+        # Entregas antigas ja' confirmadas ganham o estado explicito. As nao
+        # confirmadas ficam vazias (legado) e seguem a regra antiga do reenvio.
+        conn.execute(
+            "UPDATE simulations SET delivery_status='delivered' "
+            "WHERE replied_at IS NOT NULL AND COALESCE(delivery_status,'')=''"
+        )
         conn.execute(
             "INSERT INTO meta(key,value) VALUES('schema_migrated_at',?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -296,6 +361,43 @@ class Database:
         sql = f"UPDATE {table} SET {set_clause} WHERE {where_clause}"
         with self.write() as conn:
             return conn.execute(sql, tuple(data.values()) + tuple(where.values())).rowcount
+
+    # ------------------------------------------------------- mensagem recebida
+    def registrar_entrada(self, dados: dict) -> dict:
+        """Grava a mensagem recebida UMA vez. Consultar e gravar sao atomicos.
+
+        E' a trava de idempotencia: duas entregas do mesmo webhook (a
+        Evolution reentrega quando nao recebe 200 a tempo) nao podem virar
+        duas simulacoes -- nem em paralelo, nem depois de um reinicio. A
+        versao anterior guardava os ids vistos num dicionario em RAM; um
+        reinicio apagava a memoria e a reentrega passava.
+
+        A chave e' (chat_id, wa_message_id). Sem id nao ha' como deduplicar,
+        e a mensagem entra sempre.
+
+        Devolve ``{"id", "novo", "status", "simulation_id", "request_id"}``.
+        """
+        message_id = (dados.get("wa_message_id") or "").strip()
+        chat_id = dados.get("chat_id") or ""
+        with self.write() as conn:
+            if message_id:
+                row = conn.execute(
+                    "SELECT id, status, simulation_id, request_id FROM messages "
+                    " WHERE direction='in' AND wa_message_id=? AND COALESCE(chat_id,'')=? "
+                    " ORDER BY id LIMIT 1",
+                    (message_id, chat_id),
+                ).fetchone()
+                if row is not None:
+                    return {**dict(row), "novo": False}
+            registro = {"direction": "in", "status": ENTRADA_RECEBIDA, **dados}
+            cols = list(registro)
+            cur = conn.execute(
+                f"INSERT INTO messages ({','.join(cols)}) "
+                f"VALUES ({','.join('?' for _ in cols)})",
+                tuple(registro.values()),
+            )
+            return {"id": cur.lastrowid, "status": ENTRADA_RECEBIDA,
+                    "simulation_id": None, "request_id": None, "novo": True}
 
     # ------------------------------------------------------------------ meta
     def set_meta(self, key: str, value: str) -> None:

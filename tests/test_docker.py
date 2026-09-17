@@ -191,8 +191,9 @@ class TestGuardaDeExposicao:
             "WEB_HOST": "0.0.0.0",
             "WEB_PORT": "8899",
             "DASHBOARD_PASSWORD": "admin",
+            "SESSION_SECRET": "segredo-de-teste-bem-longo-mesmo",
             "SIMULATOR_MODE": "remote",
-            "AGENT_TOKEN": "x",
+            "AGENT_TOKEN": "token-de-agente-bem-longo",
             "SIM_BOT_PATH": str(tmp_path / "sem-bot"),
             "DB_PATH": str(tmp_path / "t.db"),
             "STATE_PATH": str(tmp_path / "s.json"),
@@ -218,11 +219,39 @@ class TestGuardaDeExposicao:
         assert entrada.main(
             ["--env", self._env(tmp_path, DASHBOARD_PASSWORD=senha)]) == 2
 
+    @pytest.mark.parametrize("chave,valor", [
+        ("SESSION_SECRET", ""),                    # sorteado a cada partida: sessões caem
+        ("SESSION_SECRET", "troque-por-um-valor-longo-e-aleatorio"),   # placeholder: forjável
+        ("AGENT_TOKEN", "x"),                      # token curto no modo remoto
+    ])
+    def test_recusa_exposto_com_segredo_fraco(self, tmp_path, monkeypatch, chave, valor):
+        """Exposto na rede, segredo fraco é recusa de partida -- não aviso."""
+        import main as entrada
+
+        for nome in ("WEB_HOST", "DASHBOARD_PASSWORD", "SIMULATOR_MODE",
+                     "SESSION_SECRET", "AGENT_TOKEN"):
+            monkeypatch.delenv(nome, raising=False)
+        env = self._env(tmp_path, DASHBOARD_PASSWORD="uma-senha-de-verdade", **{chave: valor})
+        assert entrada.main(["--env", env]) == 2
+
+    def test_em_localhost_os_defaults_passam_com_aviso(self, tmp_path, monkeypatch):
+        """Desenvolvimento não pode virar cerimônia: em 127.0.0.1 sobe."""
+        import main as entrada
+
+        for nome in ("WEB_HOST", "DASHBOARD_PASSWORD", "SIMULATOR_MODE",
+                     "SESSION_SECRET", "AGENT_TOKEN"):
+            monkeypatch.delenv(nome, raising=False)
+        monkeypatch.setattr(entrada.uvicorn, "run", lambda *a, **k: None)
+        env = self._env(tmp_path, WEB_HOST="127.0.0.1", DASHBOARD_PASSWORD="admin",
+                        SESSION_SECRET="", AGENT_TOKEN="x")
+        assert entrada.main(["--env", env]) == 0
+
     def test_com_senha_propria_a_guarda_libera(self, tmp_path, monkeypatch):
         """Não pode barrar quem configurou direito — só chega a subir o servidor."""
         import main as entrada
 
-        for chave in ("WEB_HOST", "DASHBOARD_PASSWORD", "SIMULATOR_MODE"):
+        for chave in ("WEB_HOST", "DASHBOARD_PASSWORD", "SIMULATOR_MODE",
+                      "SESSION_SECRET", "AGENT_TOKEN"):
             monkeypatch.delenv(chave, raising=False)
 
         # Corta em uvicorn.run: interessa saber que a guarda deixou passar.
@@ -236,6 +265,55 @@ class TestGuardaDeExposicao:
             ["--env", self._env(tmp_path, DASHBOARD_PASSWORD="uma-senha-de-verdade")])
         assert codigo == 0
         assert chamou["sim"], "a guarda barrou uma configuração válida"
+
+
+class TestTextoDoSessionSecret:
+    """Cada caso de SESSION_SECRET fraco diz o risco que ele TEM.
+
+    O texto antigo dizia "qualquer um pode forjar um cookie" também para o
+    vazio -- e vazio não é forjável: o segredo é sorteado a cada partida. O
+    custo real ali é outro (todo mundo deslogado a cada reinício).
+    """
+
+    def test_vazio_nao_fala_em_forjar(self):
+        from app.security import problema_do_session_secret
+
+        texto = problema_do_session_secret("")
+        assert "sorteado a cada partida" in texto
+        assert "deslogado" in texto
+        assert "Não dá para forjar" in texto
+
+    def test_placeholder_e_forjavel(self):
+        from app.security import problema_do_session_secret
+
+        texto = problema_do_session_secret("troque-por-um-valor-longo-e-aleatorio")
+        assert "placeholder" in texto and "cookie de sessão válido" in texto
+
+    def test_curto_e_forca_bruta(self):
+        from app.security import problema_do_session_secret
+
+        texto = problema_do_session_secret("curtinho")
+        assert "força bruta" in texto and "8 caracteres" in texto
+
+    def test_segredo_bom_nao_reclama(self):
+        from app.security import problema_do_session_secret
+
+        assert problema_do_session_secret("um-segredo-longo-e-aleatorio-de-verdade") == ""
+
+    def test_vazio_realmente_nao_e_forjavel(self):
+        """A afirmação do texto, verificada: sem segredo, um cookie assinado
+        por outro processo (ou com a chave vazia) não vale."""
+        import base64
+        import hashlib
+        import hmac
+
+        from app.security import SessionManager
+
+        corpo = "admin.9999999999.abcd"
+        forjado = base64.urlsafe_b64encode(
+            hmac.new(b"", corpo.encode(), hashlib.sha256).digest()).decode().rstrip("=")
+        assert SessionManager("").verify(f"{corpo}.{forjado}") is None
+        assert SessionManager("").verify(SessionManager("").issue()) is None
 
 
 class TestServicoDaEvolution:

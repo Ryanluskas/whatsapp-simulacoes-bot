@@ -28,11 +28,12 @@ WhatsApp por engenharia reversa. **Existe risco de banimento do número.** O
 código já mantém `delay` de 1,2 s entre envios por esse motivo — não remova.
 Se puder, use um número que não seja o seu principal.
 
-**2. Licença.** Da v2.4.0 em diante a instância precisa ser ativada contra o
-servidor da Evolution Foundation antes de servir tráfego. Sem isso **todo
-endpoint responde 503** e você vai caçar erro de payload que não existe. A
-ativação é gratuita e sem limite de instâncias, mas é um passo manual no
-`/manager`. A imagem está presa em `v2.4.1` no `docker-compose.yml`.
+**2. Versão e licença.** A imagem está presa em `v2.3.7` no
+`docker-compose.yml`: é a última estável publicada no Docker Hub (a `v2.4.1`
+que constava aqui não existe; a 2.4.0 só saiu como release candidate). A
+v2.3.7 sobe sem ativação de licença. Se um dia subir para a 2.4, a instância
+precisa ser ativada no `/manager` contra o servidor da Evolution Foundation —
+sem isso **todo endpoint responde 503**, e o `evolution_check` avisa.
 
 **3. LID.** O WhatsApp está trocando os identificadores: o remetente pode
 chegar como `@lid` em vez de `@s.whatsapp.net`, e aí o número antes do `@`
@@ -64,8 +65,9 @@ Suba (a Evolution está em perfil próprio, não sobe junto com o painel):
 docker compose --profile evolution up -d
 ```
 
-**Abra `http://localhost:8080/manager` e faça a ativação da licença.** Não
-pule: sem ela, tudo abaixo responde 503.
+Na v2.3.7 não há ativação de licença. (Na 2.4+, abra
+`http://localhost:8080/manager` e ative antes de tudo: sem isso, tudo abaixo
+responde 503.)
 
 Crie a instância:
 
@@ -162,6 +164,180 @@ Só aponte para o grupo real depois de passar nos seis:
 
 ---
 
+## Como a entrega funciona na camada Evolution
+
+Estas regras valem a partir desta versão e estão travadas por
+`tests/test_producao.py` (unidade) e `ferramentas/e2e_simulado.py` (processo
+real com Evolution e agente falsos).
+
+**Idempotência.** O webhook grava a mensagem no banco (`messages`,
+`direction='in'`) ANTES de responder 200. A gravação é a trava: a mesma
+`key.id` no mesmo chat nunca vira segunda solicitação — nem em paralelo, nem
+depois de reiniciar. Se o processo cair entre o 200 e a criação do `REQ`, o
+boot retoma a mensagem (`status='received'`).
+
+**Citação.** O `quoted` é montado com o que ficou gravado da mensagem
+original: `key.id`, `remoteJid`, `participant` (o autor, como chegou — pode
+ser `@lid`) e o texto. Nada vem de memória em RAM. A resposta da Evolution é
+conferida: `contextInfo.stanzaId` igual ao id pedido = citação confirmada.
+
+**Citação recusada.** SÓ quando a Evolution responde 400/422 apontando o
+`quoted` (e sem sinal de erro pós-envio): a resposta sai de novo SEM `quoted`,
+com a versão que termina em `↩ <consultor>`. Falha de citação não é falha de
+resposta.
+
+**500 NÃO é citação recusada.** Era, e esse era o defeito mais perigoso: um
+500 podia ser erro DEPOIS de a mensagem sair, e o reenvio sem citação
+entregava o resultado duas vezes no grupo. Hoje 500, timeout de leitura,
+conexão caída depois de enviar e 2xx sem `key.id` são **entrega incerta**.
+
+**Imagem.** Renderizada num arquivo provisório, validada (PNG legível:
+assinatura, CRC, dados descomprimidos batendo com as dimensões) e só então
+movida para `comprovantes/<REQ>.png`. Falhou render, validação ou envio → a
+resposta sai em texto.
+
+**A pergunta que decide tudo: a mensagem pode ter saído?** Só se a resposta
+PROVAR que nada saiu é que o bot manda outra (sem citação, em texto, ou mais
+tarde). Na dúvida, ele registra e para.
+
+Toda resposta passa por UMA função (`classificar_resposta` /
+`classificar_falha_de_transporte`, em `app/evolution.py`), que devolve a
+**categoria** (o que a resposta disse) e o **desfecho** (o que o envio faz).
+Travado em `tests/test_contrato_entrega.py`.
+
+| Evento | Categoria | `delivery_status` | Ação | Pode duplicar? |
+|---|---|---|---|---|
+| 2xx com `key.id` | — | `delivered` | grava o id; fim | não |
+| 2xx sem `key.id` | UNCERTAIN | `unconfirmed` | nada por cima, nada de reenvio | não (decisão manual) |
+| 2xx com `key.id` e `status: "ERROR"` | — | `unconfirmed` | a mensagem foi criada, o WhatsApp não a aceitou; nada de reenvio | não (decisão manual) |
+| 2xx com corpo ilegível | UNCERTAIN | `unconfirmed` | idem | não |
+| POST aceito e a leitura da resposta quebra (exceção) | — | `delivered` com `key.id` legível; senão `unconfirmed` | nunca "transitório" | não |
+| 400/422 apontando o `quoted` (palavra `quoted`, `stanzaId`, `contextInfo`) | QUOTE_REJECTED | `delivered` se o envio sem citação sair | UM envio SEM citação, com `↩ consultor` | não: a recusa prova que nada saiu |
+| 400/422 de validação (`requires property`, `must be`, `exists:false`, `inválid`…) | VALIDATION_REJECTED | imagem → cai para texto; texto → `failed` | não repete a mesma requisição | não |
+| 400/422 com sinal pós-envio (`prisma`, `database`, `timeout`, S3/MinIO, RabbitMQ, SQS, websocket…) | POST_SEND_ERROR | `unconfirmed` | nada; vence a marca de citação | não |
+| 400/422 sem explicação | UNCERTAIN | `unconfirmed` | não cai para texto | não |
+| 401 / 403 / 404 / licença | PERMANENT | `failed` | não repete | não |
+| 408 / 429 / 503 | TRANSIENT | `retrying` | repete a MESMA requisição (com citação) | não: nada foi processado |
+| 500, 502, 504 e outros 5xx | UNCERTAIN | `unconfirmed` | **nunca** reenvio sem citação. 502/504 vêm de proxy: a Evolution pode ter enviado | não |
+| timeout de conexão, conexão recusada, falha ao subir o corpo | TRANSIENT | `retrying` | repete | não |
+| timeout de leitura, connection reset, protocolo quebrado, erro ao decodificar | UNCERTAIN | `unconfirmed` | nada | não |
+
+**`unconfirmed` quer dizer**: "a API não permitiu provar se saiu". O painel
+mostra **"Entrega incerta — verificar WhatsApp"**, o log traz `attempt`,
+`origin_message_id`, `quoted_message_id`, `http`, `quote_status` e o erro, e
+**ninguém reenvia sozinho** — uma segunda mensagem no grupo é pior que uma
+entrega que precisa ser conferida.
+
+**Quem confere decide no painel.** No detalhe da solicitação aparecem dois
+botões (e a rota `POST /api/simulations/{id}/entrega`):
+
+* **Chegou no grupo** (`{"acao": "chegou"}`) — fecha como entregue; nada é
+  enviado; `delivery_resolution = manual:chegou`;
+* **Não chegou — reenviar** (`{"acao": "nao_chegou"}`) — libera **um**
+  reenvio pelo laço de sempre, citando o mesmo pedido, mesmo com as
+  tentativas esgotadas; `delivery_resolution = manual:nao_chegou`.
+
+A troca só vale enquanto a linha está `unconfirmed` (UPDATE condicional): dois
+cliques ou duas abas não viram dois reenvios — o segundo recebe 409. Quem
+decidiu e quando ficam em `delivery_resolved_by` / `delivery_resolved_at`, no
+log e na timeline (`delivery_manual`).
+
+**"Não chegou" vale uma vez por solicitação.** Se o reenvio liberado também
+ficar incerto, o painel só oferece "Chegou no grupo" e a rota responde 409 a
+um segundo "não chegou": o bot não entra num ciclo de reenvios sobre uma
+entrega que ninguém consegue provar. (Se a resposta de fato não estiver no
+grupo, copie o resultado do painel à mão.)
+
+**`quoted_ok` só com prova.** `unverified` (sem `stanzaId` na resposta) sai com
+a versão curta da legenda, porque a requisição foi COM `quoted` — mas
+`quoted_ok` fica `false` e o log diz "Citação enviada, mas NÃO confirmada", não
+"recusada".
+
+**Falha transitória**: `delivery_status = retrying`, etapa `delivery_retry`. O
+laço de reenvio tenta de novo na MESMA solicitação (30 s, 60 s, 120 s… até 5
+vezes), citando a mesma mensagem.
+
+**`completed` só depois de a ENTREGA se resolver.** Enquanto a resposta sobe,
+a solicitação fica `processing/replying`. Quando o envio termina ela vira
+`completed` (ou `error`, se a simulação falhou) — **mesmo que a entrega tenha
+ficado `unconfirmed` ou `retrying`**: `status` é da simulação, `delivery_status`
+é da entrega, e o painel mostra os dois. Um reinício nesse meio NÃO simula de
+novo no Santander.
+
+**Reinício no meio de um envio.** A linha da saída é gravada como `sending`
+ANTES da chamada à API. Ao voltar, o bot decide pelo que está gravado, nunca
+por palpite:
+
+* saída que não está `failed`, `unconfirmed` nem `sending` → **entregue** (só
+  faltou gravar o desfecho);
+* saída em `sending` (a chamada tinha começado) ou `unconfirmed` (a API
+  respondeu sem provar) → **incerta**: a mensagem pode ter saído; não reenvia.
+  Vale mesmo se a simulação ainda estiver `pending` — saída e simulação são
+  gravadas em momentos diferentes, e uma queda entre as duas não pode virar
+  reenvio;
+* nenhuma saída que possa ter saído → vai para o reenvio.
+
+Só o "Não chegou — reenviar" do painel tira uma saída incerta dessa conta: ela
+vira `failed`, com `[conferido no painel: não chegou]` no erro.
+
+| O processo morreu… | Depois do reinício | Santander de novo? | WhatsApp de novo? |
+|---|---|---|---|
+| A. antes de gravar `sending` | nada saiu → `retrying` → 1 reenvio | não | sim, uma vez (nada tinha saído) |
+| B. depois de `sending`, antes do POST | `unconfirmed` (no banco é igual a C) | não | não |
+| C. durante o POST | `unconfirmed` | não | não |
+| D. a API devolveu `key.id`, antes de persistir | `unconfirmed` (a prova não foi gravada) | não | não |
+| E. depois de persistir `wa_message_id` | `delivered`, com o id gravado | não | não |
+| F. depois de `delivery_status=delivered` | nada muda | não | não |
+| G. durante a simulação (sem resultado) | volta para a fila | **sim** (único caso) | uma vez, com o resultado |
+
+Travado em `tests/test_producao.py::TestReinicioEmCadaPontoDaEntrega`.
+
+**Evidência.** Cada tentativa de envio vira uma linha em `messages`
+(`direction='out'`) com `provider`, `attempt`, `origin_message_id`,
+`quoted_message_id`, `quote_status`, `wa_message_id` (id devolvido),
+`http_status`, `media_id` e `error`. A solicitação guarda o resumo:
+`delivery_status`, `quote_status`, `media_status`, `sent_message_id`.
+
+### Diagnóstico da instância
+
+```bash
+.venv/Scripts/python.exe -m app.evolution_diagnostico
+```
+
+Só estado, em JSON: `reachable`, `api_key_valid`, `instance`, `instance_found`,
+`state`, `webhook` (ligado? aponta para o bot?), `group_configured`,
+`webhook_token_configured` — nunca chave, token, URL, JID ou telefone. Pode
+ser colado num chamado. Sai com 0 quando está tudo pronto, 1 quando falta
+algo e 2 quando o `.env` não tem nem URL/chave/instância (e diz o que falta).
+
+O painel (aba **Status**) e o `/api/health` respondem, sem expor chave nem
+token: a Evolution responde? a chave é aceita? a instância existe e está
+conectada? há webhook configurado apontando para `/webhook/whatsapp`? e
+**quando chegou o último webhook** — o único sinal que prova o caminho de
+volta inteiro. É por aí que se responde "está ligado e não responde, por quê?".
+
+### O que ainda precisa ser validado com a Evolution de verdade
+
+O servidor falso responde no formato da v2, mas não é a Evolution. No grupo
+de teste, confira em especial:
+
+1. se a Evolution aceita `quoted.key.participant` (se recusar, o fallback
+   manda sem citação e o log mostra `A Evolution RECUSOU a citação`);
+2. se a resposta de `sendText`/`sendMedia` traz `message.*.contextInfo.stanzaId`
+   (se não trouxer, `quote_status` fica `unverified` em vez de `ok` — nunca o
+   contrário). Guarde a resposta e rode:
+
+   ```bash
+   .venv/Scripts/python.exe ferramentas/conferir_resposta_evolution.py resposta.json --quote ID_DO_PEDIDO
+   ```
+
+   Para travar o formato num teste, aponte `EVOLUTION_RESPOSTAS_REAIS` para a
+   pasta das capturas (elas ficam fora do git) e rode
+   `pytest tests/test_contrato_evolution.py`;
+3. se a citação aparece no celular apontando para o consultor certo;
+4. se um 400 real traz texto suficiente para a classificação acima acertar —
+   o log mostra `Envio recusado pela Evolution [<desfecho>]` com o corpo.
+
 ## O que fazer se der errado
 
 Volte para `WHATSAPP_MODE=dom` no `.env` e reinicie. O código antigo continua
@@ -173,11 +349,13 @@ propósito.
 | Arquivo | O que faz |
 |---|---|
 | `app/whatsapp_port.py` | o contrato que as duas camadas cumprem |
-| `app/evolution.py` | envio pela API (HTTP puro) |
+| `app/evolution.py` | envio pela API (HTTP puro), citação conferida e fallback |
 | `app/evolution_webhook.py` | leitura do que a Evolution entrega |
 | `app/evolution_check.py` | diagnóstico (`python -m app.evolution_check`) |
-| `app/renderer.py` | gera o PNG sem depender do navegador do WhatsApp |
-| `app/whatsapp.py` | a camada antiga, intocada |
+| `app/renderer.py` | gera e VALIDA o PNG, sem depender do navegador do WhatsApp |
+| `app/manager.py` | registro da entrada, entrega com evidência, reenvio |
+| `app/whatsapp.py` | a camada antiga (legado); só ganhou a assinatura comum |
+| `ferramentas/e2e_simulado.py` | E2E com o `main.py` real, Evolution e agente falsos |
 
 A automação do Santander (`app/simulator.py`, `app/actor.py`, o Arqueiro)
 **não muda em nada**. Ela continua no Playwright, no Brave, com thread dona.

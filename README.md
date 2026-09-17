@@ -23,7 +23,9 @@ histórico leem a mesma fonte, então painel e banco nunca discordam.
 | **Enfileira** | Vários consultores podem pedir ao mesmo tempo; cada pedido é isolado e recebe um `REQ000000`. |
 | **Simula** | Abre o portal do Santander no Brave, com a sessão do operador, e usa a lógica do projeto Arqueiro (nada é reimplementado aqui). |
 | **Responde** | Manda uma **imagem** com os cards dos contratos e quanto libera, mais um resumo em texto. Se a imagem falhar, o texto sai assim mesmo. |
-| **Reenvia** | Se a entrega falhar, tenta de novo por até 5 vezes. Um resultado que não chega vale o mesmo que não ter simulado. |
+| **Reenvia** | Só quando a API PROVA que nada saiu (408, 429, 503, conexão recusada): até 5 vezes **na mesma solicitação**, citando a mesma mensagem. |
+| **Não duplica o pedido** | A mensagem recebida é gravada antes de qualquer coisa. O mesmo `message_id` nunca vira segunda solicitação — nem com webhook reentregue, nem depois de reiniciar. |
+| **Não duplica a resposta** | 500, 502/504 (proxy na frente da Evolution), timeout depois de enviar, 2xx sem id, queda no meio do envio: a mensagem pode ter chegado. Vira **"Entrega incerta — verificar WhatsApp"** e ninguém manda uma segunda sozinho: quem olha o grupo decide no painel (chegou / não chegou — reenviar). |
 | **Explica os erros** | Traduz o que o portal disse: "não foi possível contatar a averbadora", "matrícula inválida". Erros passageiros geram nova tentativa; erros de cadastro, não. |
 | **Registra tudo** | Banco SQLite com mensagens, simulações, consultores e logs. O painel lê daí. |
 
@@ -58,7 +60,9 @@ copy .env.example .env
 python main.py
 ```
 
-Painel em `http://localhost:8000`. A senha é a `DASHBOARD_PASSWORD` do `.env`.
+Painel em `http://localhost:8000`. A senha é a `DASHBOARD_PASSWORD` do `.env` —
+**obrigatória**: vazia, o painel não aceita login. O `.env.example` traz os
+comandos para gerar a senha e o `SESSION_SECRET`.
 
 Na primeira execução, abra a aba **Status** e leia o QR Code com o celular.
 
@@ -69,15 +73,17 @@ Na primeira execução, abra a aba **Status** e leia o QR Code com o celular.
 É o formato livre que o grupo já usa — nome, órgão (opcional) e CPF:
 
 ```text
-Paulo Testes
+Jose da Silva
 Amapá
-182.841.754.87
+529.982.247-25
 ```
 
 ```text
-LUIZ FERNANDO TESTE
-31611176034
+MARIA DE SOUZA
+11144477735
 ```
+
+(exemplos com CPFs de teste — este repositório é público)
 
 **O CPF é o gatilho.** Conversa comum não tem CPF; pedido tem. Como a
 validação confere os dígitos verificadores, um telefone ou um número de
@@ -110,7 +116,7 @@ curta:
 
 ```
 ✅ Libera R$ 4.913,52
-Ivone Teste
+Jose da Silva
 ```
 
 Não existe "Simulação recebida", "processando" nem "consulta concluída". O aviso
@@ -151,7 +157,7 @@ Duas chaves controlam isso:
 | Chave | Efeito |
 |---|---|
 | `SEND_RESULT_IMAGE` | `false` volta a responder só em texto |
-| `IMAGE_SHOW_CLIENT_DATA` | `false` envia o CPF mascarado na imagem |
+| `IMAGE_SHOW_CLIENT_DATA` | `false` tira da imagem **todo** identificador do cliente — nome, CPF (nem mascarado) e número de contrato — e desliga o print do portal, que não tem como mascarar. O resultado financeiro continua |
 
 `IMAGE_SHOW_CLIENT_DATA` é separada de `MASK_CPF_IN_UI` de propósito: o painel e
 o grupo do WhatsApp são públicos diferentes.
@@ -160,19 +166,58 @@ o grupo do WhatsApp são públicos diferentes.
 
 ## O painel
 
-| Tela | O que faz |
+| Tela | O que responde |
 |---|---|
-| **Visão geral** | KPIs do dia, volume e resultado por dia, horários de pico, ranking de consultores, funil operacional |
-| **Monitor** | Console ao vivo do bot trabalhando: cada mensagem, etapa e resposta, com filtros e pausa |
+| **Visão geral** | "Como está o bot agora?": WhatsApp, simulador, fila e tempo real; números do dia; solicitações recentes; o que precisa de atenção; funil do dia; atividade |
+| **Solicitações** | Lista filtrável com **status do pedido** e **estado da entrega** lado a lado; o detalhe abre num painel lateral |
 | **Fila** | Posição, consultor, cliente, etapa atual, tentativas e tempo em execução |
-| **Histórico** | Busca por consultor, CPF, contrato, banco, status, refin, período e ID; timeline completa por solicitação |
-| **Relatórios** | Números por período e por consultor, com exportação CSV / Excel / PDF |
+| **Monitor** | Console ao vivo do bot trabalhando: cada mensagem, etapa e resposta, com filtros e pausa |
 | **Consultores** | Cadastro, edição, ativação e desempenho individual |
+| **Relatórios** | Números por período e por consultor, com exportação CSV / Excel / PDF |
 | **Logs** | INFO / WARNING / ERROR / DEBUG com filtros e busca |
-| **Status** | Conexão do WhatsApp, QR Code, simuladores e configuração ativa |
+| **Status** | Conexão do WhatsApp, QR Code, simuladores, diagnóstico da Evolution e configuração ativa |
 
 O painel atualiza sozinho por **Server-Sent Events**. Não precisa de F5, e o
 monitor reconstrói o histórico recente do banco ao abrir.
+
+### O painel de detalhe
+
+Clicar numa solicitação (em qualquer tela) abre um painel lateral com tudo
+que o banco gravou daquele pedido: ids, consultor, chat, horário, status,
+entrega, citação, tentativas, erros, linha do tempo, mensagens (com a
+evidência de cada envio e a imagem que o consultor recebeu) e os contratos
+encontrados. Quando a entrega está **não confirmada**, é ali que ficam as
+duas ações manuais — *Chegou no grupo* e *Não chegou — reenviar* —
+visualmente diferentes de propósito: a segunda envia mensagem, a primeira
+não.
+
+### Identidade visual
+
+A Allana é a marca; o painel é ferramenta de operação. A estética é
+minimalista, escura e sóbria — a personagem aparece na barra lateral, no
+login e nos estados vazio e de erro, e em mais lugar nenhum.
+
+| Papel | Token | Onde |
+|---|---|---|
+| Estrutura (70%) | `--bg` `--surface` `--surface-2` `--surface-hover` `--border` | fundo, cards, tabelas |
+| Leitura (15%) | `--text` `--text-secondary` `--muted` | texto, metadado, placeholder |
+| Identidade (10%) | `--allana-red` `--accent-solid` | logo, fio da navegação ativa, botão principal |
+| Detalhe (5%) | `--lilac` `--lilac-soft` `--purple-dark` | foco, gráficos, acentos |
+| Estado | `--success` `--warning` `--error` `--info` | badges, callouts, pontos |
+
+Regras que o código segue (ver `AGENTS.md`): cor só existe em
+`css/tokens.css`; estado nunca depende só de cor (badge tem ícone e texto);
+vermelho é identidade e ação, **não** é erro; tabela tem no máximo 6 colunas.
+
+Contraste medido sobre `--surface`: texto 17,1:1 · texto secundário 7,7:1 ·
+erro 5,7:1 · aviso 11,4:1 · sucesso 10,7:1 · texto claro sobre o vermelho do
+botão 5,2:1. `--muted` (3,8:1) é só para placeholder, ícone decorativo e
+separador.
+
+No celular a barra lateral vira gaveta e **as tabelas viram cartões** — não
+existe rolagem horizontal. Os arquivos da marca ficam em
+`dashboard/static/img/` (`allana-logo.webp`, `allana-avatar.webp`,
+`favicon.png`), recortados da arte original.
 
 ---
 
@@ -198,6 +243,12 @@ sufixo `.bak-<data>`.
 As cópias são independentes: o seu Brave do dia a dia continua livre, e nada
 que o bot faça mexe na sua navegação. Em compensação elas **não se atualizam
 sozinhas** — rode o script de novo depois de trocar a senha do banco.
+
+**Um processo por perfil e por banco.** O `main.py` se recusa a subir (e diz o
+PID) se outro processo já usa o mesmo perfil do WhatsApp **ou o mesmo banco**
+(`DB_PATH`). A trava do banco fica ao lado dele, então vale também para dois
+checkouts ou duas portas apontando para o mesmo arquivo — o `recover()` de um
+segundo processo reclassificaria as entregas em curso do primeiro.
 
 ---
 
@@ -301,7 +352,13 @@ Dockerfile              imagem do painel + bot do WhatsApp
 docker-compose.yml      volumes, portas e variáveis
 
 dashboard/static/       painel (sem build, sem CDN, funciona offline)
-tests/                  947 testes
+  css/tokens.css        ÚNICO lugar com cor: paleta da Allana e papéis
+  css/app.css           layout e componentes (só var(--token))
+  js/core/              dom, api, store, stream, status, ui, table,
+                        drawer, timeline, icons, logo, format
+  js/views/             uma tela por arquivo + request-detail.js
+  img/                  logo, avatar e favicon da Allana
+tests/                  1190 testes
 ```
 
 ### O caminho de uma mensagem
@@ -356,7 +413,18 @@ Nada do cálculo foi reescrito, e nenhum arquivo do projeto Arqueiro é alterado
 .venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
-São **947 testes**. Cobrem, entre outros: identificação do consultor pelo
+E o E2E de processo real (o `main.py` de verdade, com Evolution e agente do
+Santander falsos, incluindo matar o processo no meio da fila):
+
+```bash
+.venv\Scripts\python.exe ferramentas/e2e_simulado.py
+```
+
+Ele **não** substitui validar no grupo de teste com a Evolution de verdade —
+ver [MIGRACAO-EVOLUTION.md](MIGRACAO-EVOLUTION.md).
+
+São **1190 testes** (mais um que só roda com respostas reais da Evolution
+capturadas). Cobrem, entre outros: identificação do consultor pelo
 telefone, isolamento de thread do Playwright, execução de 1/2/5 solicitações
 simultâneas sem cruzar resultados, tentativas e erros permanentes, recuperação
 da fila após reinício, migração do banco antigo, fusos horários, autenticação,
@@ -366,11 +434,16 @@ Os que valem destaque, porque nasceram de defeitos reais em produção:
 
 | Arquivo | O que trava |
 |---|---|
+| `test_producao.py` | O fluxo de produção na camada Evolution, e **a regra de não duplicar**: 500/timeout/2xx-sem-id viram entrega incerta sem segunda mensagem; 400/422 que apontam o `quoted` viram um único envio sem citação; 429/503 repetem COM citação; queda entre o POST e a gravação não vira reenvio; um `message_id` = uma solicitação; PNG validado e do pedido certo; dois consultores simultâneos sem cruzar |
+| `test_audit_adversarial.py` | Os caminhos raros que duplicavam ou perdiam resposta: comando do navegador que estoura o tempo na fila (não roda depois), falha depois do clique em "enviar" (vira incerta, sem texto por cima), leitura do DOM que marcava como visto antes de gravar, dois processos no mesmo banco, vigia e reenvio órfão, 2xx com `status: "ERROR"` |
+| `test_contrato_entrega.py` | O contrato de entrega como tabela: a categoria e o desfecho de cada resposta HTTP e falha de transporte, `quoted_ok` só com prova em todos os estados, exceção depois do POST aceito, senha vazia que não abre o painel, diagnóstico e observador sem dado pessoal |
+| `test_contrato_evolution.py` | A leitura da resposta da Evolution: acha `key.id` e `stanzaId` em níveis diferentes, e **nunca inventa um `ok`** quando não acha |
 | `test_leitura_dom.py` | Roda o JS num **Chromium de verdade** contra as gerações de HTML que o WhatsApp já serviu: leitura de mensagens, escolha do grupo, menu de contexto, anexo de foto, e a garantia de que o bot **nunca lê nem encaminha as próprias mensagens** |
 | `test_abas.py` | A aba certa do navegador. Uma `about:blank` restaurada pelo perfil já fez o bot pilotar uma página vazia a sessão inteira |
 | `test_reenvio.py` | Entrega que falhou é reenviada, e o reenvio **não atropela** a entrega em curso |
 | `test_erro_portal.py` | O erro do Santander chega traduzido ao consultor, e só o que é passageiro gera nova tentativa |
 | `test_docker.py` | Caminho do Windows vazando para o container, versão do Playwright, segredo fora da imagem |
+| `test_painel_visual.py` | As invariantes da interface: cor só em `tokens.css`, o que o `index.html` referencia existe, tabela com no máximo 6 colunas, estado traduzido num módulo só e badge que nunca depende só de cor |
 | `test_whatsapp_service.py` | A invariante que sustenta tudo: nada do Playwright fora da thread dona |
 | `test_mensagens.py` | O tom das falas e, principalmente, **o que o bot não fala** — falha se voltar "Simulação recebida", "com sucesso" ou mensagem longa demais |
 
@@ -383,8 +456,15 @@ Os que valem destaque, porque nasceram de defeitos reais em produção:
 - `MASK_CPF_IN_UI=true` mascara o CPF na API, no painel e nos exports.
 - CPF é removido das mensagens de log.
 - Limite de tentativas de login por IP.
-- `.gitignore` bloqueia `.env`, banco, `state.json` e os perfis de navegador —
-  os perfis contêm a sessão do WhatsApp e do banco.
+- `.gitignore` bloqueia `.env`, banco, `state.json`, `comprovantes/`,
+  `diagnostico/` e os perfis de navegador — os perfis contêm a sessão do
+  WhatsApp e do banco, e as capturas de diagnóstico contêm a conversa real.
+- **Partida recusada com configuração insegura.** Com `WEB_HOST` fora de
+  `127.0.0.1` (o caso do Docker), o sistema não sobe com senha fraca/padrão,
+  `SESSION_SECRET` vazio (sorteado a cada partida: as sessões caem a cada
+  reinício) ou placeholder/curto (cookie de sessão forjável), nem com `EVOLUTION_WEBHOOK_TOKEN` /
+  `AGENT_TOKEN` curtos. Em localhost os defaults passam, com aviso — e o log
+  diz qual regra está valendo.
 
 ---
 
@@ -409,7 +489,12 @@ causa. Estas são as principais, no painel em **Logs**:
 | `Ignorando uma mensagem com o formato das nossas respostas` | O bot quase leu a si mesmo | A segunda camada funcionou; avise para investigar a primeira |
 | `perfil já está aberto em outro navegador` | Sobrou `brave.exe` de uma execução anterior | Feche todas as janelas do Brave e os `brave.exe` no Gerenciador de Tarefas |
 | `O Santander está na tela de login` | A sessão do portal caiu | Faça login na janela do simulador, ou preencha o `credenciais.ini` do Arqueiro |
-| `resultado pronto mas não entregue` | A resposta falhou | Ele reenvia sozinho em até 3 min, 5 vezes |
+| `resultado pronto mas não entregue` | A resposta falhou por motivo passageiro | Ele reenvia sozinho (30 s, 60 s, 120 s…), até 5 vezes, na mesma solicitação |
+| `A Evolution RECUSOU a citação` | 400/422 apontando o `quoted` | Nada: a resposta saiu sem citação, com `↩ consultor`. Se repetir sempre, a mensagem original não está no histórico da instância |
+| `Entrega incerta — verificar WhatsApp` | 500, timeout depois de enviar, 2xx sem id, ou queda no meio do envio | **Olhe o grupo** e decida no detalhe da solicitação (Histórico): **Chegou no grupo** fecha como entregue sem enviar nada; **Não chegou — reenviar** libera UM reenvio citando o mesmo pedido. O bot não decide sozinho de propósito |
+| `envio=texto tentativa=1 provider=… quote_status=…` | Uma linha por envio, com id de origem, id citado, autor, HTTP e id enviado | É o suficiente para reconstruir a entrega sem abrir o banco |
+| `a entrega falhou de um jeito que repetir não resolve` | 401/403/404, licença, sem `chat_id` | Corrija a configuração da Evolution; o resultado está no painel |
+| `já recebida antes ... Reentrega ignorada` | Webhook reentregue | Nada: a trava de duplicidade funcionou |
 
 ### Consultando o banco direto
 
@@ -553,6 +638,16 @@ consultores isso é um vazamento. Por isso:
 
 `app/tela_do_portal.py`, testes em `tests/test_tela_do_portal.py`.
 
+**`IMAGE_SHOW_CLIENT_DATA=false` desliga o print.** A tela do banco mostra
+nome e CPF como pixels, sem como mascarar. Com a flag em `false` o print nem
+é tirado, e a resposta sai com o card sem nome, CPF e número de contrato.
+
+**Print que não dá para conferir é descartado.** A conferência lê o TEXTO do
+elemento; o print é dos PIXELS. Quando os dois podem divergir o card entra no
+lugar: o recorte não cabe inteiro na janela (rolagem, lista maior que a
+tela), um elemento fixo do portal (cabeçalho com o operador) cruza a área,
+ou o texto passa do que é conferido.
+
 > **Ainda não rodou contra o portal.** Exige uma sessão logada do Santander,
 > que não havia quando isto foi escrito. Os testes montam a página com o
 > texto real de `debug_cards.txt`, topo do operador incluído, para exercitar
@@ -614,6 +709,15 @@ parser, consultores e a automação do Santander são idênticos nos dois modos 
 o contrato está em [`app/whatsapp_port.py`](app/whatsapp_port.py) e há um
 teste que compara as assinaturas das duas implementações.
 
+**A regra de não duplicar vale nos dois modos.** No `dom`, falha depois do
+clique em "enviar" (página fechada, erro do navegador) só vira "não saiu" se a
+pré-visualização continuar aberta; senão o bot procura a mensagem no chat e,
+sem achar, marca **entrega incerta** em vez de mandar o texto por cima. Um
+comando do navegador que estoura o tempo **ainda na fila** é cancelado (nunca
+roda depois); se já tinha começado, também vira entrega incerta. E a leitura
+grava cada pedido no banco **antes** de marcá-lo como visto: uma queda com o
+pedido na fila não o perde mais.
+
 O modo `dom` **não foi apagado**: ele é o plano de retorno até a Evolution
 provar que entrega no grupo real. Para migrar, siga
 [MIGRACAO-EVOLUTION.md](MIGRACAO-EVOLUTION.md) — os passos de infraestrutura
@@ -625,6 +729,14 @@ depende de HTML nenhum:
 
 ```bash
 .venv/Scripts/python.exe -m app.evolution_check
+```
+
+O `evolution_check` lista os grupos **com o JID** para você configurar o `.env`:
+não cole essa saída em chamado ou chat. Para diagnosticar e compartilhar, use
+o diagnóstico seguro — só estado, sem chave, token, JID ou telefone:
+
+```bash
+.venv/Scripts/python.exe -m app.evolution_diagnostico
 ```
 
 Ele diz se a Evolution responde, se a licença está ativa, se a instância

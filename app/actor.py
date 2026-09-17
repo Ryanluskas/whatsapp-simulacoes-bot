@@ -40,7 +40,22 @@ class ActorStopped(ActorError):
 
 
 class ActorTimeout(ActorError):
-    pass
+    """Quem chamou desistiu de esperar.
+
+    ``iniciado`` diz se o comando CHEGOU A COMECAR na thread dona. Nao
+    iniciado: ele foi cancelado e nunca vai rodar -- nada aconteceu. Iniciado:
+    ele pode estar rodando agora e terminar depois (a thread dona nao e'
+    interrompida). Para um envio, isso quer dizer "a mensagem pode ter saido":
+    ``sem_prova``.
+    """
+
+    def __init__(self, mensagem: str = "", *, iniciado: bool = True) -> None:
+        super().__init__(mensagem)
+        self.iniciado = iniciado
+
+    @property
+    def sem_prova(self) -> bool:
+        return self.iniciado
 
 
 @dataclass
@@ -52,8 +67,18 @@ class Command:
     result: Any = None
     error: BaseException | None = None
     label: str = ""
+    iniciado: bool = False
+    cancelado: bool = False
+    _estado: threading.Lock = field(default_factory=threading.Lock)
 
     def run(self) -> None:
+        # Quem chamou ja' desistiu (tempo esgotado) e ja' tratou como falha:
+        # executar agora seria uma acao fantasma -- um envio que sai minutos
+        # depois de a resposta ter ido por outro caminho.
+        with self._estado:
+            if self.cancelado:
+                return
+            self.iniciado = True
         try:
             self.result = self.fn(*self.args, **self.kwargs)
         except BaseException as exc:  # noqa: BLE001 - repassado para quem chamou
@@ -63,7 +88,17 @@ class Command:
 
     def wait(self, timeout: float | None) -> Any:
         if not self.done.wait(timeout):
-            raise ActorTimeout(f"tempo esgotado aguardando '{self.label or self.fn.__name__}'")
+            with self._estado:
+                terminou = self.done.is_set()
+                if not terminou and not self.iniciado:
+                    self.cancelado = True
+                iniciado = self.iniciado
+            if not terminou:
+                raise ActorTimeout(
+                    f"tempo esgotado aguardando '{self.label or self.fn.__name__}' "
+                    + ("(em execução: pode concluir depois)" if iniciado
+                       else "(nem começou: cancelado)"),
+                    iniciado=iniciado)
         if self.error is not None:
             raise self.error
         return self.result

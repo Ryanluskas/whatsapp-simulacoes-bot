@@ -8,6 +8,7 @@
 import { h } from "./core/dom.js";
 import { icon } from "./core/icons.js";
 import * as fmt from "./core/format.js";
+import { toneOf } from "./core/status.js";
 
 const ICON = {
   message_received: "inbox",
@@ -23,6 +24,11 @@ const ICON = {
   queue_recovered: "refresh",
   message_sent: "send",
   message_failed: "alert",
+  request_completed: "check",
+  delivery_retry: "refresh",
+  delivery_unconfirmed: "alert",   // entrega incerta: alguém precisa conferir
+  delivery_manual: "check",        // alguém conferiu no WhatsApp e decidiu no painel
+  delivery_failed: "ban",
   whatsapp_connected: "plug",
   whatsapp_disconnected: "plugOff",
 };
@@ -52,7 +58,7 @@ export function feedRow(event) {
     dataset: { dir: DIRECTION[event.type] || "sys", level, stage },
   },
     h("span.ts", fmt.time(event.created_at)),
-    h("span.rail", h("span.dot", { dataset: { state: stateOf(event) } })),
+    h("span.rail", h("span.dot", { dataset: { tone: toneOfEvent(event) }, "aria-hidden": "true" })),
     h("div.body",
       h("div.head",
         h("span.mark", icon(ICON[event.type] || "empty", 15)),
@@ -66,17 +72,17 @@ export function feedRow(event) {
   );
 }
 
-function stateOf(event) {
-  if (event.type === "whatsapp_connected") return "connected";
-  if (event.type === "whatsapp_disconnected") return "disconnected";
+function toneOfEvent(event) {
+  if (event.type === "whatsapp_connected") return "success";
+  if (event.type === "whatsapp_disconnected") return "error";
   if (event.level === "error") return "error";
-  if (event.level === "success") return "completed";
-  if (event.level === "warning") return "queued";
-  return event.stage || "idle";
+  if (event.level === "success") return "success";
+  if (event.level === "warning") return "warning";
+  return toneOf(event.stage);
 }
 
 /** Um evento vale a pena virar toast? Só o que exige reação do operador. */
 export function shouldNotify(event) {
-  return ["job_error", "message_failed", "whatsapp_disconnected", "job_interrupted"]
+  return ["job_error", "message_failed", "whatsapp_disconnected", "job_interrupted", "delivery_failed", "delivery_unconfirmed"]
     .includes(event.type);
 }
