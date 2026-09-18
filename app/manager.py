@@ -51,7 +51,7 @@ from .renderer import PngInvalido, validar_png
 from .security import redact
 from .simulator import SimulatorService
 from .state_store import StateStore
-from .evolution import EvolutionClient
+from .evolution import CategoriaAck, EvolutionClient, classificar_ack_evolution
 from .whatsapp import WhatsAppService, WhatsAppStatus
 from .whatsapp_port import MODO_EVOLUTION
 
@@ -750,48 +750,71 @@ class BotManager:
                 self.log("ERROR", "whatsapp", f"A instância da Evolution caiu (via webhook, state={estado}).")
 
     def receber_atualizacao(self, atualizacao: dict) -> None:
-        """Processa um messages.update (ACK) vindo do webhook.
-        
-        Guarda o estado no `evolution_acks` para lidar com out-of-order, 
-        e se a simulacao ja' estiver `unconfirmed`, destranca imediatamente.
-        """
         message_id = atualizacao.get("message_id")
         status_ack = atualizacao.get("status")
+        chat_id = (atualizacao.get("chat_id") or "").strip()
         if not message_id or not status_ack:
             return
 
+        cat, rank = classificar_ack_evolution(status_ack)
         agora = now_iso()
+
         with self.db.write() as conn:
-            # 1. Guarda para o `_send_reply` ler depois se o POST for lento
+            # 1. Guarda para o `_send_reply` ler depois se o POST for lento (Reconciliação)
+            # Só sobrescreve se o rank do novo evento for maior ou igual ao salvo.
             conn.execute(
-                "INSERT INTO evolution_acks(message_id, status, created_at) VALUES(?,?,?) "
-                "ON CONFLICT(message_id) DO UPDATE SET status=excluded.status",
-                (message_id, status_ack, agora)
+                "INSERT INTO evolution_acks(message_id, status, rank, created_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(message_id) DO UPDATE SET status=excluded.status, rank=excluded.rank, created_at=excluded.created_at "
+                "WHERE excluded.rank >= evolution_acks.rank",
+                (message_id, status_ack, rank, agora)
             )
         self.db.bump_meta("wa_webhook_acks", 1)
+
+        # Se não é confirmação forte de entrega, apenas registramos o evento acima.
+        if rank < 1:
+            return
 
         with self.db.write() as conn:
             # 2. Se ja' foi gravado como `unconfirmed`, promove agora.
             linha = conn.execute(
-                "SELECT simulation_id FROM messages WHERE wa_message_id=? AND direction='out'",
+                "SELECT simulation_id, status, chat_id FROM messages "
+                "WHERE wa_message_id=? AND direction='out'",
                 (message_id,)
             ).fetchone()
             
             if not linha or not linha["simulation_id"]:
                 return
-                
+            if chat_id and linha["chat_id"] and chat_id != linha["chat_id"]:
+                return
+
             sim_id = linha["simulation_id"]
-            cur = conn.execute(
-                f"UPDATE simulations SET delivery_status=?, replied_at=?, delivery_error='', next_delivery_at=NULL, updated_at=? "
-                f"WHERE id=? AND delivery_status=?",
-                (Delivery.DELIVERED, agora, agora, sim_id, Delivery.UNCONFIRMED)
-            )
-            if cur.rowcount > 0:
-                self.log("INFO", "whatsapp", 
-                         f"A entrega #{sim_id} estava incerta e foi confirmada pelo webhook de update ({status_ack}). Promovida para entregue.")
-                sim = conn.execute("SELECT * FROM simulations WHERE id=?", (sim_id,)).fetchone()
-                if sim:
-                    self.hub.publish("simulation_updated", dict(sim))
+
+            # Apenas promover se a mensagem original estava unconfirmed. Se já estiver delivered,
+            # não precisamos re-promover a simulação.
+            if linha["status"] == "unconfirmed":
+                conn.execute(
+                    "UPDATE messages SET status='delivered', desfecho=? WHERE wa_message_id=? AND direction='out'",
+                    (f"entregue ({status_ack})", message_id)
+                )
+
+            # Para manter consistência (ACHADO 3), garantimos que stage vai para o fim correto
+            sim = conn.execute("SELECT status FROM simulations WHERE id=?", (sim_id,)).fetchone()
+            if sim:
+                # O status "ok" da simulação já está em sim["status"] ("completed" ou "error")
+                # A máquina de estados original manda 'completed' pro stage completed, e 'error' pra error.
+                stage = "completed" if sim["status"] == "completed" else "error"
+
+                cur = conn.execute(
+                    f"UPDATE simulations SET delivery_status=?, replied_at=?, delivery_error='', next_delivery_at=NULL, updated_at=?, stage=?, sent_message_id=? "
+                    f"WHERE id=? AND delivery_status=?",
+                    (Delivery.DELIVERED, agora, agora, stage, message_id, sim_id, Delivery.UNCONFIRMED)
+                )
+                if cur.rowcount > 0:
+                    self.log("INFO", "whatsapp",
+                             f"A entrega #{sim_id} estava incerta e foi confirmada pelo webhook de update ({status_ack}). Promovida para entregue.")
+                    sim_atual = conn.execute("SELECT * FROM simulations WHERE id=?", (sim_id,)).fetchone()
+                    if sim_atual:
+                        self.hub.publish("simulation_updated", dict(sim_atual))
 
     def _receber_do_navegador(self, message: IncomingMessage) -> None:
         """Porta DURAVEL do modo dom -- o equivalente de ``receber_mensagem``.
@@ -1634,20 +1657,49 @@ class BotManager:
                    "media_status": entrega.media_status,
                    "sent_message_id": entrega.enviado_id, "reason": entrega.motivo}
 
-        # === OUT-OF-ORDER CHECK ===
-        # Um timeout na resposta do POST pode ocorrer DEPOIS de o webhook do ACK ter
-        # sido recebido e enfileirado no evolution_acks.
-        if entrega.status == Delivery.UNCONFIRMED and entrega.enviado_id:
-            ack = self.db.fetchone("SELECT status FROM evolution_acks WHERE message_id=?", (entrega.enviado_id,))
-            if ack and ack["status"]:
-                self.log("INFO", "whatsapp", 
-                         f"A entrega #{job.simulation_id} teve POST incerto, mas um ACK já chegou ({ack['status']}). Promovendo para entregue.")
-                entrega.status = Delivery.DELIVERED
-                entrega.desfecho = "entregue (ack adiantado)"
+        # === OUT-OF-ORDER CHECK e ATUALIZAÇÃO ATÔMICA ===
+        with self.db.write() as conn:
+            # Reconciliação: Um timeout no POST pode ocorrer DEPOIS do webhook ter recebido o ACK.
+            if entrega.status == Delivery.UNCONFIRMED and entrega.enviado_id:
+                ack = conn.execute("SELECT status, rank FROM evolution_acks WHERE message_id=?", (entrega.enviado_id,)).fetchone()
+                if ack and ack["rank"] >= 1:
+                    self.log(
+                        "INFO",
+                        "whatsapp",
+                        f"A entrega #{job.simulation_id} teve POST incerto, mas um ACK já chegou ({ack['status']}). Promovendo para entregue.",
+                    )
+                    entrega.status = Delivery.DELIVERED
+                    entrega.desfecho = f"entregue (ack adiantado {ack['status']})"
+                    campos["delivery_status"] = Delivery.DELIVERED
+                    payload["delivery_status"] = Delivery.DELIVERED
+                    payload["desfecho"] = entrega.desfecho
 
+            if entrega.status == Delivery.DELIVERED:
+                campos.update(stage=stage, replied_at=agora, sent_message_id=entrega.enviado_id,
+                              delivery_error="", next_delivery_at=None)
+            elif entrega.status == Delivery.UNCONFIRMED:
+                campos.update(stage=Stage.DELIVERY_UNCONFIRMED, sent_message_id=entrega.enviado_id,
+                              delivery_error=entrega.motivo[:240])
+            elif entrega.status == Delivery.RETRYING:
+                campos.update(stage=Stage.DELIVERY_RETRY, delivery_error=entrega.motivo[:240],
+                              next_delivery_at=depois_de(self._espera_do_reenvio(1)))
+            else:
+                campos.update(stage=Stage.DELIVERY_FAILED, delivery_error=entrega.motivo[:240])
+
+            conn.execute(
+                f"UPDATE simulations SET {', '.join(f'{k}=?' for k in campos.keys())} WHERE id=?",
+                (*campos.values(), job.simulation_id)
+            )
+            if entrega.status == Delivery.DELIVERED and entrega.enviado_id:
+                conn.execute(
+                    "UPDATE messages SET status='delivered', desfecho=?, error='' "
+                    "WHERE simulation_id=? AND direction='out' AND wa_message_id=?",
+                    (entrega.desfecho or Desfecho.ENTREGUE,
+                     job.simulation_id, entrega.enviado_id),
+                )
+
+        # Depois da transação no banco, emitimos logs e eventos
         if entrega.status == Delivery.DELIVERED:
-            campos.update(stage=stage, replied_at=agora, sent_message_id=entrega.enviado_id,
-                          delivery_error="", next_delivery_at=None)
             self.log("INFO", "whatsapp",
                      f"{job.request_id}: entregue ({resumo}, id "
                      f"{entrega.enviado_id or 'sem id'}) em resposta a "
@@ -1657,8 +1709,6 @@ class BotManager:
                              level="success" if result.ok else "warning",
                              title="Resposta entregue", detail=resumo, **comum)
         elif entrega.status == Delivery.UNCONFIRMED:
-            campos.update(stage=Stage.DELIVERY_UNCONFIRMED, sent_message_id=entrega.enviado_id,
-                          delivery_error=entrega.motivo[:240])
             self.log("WARNING", "whatsapp",
                      f"{job.request_id}: Entrega incerta — verificar WhatsApp. {evidencia}. "
                      "A primeira pode ter chegado: não reenvio sozinho para não duplicar.",
@@ -1667,11 +1717,6 @@ class BotManager:
                              level="warning", title="Entrega incerta — verificar WhatsApp",
                              detail=entrega.motivo, **comum)
         elif entrega.status == Delivery.RETRYING:
-            campos.update(stage=Stage.DELIVERY_RETRY, delivery_error=entrega.motivo[:240],
-                          next_delivery_at=depois_de(self._espera_do_reenvio(1)))
-            # Sem isto o resultado morria aqui: a simulacao aparecia concluida
-            # no painel e o consultor nunca era avisado. Um resultado que nao
-            # chega vale o mesmo que nao ter simulado.
             self.log("WARNING", "whatsapp",
                      f"{job.request_id}: resultado pronto mas não entregue; nada saiu "
                      f"({evidencia}). Vou tentar reenviar quando o WhatsApp voltar, na "
@@ -1681,7 +1726,6 @@ class BotManager:
                              level="warning", title="Reenvio pendente",
                              detail=entrega.motivo, **comum)
         else:
-            campos.update(stage=Stage.DELIVERY_FAILED, delivery_error=entrega.motivo[:240])
             self.log("ERROR", "whatsapp",
                      f"{job.request_id}: a entrega falhou de um jeito que repetir não "
                      f"resolve ({evidencia}). O resultado está no painel.",
@@ -1689,7 +1733,7 @@ class BotManager:
             self.hub.publish("delivery_failed", payload, stage=Stage.DELIVERY_FAILED,
                              level="error", title="Entrega falhou",
                              detail=entrega.motivo, **comum)
-        self.db.update("simulations", campos, {"id": job.simulation_id})
+
 
     def _print_do_portal(self, result: SimulationResult, provisorio: Path) -> bool:
         """Copia o print do portal para ``provisorio``. False = usar o card.

@@ -32,6 +32,7 @@ import queue
 import threading
 from pathlib import Path
 from typing import NamedTuple
+from enum import Enum
 
 import httpx
 
@@ -219,6 +220,40 @@ def classificar_falha_de_transporte(exc: Exception) -> Classificacao:
             Categoria.UNCERTAIN)
 
 
+class CategoriaAck(str, Enum):
+    CONFIRMACAO_ENTREGA = "confirmacao_entrega"
+    NAO_CONFIRMADOR = "nao_confirmador"
+    ERRO = "erro"
+
+
+def classificar_ack_evolution(status: str) -> tuple[CategoriaAck, int]:
+    """Classifica o status de entrega do webhook e devolve sua 'ordem' (peso).
+
+    Um peso maior jamais é sobrescrito por um menor (ex: READ não volta pra PENDING).
+    ERROR não derruba o que já foi confirmado.
+
+    Pesos (baseados no Baileys):
+    - 0: PENDING / 0 / Vazio
+    - 0: SERVER_ACK / 1 (aceito pela Evolution, ainda sem prova de entrega)
+    - 2: DELIVERY_ACK / 2 (Chegou no destinatário)
+    - 3: READ / 3 (Lido)
+    - 4: PLAYED / 4 (Áudio tocado)
+    - -1: ERROR / 5 (Erro)
+    """
+    s = str(status).strip().upper()
+    if s in ("1", "SERVER_ACK"):
+        return CategoriaAck.NAO_CONFIRMADOR, 0
+    if s in ("2", "DELIVERY_ACK"):
+        return CategoriaAck.CONFIRMACAO_ENTREGA, 2
+    if s in ("3", "READ"):
+        return CategoriaAck.CONFIRMACAO_ENTREGA, 3
+    if s in ("4", "PLAYED"):
+        return CategoriaAck.CONFIRMACAO_ENTREGA, 4
+    if s in ("5", "ERROR"):
+        return CategoriaAck.ERRO, -1
+    return CategoriaAck.NAO_CONFIRMADOR, 0
+
+
 class ErroDeEnvio(Exception):
     """Falha na entrega, com o desfecho ja' classificado."""
 
@@ -318,8 +353,6 @@ def _id_da_midia(corpo: dict) -> str:
 class EvolutionClient:
     """Implementa ``WhatsAppPort`` falando com a Evolution API."""
 
-    #: Quantas mensagens nossas lembrar para o ``ja_enviado``. Ver o metodo.
-    _MEMORIA_DE_ENVIOS = 400
     _INTERVALO_DO_STATUS = 20.0
 
     def __init__(
@@ -368,7 +401,7 @@ class EvolutionClient:
         }
 
         # Ver ``ja_enviado``.
-        self._marcas_enviadas: list[str] = []
+
         self._memoria_lock = threading.Lock()
 
         self._parar = threading.Event()
@@ -636,24 +669,11 @@ class EvolutionClient:
 
     # ------------------------------------------------------------------ memoria
     def _lembrar_envio(self, texto: str) -> None:
-        with self._memoria_lock:
-            self._marcas_enviadas.append(texto or "")
-            del self._marcas_enviadas[:-self._MEMORIA_DE_ENVIOS]
+        pass  # Removido cache em RAM conforme revisão
 
     def ja_enviado(self, marca: str, timeout: float = 20.0) -> bool:
-        """Ja' mandamos alguma mensagem com esta marca?
-
-        Na camada antiga isto era uma busca no HTML da conversa. Aqui nao ha'
-        HTML -- mas tambem nao ha' necessidade: **somos o unico remetente
-        deste bot**, entao o que enviamos e' o que sabemos ter enviado. A
-        memoria e' do processo: depois de reiniciar, ``ja_enviado`` volta a
-        dizer ``False``, e o pior caso e' o consultor receber a resposta duas
-        vezes. Ficar sem resposta seria pior, e e' o que a duvida evita.
-        """
-        if not marca:
-            return False
-        with self._memoria_lock:
-            return any(marca in texto for texto in self._marcas_enviadas)
+        """A Evolution não consulta tela. A fonte de verdade é o banco."""
+        return False
 
     @staticmethod
     def _citacao(quote_message_id: str, chat_id: str, quote_text: str = "",

@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS evolution_acks (
     message_id TEXT PRIMARY KEY,
     status     TEXT NOT NULL,
+    rank       INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 """
@@ -231,6 +232,9 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "error": "TEXT DEFAULT ''",
         "response_excerpt": "TEXT DEFAULT ''",
     },
+    "evolution_acks": {
+        "rank": "INTEGER NOT NULL DEFAULT 0",
+    },
 }
 
 #: Estados da mensagem RECEBIDA (``messages.status`` com ``direction='in'``).
@@ -310,6 +314,16 @@ class Database:
 
     def _backfill(self, conn: sqlite3.Connection) -> None:
         stamp = now_iso()
+        # ACKs gravados antes da coluna `rank` precisam recuperar a ordem real;
+        # o DEFAULT 0 nao pode transformar um READ antigo em SERVER_ACK novo.
+        conn.execute(
+            "UPDATE evolution_acks SET rank=CASE UPPER(TRIM(status)) "
+            "WHEN 'DELIVERY_ACK' THEN 2 WHEN '2' THEN 2 "
+            "WHEN 'READ' THEN 3 WHEN '3' THEN 3 "
+            "WHEN 'PLAYED' THEN 4 WHEN '4' THEN 4 "
+            "WHEN 'ERROR' THEN -1 WHEN '5' THEN -1 "
+            "ELSE 0 END"
+        )
         conn.execute("UPDATE simulations SET updated_at=created_at WHERE updated_at IS NULL")
         conn.execute("UPDATE simulations SET stage=status WHERE stage IS NULL OR stage=''")
         conn.execute("UPDATE consultants SET updated_at=created_at WHERE updated_at IS NULL")
