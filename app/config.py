@@ -112,9 +112,9 @@ class Config:
     session_secret: str
     session_hours: int
     mask_cpf_in_ui: bool
-    desktop_mode: bool
     timezone: str
     retention_days: int
+    desktop_mode: bool = False
     #: Onde ficam os PNGs enviados. None = ``<projeto>/comprovantes``.
     comprovantes_dir: Path | None = None
 
