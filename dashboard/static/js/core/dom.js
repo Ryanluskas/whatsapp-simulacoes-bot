@@ -22,8 +22,7 @@ export function h(spec, props = null, ...children) {
       else if (key === "dataset") Object.assign(el.dataset, value);
       else if (key.startsWith("on") && typeof value === "function") {
         el.addEventListener(key.slice(2).toLowerCase(), value);
-      } else if (key === "html") el.innerHTML = value; // apenas para ícones internos
-      else if (key in el && key !== "list" && typeof value !== "object") el[key] = value;
+      } else if (key in el && key !== "list" && typeof value !== "object") el[key] = value;
       else el.setAttribute(key, value === true ? "" : value);
     }
   } else if (props !== null && props !== undefined) {

@@ -28,11 +28,21 @@ class SessionManager:
     sorteado a cada partida: as sessoes antigas deixam de valer.
     """
 
-    def __init__(self, secret: str, ttl_hours: int = 12) -> None:
+    def __init__(self, secret: str, db=None, ttl_hours: int = 12) -> None:
         self._secret = (secret or secrets.token_hex(32)).encode("utf-8")
         self._ttl = ttl_hours * 3600
+        self._db = db
         self._revoked: set[str] = set()
         self._lock = threading.Lock()
+        
+        # Carregar revogações do banco, se houver
+        if self._db:
+            try:
+                rows = self._db.fetchall("SELECT token FROM revoked_sessions")
+                for row in rows:
+                    self._revoked.add(row["token"])
+            except Exception:
+                pass
 
     @property
     def ttl_seconds(self) -> int:
@@ -69,9 +79,23 @@ class SessionManager:
         if not token:
             return
         with self._lock:
-            self._revoked.add(token)
+            if token not in self._revoked:
+                self._revoked.add(token)
+                if self._db:
+                    try:
+                        self._db.execute(
+                            "INSERT OR IGNORE INTO revoked_sessions (token, revoked_at) VALUES (?, ?)",
+                            (token, utc_now().isoformat())
+                        )
+                    except Exception:
+                        pass
             if len(self._revoked) > 5000:
                 self._revoked.clear()
+                if self._db:
+                    try:
+                        self._db.execute("DELETE FROM revoked_sessions")
+                    except Exception:
+                        pass
 
     def _sign(self, body: str) -> str:
         digest = hmac.new(self._secret, body.encode("utf-8"), hashlib.sha256).digest()

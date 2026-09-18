@@ -96,7 +96,7 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
         redoc_url=None,
         lifespan=lifespan,
     )
-    sessions = SessionManager(config.session_secret, config.session_hours)
+    sessions = SessionManager(config.session_secret, db=db, ttl_hours=config.session_hours)
     login_limiter = RateLimiter(max_attempts=8, window_seconds=300)
     mask = config.mask_cpf_in_ui
 
@@ -114,7 +114,12 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
 
     @api.post("/api/login")
     async def login(request: Request, password: str = Form(...)):
-        client = request.client.host if request.client else "desconhecido"
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            client = forwarded.split(",")[0].strip()
+        else:
+            client = request.client.host if request.client else "desconhecido"
+            
         if not login_limiter.allow(client):
             raise HTTPException(
                 status_code=429,
