@@ -47,6 +47,7 @@ export function render(root) {
           : "WhatsApp Web"),
         chip("Recebidas", fmt.int(wa.received)),
         chip("Enviadas", fmt.int(wa.sent)),
+        wa.mode === "evolution" ? chip("ACKs de entrega", fmt.int(wa.acks_received || 0)) : null,
         wa.connected ? chip("Tempo online", fmt.uptime(wa.online_since)) : null,
         wa.last_poll ? chip("Última leitura", fmt.relative(wa.last_poll)) : null,
       ),

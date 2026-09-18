@@ -742,6 +742,57 @@ class BotManager:
         self.whatsapp.inbox.put(message)
         return {"aceita": True, "entrada_id": registro["id"]}
 
+    def atualizar_conexao_evolution(self, estado: str) -> None:
+        """Chamado pelo webhook para refletir quedas e retornos imediatamente."""
+        if self.config.whatsapp_mode == MODO_EVOLUTION and hasattr(self.whatsapp, 'injetar_estado_conexao'):
+            self.whatsapp.injetar_estado_conexao(estado)
+            if estado and estado != "open":
+                self.log("ERROR", "whatsapp", f"A instância da Evolution caiu (via webhook, state={estado}).")
+
+    def receber_atualizacao(self, atualizacao: dict) -> None:
+        """Processa um messages.update (ACK) vindo do webhook.
+        
+        Guarda o estado no `evolution_acks` para lidar com out-of-order, 
+        e se a simulacao ja' estiver `unconfirmed`, destranca imediatamente.
+        """
+        message_id = atualizacao.get("message_id")
+        status_ack = atualizacao.get("status")
+        if not message_id or not status_ack:
+            return
+
+        agora = now_iso()
+        with self.db.write() as conn:
+            # 1. Guarda para o `_send_reply` ler depois se o POST for lento
+            conn.execute(
+                "INSERT INTO evolution_acks(message_id, status, created_at) VALUES(?,?,?) "
+                "ON CONFLICT(message_id) DO UPDATE SET status=excluded.status",
+                (message_id, status_ack, agora)
+            )
+        self.db.bump_meta("wa_webhook_acks", 1)
+
+        with self.db.write() as conn:
+            # 2. Se ja' foi gravado como `unconfirmed`, promove agora.
+            linha = conn.execute(
+                "SELECT simulation_id FROM messages WHERE wa_message_id=? AND direction='out'",
+                (message_id,)
+            ).fetchone()
+            
+            if not linha or not linha["simulation_id"]:
+                return
+                
+            sim_id = linha["simulation_id"]
+            cur = conn.execute(
+                f"UPDATE simulations SET delivery_status=?, replied_at=?, delivery_error='', next_delivery_at=NULL, updated_at=? "
+                f"WHERE id=? AND delivery_status=?",
+                (Delivery.DELIVERED, agora, agora, sim_id, Delivery.UNCONFIRMED)
+            )
+            if cur.rowcount > 0:
+                self.log("INFO", "whatsapp", 
+                         f"A entrega #{sim_id} estava incerta e foi confirmada pelo webhook de update ({status_ack}). Promovida para entregue.")
+                sim = conn.execute("SELECT * FROM simulations WHERE id=?", (sim_id,)).fetchone()
+                if sim:
+                    self.hub.publish("simulation_updated", dict(sim))
+
     def _receber_do_navegador(self, message: IncomingMessage) -> None:
         """Porta DURAVEL do modo dom -- o equivalente de ``receber_mensagem``.
 
@@ -1583,6 +1634,17 @@ class BotManager:
                    "media_status": entrega.media_status,
                    "sent_message_id": entrega.enviado_id, "reason": entrega.motivo}
 
+        # === OUT-OF-ORDER CHECK ===
+        # Um timeout na resposta do POST pode ocorrer DEPOIS de o webhook do ACK ter
+        # sido recebido e enfileirado no evolution_acks.
+        if entrega.status == Delivery.UNCONFIRMED and entrega.enviado_id:
+            ack = self.db.fetchone("SELECT status FROM evolution_acks WHERE message_id=?", (entrega.enviado_id,))
+            if ack and ack["status"]:
+                self.log("INFO", "whatsapp", 
+                         f"A entrega #{job.simulation_id} teve POST incerto, mas um ACK já chegou ({ack['status']}). Promovendo para entregue.")
+                entrega.status = Delivery.DELIVERED
+                entrega.desfecho = "entregue (ack adiantado)"
+
         if entrega.status == Delivery.DELIVERED:
             campos.update(stage=stage, replied_at=agora, sent_message_id=entrega.enviado_id,
                           delivery_error="", next_delivery_at=None)
@@ -1595,7 +1657,7 @@ class BotManager:
                              level="success" if result.ok else "warning",
                              title="Resposta entregue", detail=resumo, **comum)
         elif entrega.status == Delivery.UNCONFIRMED:
-            campos.update(stage=Stage.DELIVERY_UNCONFIRMED, sent_message_id="",
+            campos.update(stage=Stage.DELIVERY_UNCONFIRMED, sent_message_id=entrega.enviado_id,
                           delivery_error=entrega.motivo[:240])
             self.log("WARNING", "whatsapp",
                      f"{job.request_id}: Entrega incerta — verificar WhatsApp. {evidencia}. "
@@ -1918,6 +1980,7 @@ class BotManager:
             "group_name": self.config.whatsapp_group_name,
             "received": self.db.get_meta_int("wa_received"),
             "sent": self.db.get_meta_int("wa_sent"),
+            "acks_received": self.db.get_meta_int("wa_webhook_acks"),
             "online_since": status.since or self.db.get_meta("wa_online_since", ""),
             # Qual camada esta no ar. Sem isto, quem olha o painel nao tem como
             # saber se o bot esta raspando a tela ou falando com a API -- e as

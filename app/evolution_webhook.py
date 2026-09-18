@@ -27,12 +27,13 @@ sendo do ``parser``, que nao muda. Aqui so' se decide o que e' ruido.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from .models import IncomingMessage
 
 #: Eventos que nos interessam. Qualquer outro e' descartado sem barulho --
 #: a Evolution emite muita coisa (presenca, recibo, atualizacao de contato).
-EVENTOS_ATENDIDOS = ("messages.upsert", "connection.update")
+EVENTOS_ATENDIDOS = ("messages.upsert", "messages.update", "connection.update")
 
 
 @dataclass(frozen=True)
@@ -48,9 +49,11 @@ class Leitura:
     mensagem: IncomingMessage | None = None
     motivo: str = ""
     aviso: str = ""          # preenchido quando algo merece WARNING no log
+    atualizacao: dict | None = None
+    conexao: dict | None = None
 
     def __bool__(self) -> bool:
-        return self.mensagem is not None
+        return self.mensagem is not None or self.atualizacao is not None or self.conexao is not None
 
 
 def extrair_texto(message: dict) -> str:
@@ -127,15 +130,52 @@ def interpretar_todos(payload: dict, group_jid: str, group_name: str = "") -> li
     evento = (payload.get("event") or "").strip().lower()
     if evento and evento not in EVENTOS_ATENDIDOS:
         return [Leitura(motivo=f"evento ignorado: {evento}")]
+    
+    data = payload.get("data")
+
     if evento == "connection.update":
+        if isinstance(data, dict):
+            return [Leitura(motivo="connection.update", conexao=data)]
         return [Leitura(motivo="connection.update")]
 
-    data = payload.get("data")
+    if evento == "messages.update":
+        if isinstance(data, list):
+            if not data:
+                return [Leitura(motivo="payload sem data")]
+            return [_interpretar_um_update(item) for item in data]
+        return [_interpretar_um_update(data)]
+
     if isinstance(data, list):
         if not data:
             return [Leitura(motivo="payload sem data")]
         return [_interpretar_uma(item, group_jid, group_name) for item in data]
     return [_interpretar_uma(data, group_jid, group_name)]
+
+
+def _interpretar_um_update(data: Any) -> Leitura:
+    if not isinstance(data, dict):
+        return Leitura(motivo="payload sem data")
+
+    key = data.get("key")
+    if not isinstance(key, dict):
+        return Leitura(motivo="payload sem key")
+
+    update = data.get("update")
+    if not isinstance(update, dict):
+        return Leitura(motivo="payload sem update")
+
+    message_id = (key.get("id") or "").strip()
+    if not message_id:
+        return Leitura(motivo="mensagem sem key.id")
+
+    return Leitura(
+        motivo="messages.update",
+        atualizacao={
+            "message_id": message_id,
+            "chat_id": (key.get("remoteJid") or "").strip(),
+            "status": str(update.get("status") or "").upper()
+        }
+    )
 
 
 def _interpretar_uma(data, group_jid: str, group_name: str) -> Leitura:

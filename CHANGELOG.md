@@ -13,7 +13,14 @@ PR que a introduz.
 
 ## [Não lançado]
 
-Nada ainda.
+### Adicionado
+- **Integração Webhook Evolution:** 
+  - `connection.update`: Reflete instantaneamente quedas de conexão ou retornos de QR code direto na interface.
+  - `messages.update`: Identifica ACKs de leitura. Corrige falsos negativos onde o envio dá timeout, mas a resposta de ACK do servidor prova que a mensagem foi entregue (impedindo que a solicitação trave em "Não confirmada").
+- **Métricas:** O painel "Status" agora mostra a quantidade de Webhooks processados por sessão.
+
+### Corrigido
+- O webhook processa os ACKs fora-de-ordem de forma assíncrona para que a decisão de "unconfirmed" versus "delivered" sempre leve em conta eventos rápidos da Evolution.
 
 ## [0.3.1] — 2026-09-17
 

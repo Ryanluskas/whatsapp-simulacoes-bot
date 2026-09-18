@@ -430,32 +430,28 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
                                      config.whatsapp_group_name)
 
         if leituras[0].motivo == "connection.update":
-            # A instancia caiu ou voltou. Refletir no painel na hora, em vez de
-            # esperar o vigia: "conectado na tela e mudo no grupo" foi o pior
-            # cenario da camada antiga.
-            estado = str(((payload.get("data") or {}).get("state") or "")).lower()
-            if estado and estado != "open":
-                manager.log("ERROR", "whatsapp",
-                            f"A instância da Evolution caiu (state={estado}).")
+            estado = str((leituras[0].conexao or {}).get("state") or "").lower()
+            if estado:
+                manager.atualizar_conexao_evolution(estado)
             return {"ok": True, "acao": "connection.update"}
 
         respostas = []
         for leitura in leituras:
             if not leitura:
-                # 200 de proposito: ignorar nao e' erro, e devolver 4xx faria a
-                # Evolution reentregar para sempre uma mensagem que nunca vamos
-                # querer.
+                # 200 de proposito: ignorar nao e' erro
                 respostas.append({"ok": True, "ignorado": leitura.motivo})
+                continue
+            
+            if leitura.motivo == "messages.update":
+                if leitura.atualizacao:
+                    manager.receber_atualizacao(leitura.atualizacao)
+                respostas.append({"ok": True, "acao": "messages.update"})
                 continue
 
             if leitura.aviso:
                 manager.log("WARNING", "whatsapp", leitura.aviso)
 
-            # GRAVAR ANTES DE RESPONDER 200. A gravacao e' a trava contra
-            # reentrega (no banco, sobrevive a reinicio) e e' o que permite
-            # retomar a mensagem se o processo cair antes de trata-la. Se ela
-            # falhar, a excecao vira 500 e a Evolution reentrega -- que e'
-            # exatamente o comportamento certo.
+            # GRAVAR ANTES DE RESPONDER 200.
             recebida = manager.receber_mensagem(leitura.mensagem)
             if recebida.get("aceita"):
                 respostas.append({"ok": True, "request": "enfileirada",

@@ -571,6 +571,17 @@ class EvolutionClient:
                              last_error="instância desconectada")
         return estado
 
+    def injetar_estado_conexao(self, estado: str) -> None:
+        """Chamado pelo webhook para refletir quedas e retornos imediatamente."""
+        estado = (estado or "").strip().lower()
+        self._anotar_diagnostico(evolution_state=estado)
+        if estado == "open":
+            self._set_status(state=CONNECTED, last_error="", chat_id=self.group_jid, chat_name=self.group_name)
+        elif estado == "connecting":
+            self._set_status(state=STARTING, last_error="")
+        else:
+            self._set_status(state=DISCONNECTED, last_error="instância desconectada (via webhook)")
+
     def conferir_webhook(self) -> bool | None:
         """A instancia tem webhook ligado apontando para ``/webhook/whatsapp``?
 

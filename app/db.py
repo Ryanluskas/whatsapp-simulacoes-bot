@@ -120,6 +120,12 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
 );
+
+CREATE TABLE IF NOT EXISTS evolution_acks (
+    message_id TEXT PRIMARY KEY,
+    status     TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 # Os indices ficam separados de proposito: varios apontam para colunas que so'
