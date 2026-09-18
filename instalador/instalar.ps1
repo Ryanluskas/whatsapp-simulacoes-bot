@@ -162,6 +162,8 @@ function Escrever-Env {
         "DASHBOARD_PASSWORD=$Senha",
         "SESSION_SECRET=$(Segredo-Aleatorio 32)",
         "",
+        "DESKTOP_MODE=true",
+        "",
         "WHATSAPP_MODE=dom",
         "WHATSAPP_GROUP_NAME=$Grupo",
         "WHATSAPP_PROFILE_DIR=$Destino\perfis\whatsapp",
@@ -196,17 +198,7 @@ function Escrever-Env {
 
 function Criar-Atalhos {
     Passo "Criando atalhos"
-    $cmd = Join-Path $Destino "AllanaBot.cmd"
-    Set-Content -LiteralPath $cmd -Encoding OEM -Value @(
-        "@echo off",
-        "title Allana Bot",
-        "cd /d `"%~dp0`"",
-        "start `"`" /min cmd /c `"timeout /t 8 >nul & start `"`" http://127.0.0.1:$Porta`"",
-        "`".venv\Scripts\python.exe`" main.py",
-        "echo.",
-        "echo O bot parou. Feche esta janela ou pressione uma tecla.",
-        "pause >nul"
-    )
+    $cmd = Join-Path $Destino "iniciar.bat"
 
     $icone = Join-Path $Destino "instalador\allana.ico"
     $ws = New-Object -ComObject WScript.Shell
@@ -273,7 +265,7 @@ try {
 
     Write-Host ""
     Write-Host "  Pronto." -ForegroundColor Green
-    Write-Host "  Abra pelo atalho 'Allana Bot' ou rode: $Destino\AllanaBot.cmd"
+    Write-Host "  Abra pelo atalho 'Allana Bot' ou rode: $Destino\iniciar.bat"
     Write-Host "  O painel responde em http://127.0.0.1:$Porta"
     if ($SemPerguntas) { Write-Host "  Senha do painel: $Senha" -ForegroundColor Yellow }
     Write-Host ""
@@ -285,6 +277,7 @@ try {
     Write-Host ""
     Write-Host "  A instalacao parou: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "  Nada foi deixado pela metade em $Destino? Confira e rode de novo." -ForegroundColor Red
+    Read-Host "  Pressione Enter para sair..."
     exit 1
 }
 

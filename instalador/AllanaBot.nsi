@@ -1,4 +1,4 @@
-﻿!include "MUI2.nsh"
+!include "MUI2.nsh"
 
 Name "Allana Bot"
 OutFile "dist\AllanaBot_v${VERSION}-setup.exe"
@@ -31,10 +31,10 @@ Section "Allana Bot" SecBot
   ExecWait "cmd.exe /c bootstrap.cmd"
   
   WriteUninstaller "$INSTDIR\uninstall.exe"
-  CreateShortcut "$DESKTOP\Allana Bot.lnk" "$INSTDIR\iniciar.bat" "" "$INSTDIR\instalador\allana.ico"
 SectionEnd
 
 Section "Desinstalar"
-  Delete "$DESKTOP\Allana Bot.lnk"
-  RMDir /r "$INSTDIR"
+  ExecWait 'powershell.exe -ExecutionPolicy Bypass -File "$INSTDIR\instalador\desinstalar.ps1" -Silencioso'
+  Delete "$INSTDIR\uninstall.exe"
+  RMDir "$INSTDIR"
 SectionEnd
