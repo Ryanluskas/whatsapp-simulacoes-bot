@@ -20,6 +20,7 @@ param(
     [string]$Repo = "",
     [string]$Arqueiro = "$env:USERPROFILE\Downloads\arqueiro",
     [string]$Saida = "",
+    [string]$Versao = "1.0.0",
     # Monta o pacote sem o Arqueiro (o instalador pergunta o caminho depois).
     [switch]$SemArqueiro
 )
@@ -164,7 +165,7 @@ try {
 
     # ----------------------------------------------------------- setup.exe
     Passo "Gerando o setup.exe com o IExpress"
-    $exe = Join-Path $Saida "AllanaBot-setup.exe"
+    $exe = Join-Path $Saida "AllanaBot_v$Versao-setup.exe"
     if (Test-Path $exe) { Remove-Item $exe -Force }
     $sed = Join-Path $trabalho "AllanaBot.sed"
     Set-Content -LiteralPath $sed -Encoding ASCII -Value @(
@@ -210,6 +211,24 @@ try {
     )
     & "$env:WINDIR\System32\iexpress.exe" /N /Q $sed | Out-Null
     if (-not (Test-Path $exe)) { throw "o IExpress nao gerou o executavel" }
+    
+    # ----------------------------------------------------------- metadados (rcedit)
+    Passo "Aplicando icone e metadados ao executavel"
+    $rcedit = Join-Path $Aqui "rcedit.exe"
+    if (-not (Test-Path $rcedit)) {
+        Write-Host "   Baixando rcedit.exe (necessario para trocar o icone do IExpress)..." -ForegroundColor DarkGray
+        Invoke-WebRequest -Uri "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe" -OutFile $rcedit
+    }
+    if (Test-Path $rcedit) {
+        $icone = Join-Path $Aqui "allana.ico"
+        & $rcedit $exe --set-icon $icone --set-version-string "FileDescription" "Allana Bot Setup" --set-version-string "ProductName" "Allana Bot" --set-file-version $Versao --set-product-version $Versao | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Ok "Icone de Allana e versao $Versao injetados com sucesso"
+        } else {
+            Write-Host "   Aviso: rcedit.exe falhou em injetar o icone." -ForegroundColor Yellow
+        }
+    }
+
     $mbExe = [math]::Round((Get-Item $exe).Length / 1MB, 1)
     Ok "$exe ($mbExe MB)"
 
