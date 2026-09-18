@@ -175,7 +175,7 @@ try {
         Set-Content -LiteralPath $bootNsis -Encoding ASCII -Value "@echo off`r`nsetlocal`r`nset RAIZ=%~dp0`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%RAIZ%instalador\instalar.ps1`" %*`r`nexit /b %errorlevel%"
         
         $nsi = Join-Path $Aqui "AllanaBot.nsi"
-        & $makensis "/DVERSION=$Versao" "/DOUTFILE=$exe" $nsi | Out-Null
+        & $makensis "/DVERSION=$Versao" "/DPAYLOAD=$app" "/DOUTFILE=$exe" $nsi | Out-Null
         if (-not (Test-Path $exe)) { throw "o NSIS nao gerou o executavel" }
         
     } else {

@@ -9,7 +9,6 @@ RequestExecutionLevel user
 !define MUI_UNICON "allana.ico"
 
 !insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
@@ -22,14 +21,18 @@ RequestExecutionLevel user
 
 Section "Allana Bot" SecBot
   SectionIn RO
-  SetOutPath "$INSTDIR"
   
-  ; Empacota todo o codigo preparado
-  File /r "..\app\*.*"
+  InitPluginsDir
+  SetOutPath "$PLUGINSDIR"
   
-  ; Executa a instalacao do Python
+  ; Empacota todo o codigo preparado no PAYLOAD
+  File /r "${PAYLOAD}\*.*"
+  
+  ; O bootstrap chama o instalar.ps1, que faz a copia de fato para LOCALAPPDATA
   ExecWait "cmd.exe /c bootstrap.cmd"
   
+  ; Depois da instalacao, grava o uninstaller no diretorio final
+  SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 SectionEnd
 

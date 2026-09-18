@@ -89,6 +89,15 @@ function Segredo-Aleatorio([int]$bytes = 32) {
 
 function Copiar-Arquivos {
     Passo "Copiando os arquivos para $Destino"
+    
+    $rodando = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -like "*$Destino*" }
+    if ($rodando) {
+        Aviso "O bot esta rodando; encerrando para atualizar..."
+        $rodando | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Seconds 2
+    }
+
     New-Item -ItemType Directory -Force -Path $Destino | Out-Null
     $ignorar = @(".venv", "dados", "perfis", "comprovantes", ".git")
     Get-ChildItem -LiteralPath $Origem -Force | Where-Object { $ignorar -notcontains $_.Name } | ForEach-Object {
@@ -125,6 +134,11 @@ function Instalar-Chromium($venvPy) {
 }
 
 function Perguntar-Configuracao {
+    if (Test-Path (Join-Path $Destino ".env")) {
+        Aviso "Instalacao existente detectada: pulando perguntas."
+        return
+    }
+    
     if ($SemPerguntas) {
         if (-not $Senha) { $script:Senha = Segredo-Aleatorio 12 }
         if (-not $Grupo) { $script:Grupo = "Consultores" }
@@ -149,8 +163,8 @@ function Escrever-Env {
     Passo "Escrevendo a configuracao (.env)"
     $env_path = Join-Path $Destino ".env"
     if (Test-Path $env_path) {
-        Copy-Item $env_path "$env_path.anterior" -Force
-        Aviso ".env anterior guardado como .env.anterior"
+        Ok "O arquivo .env ja existe. Configuracao mantida."
+        return
     }
     $linhas = @(
         "# Gerado pelo instalador em $(Get-Date -Format 'dd/MM/yyyy HH:mm').",
