@@ -206,26 +206,69 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     manager.start()
-    try:
-        uvicorn.run(
+    
+    if config.desktop_mode:
+        import webview
+        
+        server_config = uvicorn.Config(
             app,
             host=config.web_host,
             port=config.web_port,
             log_level="info",
             access_log=False,
         )
-    except KeyboardInterrupt:
-        pass
-    except Exception:
-        log.exception("Servidor web encerrado com erro")
-        return 1
-    finally:
-        shutdown()
-        # Soltar o perfil explicitamente, alem do atexit: um encerramento por
-        # sinal nao passa pelo atexit em todos os casos, e um lock orfao faria
-        # o proximo boot recusar subir sem motivo.
-        trava.liberar()
-        trava_do_banco.liberar()
+        server = uvicorn.Server(server_config)
+        server_thread = threading.Thread(target=server.run, daemon=True)
+        server_thread.start()
+
+        def on_closed():
+            log.info("Janela fechada, encerrando o bot...")
+            shutdown()
+            server.should_exit = True
+
+        icon_path = ROOT / "dashboard" / "static" / "img" / "favicon.png"
+        if not icon_path.exists():
+            icon_path = None
+
+        window = webview.create_window(
+            title="Allana — Central de Simulações",
+            url=f"http://127.0.0.1:{config.web_port}",
+            width=1280,
+            height=800,
+        )
+        window.events.closed += on_closed
+        
+        try:
+            webview.start(icon=str(icon_path) if icon_path else None)
+        except Exception:
+            log.exception("Erro na janela desktop")
+        finally:
+            shutdown()
+            server.should_exit = True
+            server_thread.join(timeout=3.0)
+            trava.liberar()
+            trava_do_banco.liberar()
+    else:
+        try:
+            uvicorn.run(
+                app,
+                host=config.web_host,
+                port=config.web_port,
+                log_level="info",
+                access_log=False,
+            )
+        except KeyboardInterrupt:
+            pass
+        except Exception:
+            log.exception("Servidor web encerrado com erro")
+            return 1
+        finally:
+            shutdown()
+            # Soltar o perfil explicitamente, alem do atexit: um encerramento por
+            # sinal nao passa pelo atexit em todos os casos, e um lock orfao faria
+            # o proximo boot recusar subir sem motivo.
+            trava.liberar()
+            trava_do_banco.liberar()
     return 0
 
 
