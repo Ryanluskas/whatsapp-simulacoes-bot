@@ -72,7 +72,7 @@ try {
     # -Exclude nao filtra pasta com -LiteralPath: sem este Where-Object, o
     # dist\AllanaBot-setup.exe da montagem anterior entrava dentro do pacote.
     Get-ChildItem -LiteralPath $Aqui | Where-Object {
-        $_.Name -ne "dist" -and $_.Extension -ne ".sed"
+        $_.Name -ne "dist" -and $_.Extension -ne ".sed" -and $_.Extension -ne ".exe"
     } | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $destInst -Recurse -Force
     }
@@ -165,7 +165,7 @@ try {
 
     # ----------------------------------------------------------- setup.exe
     $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
-    $exe = Join-Path $Saida "AllanaBot_v$Versao-setup.exe"
+    $exe = Join-Path (Resolve-Path $Saida).Path "AllanaBot_v$Versao-setup.exe"
     
     if (Test-Path $makensis) {
         Passo "Gerando o setup.exe com NSIS (Wizard nativo)"
@@ -175,7 +175,7 @@ try {
         Set-Content -LiteralPath $bootNsis -Encoding ASCII -Value "@echo off`r`nsetlocal`r`nset RAIZ=%~dp0`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%RAIZ%instalador\instalar.ps1`" %*`r`nexit /b %errorlevel%"
         
         $nsi = Join-Path $Aqui "AllanaBot.nsi"
-        & $makensis "/DVERSION=$Versao" $nsi | Out-Null
+        & $makensis "/DVERSION=$Versao" "/DOUTFILE=$exe" $nsi | Out-Null
         if (-not (Test-Path $exe)) { throw "o NSIS nao gerou o executavel" }
         
     } else {
