@@ -20,6 +20,7 @@ param(
     [string]$Repo = "",
     [string]$Arqueiro = "$env:USERPROFILE\Downloads\arqueiro",
     [string]$Saida = "",
+    [string]$Versao = "1.0.0",
     # Monta o pacote sem o Arqueiro (o instalador pergunta o caminho depois).
     [switch]$SemArqueiro
 )
@@ -71,7 +72,7 @@ try {
     # -Exclude nao filtra pasta com -LiteralPath: sem este Where-Object, o
     # dist\AllanaBot-setup.exe da montagem anterior entrava dentro do pacote.
     Get-ChildItem -LiteralPath $Aqui | Where-Object {
-        $_.Name -ne "dist" -and $_.Extension -ne ".sed"
+        $_.Name -ne "dist" -and $_.Extension -ne ".sed" -and $_.Extension -ne ".exe"
     } | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $destInst -Recurse -Force
     }
@@ -163,53 +164,85 @@ try {
     Ok "payload.zip com $mb MB"
 
     # ----------------------------------------------------------- setup.exe
-    Passo "Gerando o setup.exe com o IExpress"
-    $exe = Join-Path $Saida "AllanaBot-setup.exe"
-    if (Test-Path $exe) { Remove-Item $exe -Force }
-    $sed = Join-Path $trabalho "AllanaBot.sed"
-    Set-Content -LiteralPath $sed -Encoding ASCII -Value @(
-        "[Version]",
-        "Class=IEXPRESS",
-        "SEDVersion=3",
-        "[Options]",
-        "PackagePurpose=InstallApp",
-        "ShowInstallProgramWindow=0",
-        "HideExtractAnimation=1",
-        "UseLongFileName=1",
-        "InsideCompressed=0",
-        "CAB_FixedSize=0",
-        "CAB_ResvCodeSigning=0",
-        "RebootMode=N",
-        "InstallPrompt=%InstallPrompt%",
-        "DisplayLicense=%DisplayLicense%",
-        "FinishMessage=%FinishMessage%",
-        "TargetName=%TargetName%",
-        "FriendlyName=%FriendlyName%",
-        "AppLaunched=%AppLaunched%",
-        "PostInstallCmd=%PostInstallCmd%",
-        "AdminQuietInstCmd=%AdminQuietInstCmd%",
-        "UserQuietInstCmd=%UserQuietInstCmd%",
-        "SourceFiles=SourceFiles",
-        "[Strings]",
-        "InstallPrompt=Instalar o Allana Bot neste computador?",
-        "DisplayLicense=",
-        "FinishMessage=",
-        "TargetName=$exe",
-        "FriendlyName=Allana Bot",
-        "AppLaunched=cmd /c bootstrap.cmd",
-        "PostInstallCmd=<None>",
-        "AdminQuietInstCmd=",
-        "UserQuietInstCmd=",
-        "FILE0=`"bootstrap.cmd`"",
-        "FILE1=`"payload.zip`"",
-        "[SourceFiles]",
-        "SourceFiles0=$trabalho",
-        "[SourceFiles0]",
-        "%FILE0%=",
-        "%FILE1%="
-    )
-    & "$env:WINDIR\System32\iexpress.exe" /N /Q $sed | Out-Null
-    if (-not (Test-Path $exe)) { throw "o IExpress nao gerou o executavel" }
+    $makensis = "C:\Program Files (x86)\NSIS\makensis.exe"
+    $exe = Join-Path (Resolve-Path $Saida).Path "AllanaBot_v$Versao-setup.exe"
+    
+    if (Test-Path $makensis) {
+        Passo "Gerando o setup.exe com NSIS (Wizard nativo)"
+        if (Test-Path $exe) { Remove-Item $exe -Force }
+        
+        $bootNsis = Join-Path $app "bootstrap.cmd"
+        Set-Content -LiteralPath $bootNsis -Encoding ASCII -Value "@echo off`r`nsetlocal`r`nset RAIZ=%~dp0`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%RAIZ%instalador\instalar.ps1`" %*`r`nexit /b %errorlevel%"
+        
+        $nsi = Join-Path $Aqui "AllanaBot.nsi"
+        & $makensis "/DVERSION=$Versao" "/DOUTFILE=$exe" $nsi | Out-Null
+        if (-not (Test-Path $exe)) { throw "o NSIS nao gerou o executavel" }
+        
+    } else {
+        Passo "Gerando o setup.exe com IExpress (modo basico - Instale o NSIS para ter o Wizard)"
+        if (Test-Path $exe) { Remove-Item $exe -Force }
+        $sed = Join-Path $trabalho "AllanaBot.sed"
+        Set-Content -LiteralPath $sed -Encoding ASCII -Value @(
+            "[Version]",
+            "Class=IEXPRESS",
+            "SEDVersion=3",
+            "[Options]",
+            "PackagePurpose=InstallApp",
+            "ShowInstallProgramWindow=0",
+            "HideExtractAnimation=1",
+            "UseLongFileName=1",
+            "InsideCompressed=0",
+            "CAB_FixedSize=0",
+            "CAB_ResvCodeSigning=0",
+            "RebootMode=N",
+            "InstallPrompt=%InstallPrompt%",
+            "DisplayLicense=%DisplayLicense%",
+            "FinishMessage=%FinishMessage%",
+            "TargetName=%TargetName%",
+            "FriendlyName=%FriendlyName%",
+            "AppLaunched=%AppLaunched%",
+            "PostInstallCmd=%PostInstallCmd%",
+            "AdminQuietInstCmd=%AdminQuietInstCmd%",
+            "UserQuietInstCmd=%UserQuietInstCmd%",
+            "SourceFiles=SourceFiles",
+            "[Strings]",
+            "InstallPrompt=Instalar o Allana Bot neste computador?",
+            "DisplayLicense=",
+            "FinishMessage=",
+            "TargetName=$exe",
+            "FriendlyName=Allana Bot",
+            "AppLaunched=cmd /c bootstrap.cmd",
+            "PostInstallCmd=<None>",
+            "AdminQuietInstCmd=",
+            "UserQuietInstCmd=",
+            "FILE0=`"bootstrap.cmd`"",
+            "FILE1=`"payload.zip`"",
+            "[SourceFiles]",
+            "SourceFiles0=$trabalho",
+            "[SourceFiles0]",
+            "%FILE0%=",
+            "%FILE1%="
+        )
+        & "$env:WINDIR\System32\iexpress.exe" /N /Q $sed | Out-Null
+        if (-not (Test-Path $exe)) { throw "o IExpress nao gerou o executavel" }
+        
+        # ----------------------------------------------------------- metadados (rcedit)
+        Passo "Aplicando icone e metadados ao executavel"
+        $rcedit = Join-Path $Aqui "rcedit.exe"
+        if (-not (Test-Path $rcedit)) {
+            Write-Host "   Baixando rcedit.exe (necessario para trocar o icone do IExpress)..." -ForegroundColor DarkGray
+            Invoke-WebRequest -Uri "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe" -OutFile $rcedit
+        }
+        if (Test-Path $rcedit) {
+            $icone = Join-Path $Aqui "allana.ico"
+            & $rcedit $exe --set-icon $icone --set-version-string "FileDescription" "Allana Bot Setup" --set-version-string "ProductName" "Allana Bot" --set-file-version $Versao --set-product-version $Versao | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Ok "Icone de Allana e versao $Versao injetados com sucesso"
+            } else {
+                Write-Host "   Aviso: rcedit.exe falhou em injetar o icone." -ForegroundColor Yellow
+            }
+        }
+    }
     $mbExe = [math]::Round((Get-Item $exe).Length / 1MB, 1)
     Ok "$exe ($mbExe MB)"
 

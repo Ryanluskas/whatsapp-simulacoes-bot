@@ -121,12 +121,15 @@ if not exist ".env" (
 )
 
 set "PORTA=8000"
+set "DESKTOP_MODE=true"
 if exist ".env" (
   for /f "usebackq tokens=1,2 delims==" %%a in (".env") do (
     if /i "%%a"=="WEB_PORT" set "PORTA=%%b"
+    if /i "%%a"=="DESKTOP_MODE" set "DESKTOP_MODE=%%b"
   )
 )
 for /f "tokens=* delims= " %%p in ("!PORTA!") do set "PORTA=%%p"
+for /f "tokens=* delims= " %%p in ("!DESKTOP_MODE!") do set "DESKTOP_MODE=%%p"
 
 powershell -NoProfile -Command "try{(New-Object Net.Sockets.TcpClient('127.0.0.1',!PORTA!)).Dispose();exit 0}catch{exit 1}" >nul 2>nul
 if not errorlevel 1 (
@@ -203,9 +206,16 @@ echo    [OK]   Fila ................... !FILA! aguardando
 echo    [--]   WhatsApp ............... !WA!
 echo  ==========================================================
 echo.
-echo    Abrindo o painel no navegador...
-start "" "http://localhost:!PORTA!"
-echo.
+set "ABRIR_NAVEGADOR=0"
+if /i "!DESKTOP_MODE!"=="false" set "ABRIR_NAVEGADOR=1"
+if /i "!DESKTOP_MODE!"=="0" set "ABRIR_NAVEGADOR=1"
+
+if "!ABRIR_NAVEGADOR!"=="1" (
+  echo    Abrindo o painel no navegador...
+  start "" "http://localhost:!PORTA!"
+  echo.
+)
+
 if /i "!WA!"=="conectado" (
   echo    Tudo pronto. Acompanhe o bot pela aba Monitor.
 ) else (

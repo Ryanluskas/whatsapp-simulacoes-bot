@@ -114,6 +114,7 @@ class Config:
     mask_cpf_in_ui: bool
     timezone: str
     retention_days: int
+    desktop_mode: bool = False
     #: Onde ficam os PNGs enviados. None = ``<projeto>/comprovantes``.
     comprovantes_dir: Path | None = None
 
@@ -241,6 +242,7 @@ def load_config(env_file: str | Path | None = None) -> Config:
         session_secret=os.getenv("SESSION_SECRET", "").strip(),
         session_hours=_int("SESSION_HOURS", 12, minimum=1, maximum=720),
         mask_cpf_in_ui=_flag("MASK_CPF_IN_UI", "true"),
+        desktop_mode=_flag("DESKTOP_MODE", "true"),
         timezone=os.getenv("TIMEZONE", "America/Sao_Paulo").strip() or "America/Sao_Paulo",
         retention_days=_int("RETENTION_DAYS", 180, minimum=7),
         comprovantes_dir=(_path("COMPROVANTES_DIR", "comprovantes")
