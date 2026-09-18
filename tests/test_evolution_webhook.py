@@ -303,21 +303,21 @@ class TestARotaDoWebhook:
         # Envia READ (rank 3)
         client.post("/webhook/whatsapp", json={
             "event": "messages.update",
-            "data": [{"key": {"id": "MSG_MONO"}, "update": {"status": "READ"}}]
+            "data": [{"key": {"id": "MSG_MONO", "remoteJid": GRUPO}, "update": {"status": "READ"}}]
         }, headers=CABECALHO)
-
+    
         # Envia SERVER_ACK (rank 1) depois de READ
         client.post("/webhook/whatsapp", json={
             "event": "messages.update",
-            "data": [{"key": {"id": "MSG_MONO"}, "update": {"status": "SERVER_ACK"}}]
+            "data": [{"key": {"id": "MSG_MONO", "remoteJid": GRUPO}, "update": {"status": "SERVER_ACK"}}]
         }, headers=CABECALHO)
-
+    
         # Envia ERROR (rank -1)
         client.post("/webhook/whatsapp", json={
             "event": "messages.update",
-            "data": [{"key": {"id": "MSG_MONO"}, "update": {"status": "ERROR"}}]
+            "data": [{"key": {"id": "MSG_MONO", "remoteJid": GRUPO}, "update": {"status": "ERROR"}}]
         }, headers=CABECALHO)
-
+    
         linha = manager.db.fetchone("SELECT status, rank FROM evolution_acks WHERE message_id='MSG_MONO'")
         # READ deve ter sobrevivido porque tem peso 3, que é > 1 e > -1
         assert linha["status"] == "READ"
@@ -331,19 +331,21 @@ class TestARotaDoWebhook:
         sim_id = manager.db.insert("simulations", {
             "request_id": "REQ_X", "status": "completed",
             "delivery_status": "unconfirmed", "stage": "delivery_unconfirmed",
+            "chat_id": GRUPO,
             "created_at": agora, "updated_at": agora
         })
         # 2. Inserir a mensagem de saída
         manager.db.insert("messages", {
             "simulation_id": sim_id, "request_id": "REQ_X", "direction": "out",
+            "chat_id": GRUPO,
             "wa_message_id": "MSG_PROMOVE", "status": "unconfirmed",
             "created_at": agora
         })
-
+    
         # 3. Manda o webhook de DELIVERY_ACK (rank 2)
         payload = {
             "event": "messages.update",
-            "data": [{"key": {"id": "MSG_PROMOVE"}, "update": {"status": "DELIVERY_ACK"}}]
+            "data": [{"key": {"id": "MSG_PROMOVE", "remoteJid": GRUPO}, "update": {"status": "DELIVERY_ACK"}}]
         }
         r = client.post("/webhook/whatsapp", json=payload, headers=CABECALHO)
         assert r.status_code == 200

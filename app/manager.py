@@ -753,7 +753,7 @@ class BotManager:
         message_id = atualizacao.get("message_id")
         status_ack = atualizacao.get("status")
         chat_id = (atualizacao.get("chat_id") or "").strip()
-        if not message_id or not status_ack:
+        if not message_id or not status_ack or not chat_id:
             return
 
         cat, rank = classificar_ack_evolution(status_ack)
@@ -763,10 +763,10 @@ class BotManager:
             # 1. Guarda para o `_send_reply` ler depois se o POST for lento (Reconciliação)
             # Só sobrescreve se o rank do novo evento for maior ou igual ao salvo.
             conn.execute(
-                "INSERT INTO evolution_acks(message_id, status, rank, created_at) VALUES(?,?,?,?) "
-                "ON CONFLICT(message_id) DO UPDATE SET status=excluded.status, rank=excluded.rank, created_at=excluded.created_at "
+                "INSERT INTO evolution_acks(message_id, status, rank, chat_id, created_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(message_id) DO UPDATE SET status=excluded.status, rank=excluded.rank, chat_id=excluded.chat_id, created_at=excluded.created_at "
                 "WHERE excluded.rank >= evolution_acks.rank",
-                (message_id, status_ack, rank, agora)
+                (message_id, status_ack, rank, chat_id, agora)
             )
         self.db.bump_meta("wa_webhook_acks", 1)
 
@@ -784,7 +784,7 @@ class BotManager:
             
             if not linha or not linha["simulation_id"]:
                 return
-            if chat_id and linha["chat_id"] and chat_id != linha["chat_id"]:
+            if chat_id != linha["chat_id"]:
                 return
 
             sim_id = linha["simulation_id"]
@@ -1661,7 +1661,7 @@ class BotManager:
         with self.db.write() as conn:
             # Reconciliação: Um timeout no POST pode ocorrer DEPOIS do webhook ter recebido o ACK.
             if entrega.status == Delivery.UNCONFIRMED and entrega.enviado_id:
-                ack = conn.execute("SELECT status, rank FROM evolution_acks WHERE message_id=?", (entrega.enviado_id,)).fetchone()
+                ack = conn.execute("SELECT status, rank FROM evolution_acks WHERE message_id=? AND chat_id=?", (entrega.enviado_id, job.chat_id)).fetchone()
                 if ack and ack["rank"] >= 1:
                     self.log(
                         "INFO",

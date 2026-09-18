@@ -30,6 +30,7 @@ import base64
 import re
 import queue
 import threading
+import time
 from pathlib import Path
 from typing import NamedTuple
 from enum import Enum
@@ -400,8 +401,8 @@ class EvolutionClient:
             "checked_at": "",
         }
 
-        # Ver ``ja_enviado``.
-
+        # Estado da conexão.
+        self._ultimo_estado_em = 0.0
         self._memoria_lock = threading.Lock()
 
         self._parar = threading.Event()
@@ -421,7 +422,11 @@ class EvolutionClient:
             return self._status
 
     def _set_status(self, **changes) -> None:
+        observed_at = changes.pop("observed_at", time.time())
         with self._status_lock:
+            if observed_at < self._ultimo_estado_em:
+                return
+            self._ultimo_estado_em = observed_at
             atual = self._status.as_dict()
             atual.pop("connected", None)
             atual.update(changes)
@@ -552,13 +557,14 @@ class EvolutionClient:
 
     def atualizar_estado(self) -> str:
         """Le ``/instance/connectionState`` e reflete no status e no diagnostico."""
+        t0 = time.time()
         try:
             resposta = self._http().get(f"/instance/connectionState/{self.instance}")
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             self._anotar_diagnostico(evolution_api_reachable=False, api_key_valid=None,
                                      instance_found=None, evolution_state="unreachable")
             self._set_status(state=DISCONNECTED,
-                             last_error=f"Evolution inacessível: {exc}"[:200])
+                             last_error=f"Evolution inacessível: {exc}"[:200], observed_at=t0)
             return DISCONNECTED
 
         codigo = resposta.status_code
@@ -566,13 +572,13 @@ class EvolutionClient:
             self._anotar_diagnostico(evolution_api_reachable=True, api_key_valid=False,
                                      instance_found=None, evolution_state="unauthorized")
             self._set_status(state=DISCONNECTED, last_poll=now_iso(),
-                             last_error=f"a Evolution recusou a chave ({codigo})")
+                             last_error=f"a Evolution recusou a chave ({codigo})", observed_at=t0)
             return DISCONNECTED
         if codigo == 404:
             self._anotar_diagnostico(evolution_api_reachable=True, api_key_valid=True,
                                      instance_found=False, evolution_state="not_found")
             self._set_status(state=DISCONNECTED, last_poll=now_iso(),
-                             last_error=f"a instância '{self.instance}' não existe na Evolution")
+                             last_error=f"a instância '{self.instance}' não existe na Evolution", observed_at=t0)
             return DISCONNECTED
         if codigo >= 400:
             licenca = LICENCA_PENDENTE in (resposta.text or "")
@@ -582,7 +588,7 @@ class EvolutionClient:
                                      else f"http_{codigo}")
             self._set_status(state=DISCONNECTED, last_poll=now_iso(),
                              last_error=("licença da Evolution não ativada (/manager)" if licenca
-                                         else f"a Evolution respondeu {codigo} ao estado"))
+                                         else f"a Evolution respondeu {codigo} ao estado"), observed_at=t0)
             return DISCONNECTED
         try:
             dados = resposta.json()
@@ -596,12 +602,12 @@ class EvolutionClient:
                                  instance_found=True, evolution_state=estado or "unknown")
         if estado == "open":
             self._set_status(state=CONNECTED, last_error="", last_poll=now_iso(),
-                             chat_id=self.group_jid, chat_name=self.group_name)
+                             chat_id=self.group_jid, chat_name=self.group_name, observed_at=t0)
         elif estado == "connecting":
-            self._set_status(state=STARTING, last_poll=now_iso(), last_error="")
+            self._set_status(state=STARTING, last_poll=now_iso(), last_error="", observed_at=t0)
         else:
             self._set_status(state=DISCONNECTED, last_poll=now_iso(),
-                             last_error="instância desconectada")
+                             last_error="instância desconectada", observed_at=t0)
         return estado
 
     def injetar_estado_conexao(self, estado: str) -> None:

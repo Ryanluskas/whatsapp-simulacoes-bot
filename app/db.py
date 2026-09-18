@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS evolution_acks (
     message_id TEXT PRIMARY KEY,
     status     TEXT NOT NULL,
     rank       INTEGER NOT NULL DEFAULT 0,
+    chat_id    TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 """
@@ -234,6 +235,7 @@ MIGRATIONS: dict[str, dict[str, str]] = {
     },
     "evolution_acks": {
         "rank": "INTEGER NOT NULL DEFAULT 0",
+        "chat_id": "TEXT NOT NULL DEFAULT ''",
     },
 }
 
