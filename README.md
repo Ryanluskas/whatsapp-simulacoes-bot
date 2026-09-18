@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/allana.png" alt="Allana — Central de Simulações" width="240" />
+</p>
+
 # Allana — Central de Simulações via WhatsApp
 
 Os consultores pedem simulações num grupo de WhatsApp. O bot lê a mensagem,
