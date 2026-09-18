@@ -394,24 +394,6 @@ class TestContratoEntreAsDuasCamadas:
         assert isinstance(cliente.status, WhatsAppStatus)
 
 
-# ------------------------------------------------------------------- ja_enviado
-class TestGuardaDeReenvio:
-    def test_lembra_do_que_mandou(self, cliente):
-        assert cliente.ja_enviado("REQ000182") is False
-        cliente.send(GRUPO, "g", "resultado\n_REQ000182_")
-        assert cliente.ja_enviado("REQ000182") is True
-
-    def test_envio_que_falhou_nao_conta_como_enviado(self):
-        """Senão o reenvio nunca aconteceria justamente quando é necessário."""
-        espiao = Espiao(httpx.Response(500, text="boom"))
-        c = EvolutionClient("http://e:8080", "k", "allana", GRUPO,
-                            client=httpx.Client(transport=httpx.MockTransport(espiao),
-                                                base_url="http://e:8080"),
-                            renderer=None)
-        c.send(GRUPO, "g", "resultado _REQ000182_")
-        assert c.ja_enviado("REQ000182") is False
-
-
 # ---------------------------------------------------------------------- estado
 class TestEstadoDaInstancia:
     def test_open_vira_conectado(self, tmp_path):

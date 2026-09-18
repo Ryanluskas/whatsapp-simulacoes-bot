@@ -30,8 +30,10 @@ import base64
 import re
 import queue
 import threading
+import time
 from pathlib import Path
 from typing import NamedTuple
+from enum import Enum
 
 import httpx
 
@@ -219,6 +221,40 @@ def classificar_falha_de_transporte(exc: Exception) -> Classificacao:
             Categoria.UNCERTAIN)
 
 
+class CategoriaAck(str, Enum):
+    CONFIRMACAO_ENTREGA = "confirmacao_entrega"
+    NAO_CONFIRMADOR = "nao_confirmador"
+    ERRO = "erro"
+
+
+def classificar_ack_evolution(status: str) -> tuple[CategoriaAck, int]:
+    """Classifica o status de entrega do webhook e devolve sua 'ordem' (peso).
+
+    Um peso maior jamais é sobrescrito por um menor (ex: READ não volta pra PENDING).
+    ERROR não derruba o que já foi confirmado.
+
+    Pesos (baseados no Baileys):
+    - 0: PENDING / 0 / Vazio
+    - 0: SERVER_ACK / 1 (aceito pela Evolution, ainda sem prova de entrega)
+    - 2: DELIVERY_ACK / 2 (Chegou no destinatário)
+    - 3: READ / 3 (Lido)
+    - 4: PLAYED / 4 (Áudio tocado)
+    - -1: ERROR / 5 (Erro)
+    """
+    s = str(status).strip().upper()
+    if s in ("1", "SERVER_ACK"):
+        return CategoriaAck.NAO_CONFIRMADOR, 0
+    if s in ("2", "DELIVERY_ACK"):
+        return CategoriaAck.CONFIRMACAO_ENTREGA, 2
+    if s in ("3", "READ"):
+        return CategoriaAck.CONFIRMACAO_ENTREGA, 3
+    if s in ("4", "PLAYED"):
+        return CategoriaAck.CONFIRMACAO_ENTREGA, 4
+    if s in ("5", "ERROR"):
+        return CategoriaAck.ERRO, -1
+    return CategoriaAck.NAO_CONFIRMADOR, 0
+
+
 class ErroDeEnvio(Exception):
     """Falha na entrega, com o desfecho ja' classificado."""
 
@@ -318,8 +354,6 @@ def _id_da_midia(corpo: dict) -> str:
 class EvolutionClient:
     """Implementa ``WhatsAppPort`` falando com a Evolution API."""
 
-    #: Quantas mensagens nossas lembrar para o ``ja_enviado``. Ver o metodo.
-    _MEMORIA_DE_ENVIOS = 400
     _INTERVALO_DO_STATUS = 20.0
 
     def __init__(
@@ -367,8 +401,8 @@ class EvolutionClient:
             "checked_at": "",
         }
 
-        # Ver ``ja_enviado``.
-        self._marcas_enviadas: list[str] = []
+        # Estado da conexão.
+        self._ultimo_estado_em = 0.0
         self._memoria_lock = threading.Lock()
 
         self._parar = threading.Event()
@@ -388,7 +422,11 @@ class EvolutionClient:
             return self._status
 
     def _set_status(self, **changes) -> None:
+        observed_at = changes.pop("observed_at", time.time())
         with self._status_lock:
+            if observed_at < self._ultimo_estado_em:
+                return
+            self._ultimo_estado_em = observed_at
             atual = self._status.as_dict()
             atual.pop("connected", None)
             atual.update(changes)
@@ -519,13 +557,14 @@ class EvolutionClient:
 
     def atualizar_estado(self) -> str:
         """Le ``/instance/connectionState`` e reflete no status e no diagnostico."""
+        t0 = time.time()
         try:
             resposta = self._http().get(f"/instance/connectionState/{self.instance}")
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             self._anotar_diagnostico(evolution_api_reachable=False, api_key_valid=None,
                                      instance_found=None, evolution_state="unreachable")
             self._set_status(state=DISCONNECTED,
-                             last_error=f"Evolution inacessível: {exc}"[:200])
+                             last_error=f"Evolution inacessível: {exc}"[:200], observed_at=t0)
             return DISCONNECTED
 
         codigo = resposta.status_code
@@ -533,13 +572,13 @@ class EvolutionClient:
             self._anotar_diagnostico(evolution_api_reachable=True, api_key_valid=False,
                                      instance_found=None, evolution_state="unauthorized")
             self._set_status(state=DISCONNECTED, last_poll=now_iso(),
-                             last_error=f"a Evolution recusou a chave ({codigo})")
+                             last_error=f"a Evolution recusou a chave ({codigo})", observed_at=t0)
             return DISCONNECTED
         if codigo == 404:
             self._anotar_diagnostico(evolution_api_reachable=True, api_key_valid=True,
                                      instance_found=False, evolution_state="not_found")
             self._set_status(state=DISCONNECTED, last_poll=now_iso(),
-                             last_error=f"a instância '{self.instance}' não existe na Evolution")
+                             last_error=f"a instância '{self.instance}' não existe na Evolution", observed_at=t0)
             return DISCONNECTED
         if codigo >= 400:
             licenca = LICENCA_PENDENTE in (resposta.text or "")
@@ -549,7 +588,7 @@ class EvolutionClient:
                                      else f"http_{codigo}")
             self._set_status(state=DISCONNECTED, last_poll=now_iso(),
                              last_error=("licença da Evolution não ativada (/manager)" if licenca
-                                         else f"a Evolution respondeu {codigo} ao estado"))
+                                         else f"a Evolution respondeu {codigo} ao estado"), observed_at=t0)
             return DISCONNECTED
         try:
             dados = resposta.json()
@@ -563,13 +602,24 @@ class EvolutionClient:
                                  instance_found=True, evolution_state=estado or "unknown")
         if estado == "open":
             self._set_status(state=CONNECTED, last_error="", last_poll=now_iso(),
-                             chat_id=self.group_jid, chat_name=self.group_name)
+                             chat_id=self.group_jid, chat_name=self.group_name, observed_at=t0)
         elif estado == "connecting":
-            self._set_status(state=STARTING, last_poll=now_iso(), last_error="")
+            self._set_status(state=STARTING, last_poll=now_iso(), last_error="", observed_at=t0)
         else:
             self._set_status(state=DISCONNECTED, last_poll=now_iso(),
-                             last_error="instância desconectada")
+                             last_error="instância desconectada", observed_at=t0)
         return estado
+
+    def injetar_estado_conexao(self, estado: str) -> None:
+        """Chamado pelo webhook para refletir quedas e retornos imediatamente."""
+        estado = (estado or "").strip().lower()
+        self._anotar_diagnostico(evolution_state=estado)
+        if estado == "open":
+            self._set_status(state=CONNECTED, last_error="", chat_id=self.group_jid, chat_name=self.group_name)
+        elif estado == "connecting":
+            self._set_status(state=STARTING, last_error="")
+        else:
+            self._set_status(state=DISCONNECTED, last_error="instância desconectada (via webhook)")
 
     def conferir_webhook(self) -> bool | None:
         """A instancia tem webhook ligado apontando para ``/webhook/whatsapp``?
@@ -625,24 +675,11 @@ class EvolutionClient:
 
     # ------------------------------------------------------------------ memoria
     def _lembrar_envio(self, texto: str) -> None:
-        with self._memoria_lock:
-            self._marcas_enviadas.append(texto or "")
-            del self._marcas_enviadas[:-self._MEMORIA_DE_ENVIOS]
+        pass  # Removido cache em RAM conforme revisão
 
     def ja_enviado(self, marca: str, timeout: float = 20.0) -> bool:
-        """Ja' mandamos alguma mensagem com esta marca?
-
-        Na camada antiga isto era uma busca no HTML da conversa. Aqui nao ha'
-        HTML -- mas tambem nao ha' necessidade: **somos o unico remetente
-        deste bot**, entao o que enviamos e' o que sabemos ter enviado. A
-        memoria e' do processo: depois de reiniciar, ``ja_enviado`` volta a
-        dizer ``False``, e o pior caso e' o consultor receber a resposta duas
-        vezes. Ficar sem resposta seria pior, e e' o que a duvida evita.
-        """
-        if not marca:
-            return False
-        with self._memoria_lock:
-            return any(marca in texto for texto in self._marcas_enviadas)
+        """A Evolution não consulta tela. A fonte de verdade é o banco."""
+        return False
 
     @staticmethod
     def _citacao(quote_message_id: str, chat_id: str, quote_text: str = "",

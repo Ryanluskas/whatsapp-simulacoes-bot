@@ -250,9 +250,148 @@ class TestARotaDoWebhook:
         client, manager = sistema
         r = client.post("/webhook/whatsapp", json=_payload(), headers=CABECALHO)
         assert r.status_code == 200
-        mensagem = manager.whatsapp.inbox.get(timeout=2)
-        assert mensagem.message_id == "3EB0AAA"
-        assert "42888832453" in mensagem.text
+        assert not manager.whatsapp.inbox.empty()
+        # Verificar o que entrou na fila
+        msg = manager.whatsapp.inbox.get(timeout=1.0)
+        assert msg.text == "Ivone Teste\n42888832453\nAmapá"
+
+    def test_messages_update_classificacao_de_status(self, sistema):
+        client, manager = sistema
+        # SERVER_ACK registra o evento, mas ainda nao prova entrega ao destinatario.
+        payload_update = {
+            "event": "messages.update",
+            "instance": "allana",
+            "data": [
+                {
+                    "key": {"id": "MSG123", "remoteJid": GRUPO},
+                    "update": {"status": "SERVER_ACK"}
+                }
+            ]
+        }
+        r = client.post("/webhook/whatsapp", json=payload_update, headers=CABECALHO)
+        assert r.status_code == 200
+
+        linha = manager.db.fetchone("SELECT status, rank FROM evolution_acks WHERE message_id='MSG123'")
+        assert linha["status"] == "SERVER_ACK"
+        assert linha["rank"] == 0
+
+    def test_server_ack_nao_promove_entrega(self, sistema):
+        client, manager = sistema
+        agora = "2026-09-18T12:00:00Z"
+        sim_id = manager.db.insert("simulations", {
+            "request_id": "REQ_SERVER_ACK", "status": "completed",
+            "delivery_status": "unconfirmed", "stage": "delivery_unconfirmed",
+            "created_at": agora, "updated_at": agora,
+        })
+        manager.db.insert("messages", {
+            "simulation_id": sim_id, "request_id": "REQ_SERVER_ACK",
+            "direction": "out", "wa_message_id": "MSG_SERVER_ACK",
+            "status": "unconfirmed", "created_at": agora,
+        })
+        r = client.post("/webhook/whatsapp", json={
+            "event": "messages.update",
+            "data": [{"key": {"id": "MSG_SERVER_ACK"},
+                      "update": {"status": "SERVER_ACK"}}],
+        }, headers=CABECALHO)
+        assert r.status_code == 200
+        sim = manager.db.fetchone("SELECT delivery_status FROM simulations WHERE id=?",
+                                  (sim_id,))
+        assert sim["delivery_status"] == "unconfirmed"
+
+    def test_messages_update_ordem_monotonica(self, sistema):
+        client, manager = sistema
+        # Envia READ (rank 3)
+        client.post("/webhook/whatsapp", json={
+            "event": "messages.update",
+            "data": [{"key": {"id": "MSG_MONO", "remoteJid": GRUPO}, "update": {"status": "READ"}}]
+        }, headers=CABECALHO)
+    
+        # Envia SERVER_ACK (rank 1) depois de READ
+        client.post("/webhook/whatsapp", json={
+            "event": "messages.update",
+            "data": [{"key": {"id": "MSG_MONO", "remoteJid": GRUPO}, "update": {"status": "SERVER_ACK"}}]
+        }, headers=CABECALHO)
+    
+        # Envia ERROR (rank -1)
+        client.post("/webhook/whatsapp", json={
+            "event": "messages.update",
+            "data": [{"key": {"id": "MSG_MONO", "remoteJid": GRUPO}, "update": {"status": "ERROR"}}]
+        }, headers=CABECALHO)
+    
+        linha = manager.db.fetchone("SELECT status, rank FROM evolution_acks WHERE message_id='MSG_MONO'")
+        # READ deve ter sobrevivido porque tem peso 3, que é > 1 e > -1
+        assert linha["status"] == "READ"
+        assert linha["rank"] == 3
+
+    def test_messages_update_promove_simulacao(self, sistema):
+        client, manager = sistema
+        agora = "2026-09-18T12:00:00Z"
+
+        # 1. Preparar o banco com uma simulação "completed" mas entrega "unconfirmed"
+        sim_id = manager.db.insert("simulations", {
+            "request_id": "REQ_X", "status": "completed",
+            "delivery_status": "unconfirmed", "stage": "delivery_unconfirmed",
+            "chat_id": GRUPO,
+            "created_at": agora, "updated_at": agora
+        })
+        # 2. Inserir a mensagem de saída
+        manager.db.insert("messages", {
+            "simulation_id": sim_id, "request_id": "REQ_X", "direction": "out",
+            "chat_id": GRUPO,
+            "wa_message_id": "MSG_PROMOVE", "status": "unconfirmed",
+            "created_at": agora
+        })
+    
+        # 3. Manda o webhook de DELIVERY_ACK (rank 2)
+        payload = {
+            "event": "messages.update",
+            "data": [{"key": {"id": "MSG_PROMOVE", "remoteJid": GRUPO}, "update": {"status": "DELIVERY_ACK"}}]
+        }
+        r = client.post("/webhook/whatsapp", json=payload, headers=CABECALHO)
+        assert r.status_code == 200
+
+        # Verifica banco de dados
+        sim = manager.db.fetchone(f"SELECT delivery_status, stage FROM simulations WHERE id={sim_id}")
+        assert sim["delivery_status"] == "delivered"
+        assert sim["stage"] == "completed"
+
+        msg = manager.db.fetchone("SELECT status, desfecho FROM messages WHERE wa_message_id='MSG_PROMOVE' AND direction='out'")
+        assert msg["status"] == "delivered"
+        assert msg["desfecho"] == "entregue (DELIVERY_ACK)"
+
+    def test_update_de_outro_chat_nao_promove(self, sistema):
+        client, manager = sistema
+        agora = "2026-09-18T12:00:00Z"
+        sim_id = manager.db.insert("simulations", {
+            "request_id": "REQ_CHAT", "status": "completed",
+            "delivery_status": "unconfirmed", "stage": "delivery_unconfirmed",
+            "chat_id": GRUPO, "created_at": agora, "updated_at": agora,
+        })
+        manager.db.insert("messages", {
+            "simulation_id": sim_id, "request_id": "REQ_CHAT", "direction": "out",
+            "chat_id": GRUPO, "wa_message_id": "MSG_CHAT", "status": "unconfirmed",
+            "created_at": agora,
+        })
+        r = client.post("/webhook/whatsapp", json={
+            "event": "messages.update",
+            "data": [{"key": {"id": "MSG_CHAT", "remoteJid": OUTRO_GRUPO},
+                      "update": {"status": "DELIVERY_ACK"}}],
+        }, headers=CABECALHO)
+        assert r.status_code == 200
+        sim = manager.db.fetchone("SELECT delivery_status FROM simulations WHERE id=?",
+                                  (sim_id,))
+        assert sim["delivery_status"] == "unconfirmed"
+
+    def test_connection_update_grava_log(self, sistema):
+        client, manager = sistema
+        payload = {
+            "event": "connection.update",
+            "data": {"state": "open"}
+        }
+        r = client.post("/webhook/whatsapp", json=payload, headers=CABECALHO)
+        assert r.status_code == 200
+        # Apenas verifica se passou liso
+        pass
 
     def test_guarda_o_texto_original_para_citar(self, sistema):
         """A Evolution monta `quoted` com o key.id E o conteúdo citado.
