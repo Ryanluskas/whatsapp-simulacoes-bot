@@ -81,6 +81,35 @@ def _processos_do_windows() -> list[dict]:
     return processos
 
 
+def _processos_do_linux() -> list[dict]:
+    """(pid, nome, linha de comando) de cada navegador vivo no Linux."""
+    try:
+        saida = subprocess.run(
+            ["ps", "-eo", "pid,comm,args"],
+            capture_output=True, text=True, timeout=20,
+            encoding="utf-8", errors="replace",
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    processos: list[dict] = []
+    for linha in saida.splitlines()[1:]:
+        partes = linha.strip().split(maxsplit=2)
+        if len(partes) < 3:
+            continue
+        pid_str, comm, args = partes
+        if comm in ("brave", "chrome", "msedge", "chromium", "chromium-browser", "google-chrome"):
+            try:
+                processos.append({
+                    "ProcessId": int(pid_str),
+                    "Name": comm,
+                    "CommandLine": args
+                })
+            except ValueError:
+                pass
+    return processos
+
+
 def donos_do_perfil(perfil: Path | str) -> list[dict]:
     """Navegadores vivos que declaram este perfil no ``--user-data-dir``.
 
@@ -89,7 +118,8 @@ def donos_do_perfil(perfil: Path | str) -> list[dict]:
     """
     alvo = _normalizar(str(perfil))
     encontrados = []
-    for processo in _processos_do_windows():
+    lista_processos = _processos_do_windows() if os.name == "nt" else _processos_do_linux()
+    for processo in lista_processos:
         cmd = processo.get("CommandLine") or ""
         if "--user-data-dir" not in cmd:
             continue
@@ -146,9 +176,6 @@ def encerrar_orfaos(perfil: Path | str, on_log=None) -> int:
 
     Chamada no boot, ANTES de abrir o navegador. Se não houver órfão -- o
     caso normal -- ela não faz nada e não diz nada.
-
-    Devolve quantos encerrou. Só roda no Windows; noutro sistema o Chromium
-    do container é descartado a cada execução e o problema não existe.
     """
     def registrar(nivel: str, texto: str) -> None:
         if on_log:
@@ -156,9 +183,6 @@ def encerrar_orfaos(perfil: Path | str, on_log=None) -> int:
                 on_log(nivel, texto)
             except Exception:
                 pass
-
-    if os.name != "nt":
-        return 0
 
     if perfil_pessoal(perfil):
         registrar(
@@ -184,8 +208,12 @@ def encerrar_orfaos(perfil: Path | str, on_log=None) -> int:
     encerrados = 0
     for dono in donos:
         try:
-            subprocess.run(["taskkill", "/PID", str(dono["pid"]), "/T", "/F"],
-                           capture_output=True, timeout=15)
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(dono["pid"]), "/T", "/F"],
+                               capture_output=True, timeout=15)
+            else:
+                import signal
+                os.kill(dono["pid"], signal.SIGKILL)
             encerrados += 1
             registrar("INFO", f"Encerrado {dono['nome']} PID {dono['pid']}.")
         except (OSError, subprocess.SubprocessError) as exc:

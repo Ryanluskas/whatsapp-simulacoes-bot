@@ -128,6 +128,11 @@ CREATE TABLE IF NOT EXISTS evolution_acks (
     chat_id    TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS revoked_sessions (
+    token TEXT PRIMARY KEY,
+    revoked_at TEXT NOT NULL
+);
 """
 
 # Os indices ficam separados de proposito: varios apontam para colunas que so'
