@@ -1095,12 +1095,6 @@ ITEM_RESPONDER_JS = r"""
              rotulos: [...new Set(rotulos)].slice(0, 20) };
   }
 
-  const r = alvo.getBoundingClientRect();
-  if (!r.width || !r.height) {
-    return { achou: false, motivo: 'o item existe mas esta invisivel',
-             rotulos: [...new Set(rotulos)].slice(0, 20) };
-  }
-
   // MARCAR o item, para o clique mirar NELE e nao numa coordenada.
   //
   // O menu entra animado (escala e opacidade). O retangulo medido aqui vale
