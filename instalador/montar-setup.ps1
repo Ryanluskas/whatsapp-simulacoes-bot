@@ -35,8 +35,8 @@ if (-not $Saida) { $Saida = Join-Path $Aqui "dist" }
 # Codigo do Arqueiro. Tudo que nao estiver aqui fica de fora -- inclusive
 # credenciais.ini, credentials.json, clientes.csv, bot_log.txt e as planilhas.
 $ARQUEIRO_PERMITIDO = @(
-    "bot.py", "gui.py", "gmail_otp.py", "requirements.txt", "README.md",
-    "iniciar.bat", "instalar.bat", "detectar_python.bat", "diagnostico.bat"
+    "bot.py", "gui.py", "gmail_otp.py", "otp_flow.py", "requirements.txt",
+    "README.md", "iniciar.bat", "instalar.bat", "detectar_python.bat", "diagnostico.bat"
 )
 
 # Se qualquer um destes aparecer no pacote, a montagem para.
