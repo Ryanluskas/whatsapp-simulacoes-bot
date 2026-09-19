@@ -21,12 +21,14 @@ da anterior:
 from __future__ import annotations
 
 import base64
+import json
 import queue
 import re
 import threading
 import unicodedata
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -1429,6 +1431,64 @@ CHAT_INFO_JS = r"""
 }
 """
 
+# Fotografia do que a tela mostra AGORA. Uma ida ao navegador por ciclo, em vez
+# de varias perguntas soltas que podem discordar entre si.
+#
+# O campo de busca entra aqui porque foi ele quem denunciou o laco: o bot
+# redigitava o nome do grupo a cada ciclo porque ninguem olhava se a busca ja'
+# continha exatamente aquilo.
+ESTADO_DA_TELA_JS = r"""
+(nome) => {
+  const texto = (el) => ((el && el.innerText) || '').trim();
+  const main = document.querySelector('#main');
+  const cabecalho = main ? main.querySelector('header') : null;
+
+  // Titulo do cabecalho DA CONVERSA: atributo quando existe, texto quando nao.
+  const titulos = [];
+  if (cabecalho) {
+    for (const s of Array.from(cabecalho.querySelectorAll('span[title]'))) {
+      const v = (s.getAttribute('title') || '').trim();
+      if (v && !titulos.includes(v)) titulos.push(v);
+    }
+    for (const linha of texto(cabecalho).split(String.fromCharCode(10))) {
+      const v = linha.trim();
+      if (v && !titulos.includes(v)) titulos.push(v);
+    }
+  }
+
+  // Campo de busca: <input> nas versoes novas, contenteditable nas antigas.
+  let busca = document.querySelector('#side input[type="text"], input[aria-label*="esquis"], input[aria-label*="earch"]');
+  let valorBusca = busca ? (busca.value || '') : '';
+  if (!busca) {
+    busca = document.querySelector('#side div[contenteditable="true"][role="textbox"], div[contenteditable="true"][data-tab="3"]');
+    valorBusca = busca ? texto(busca) : '';
+  }
+
+  // O grupo alvo aparece na lista/resultado? (nao diz que esta' ABERTO)
+  const norm = (s) => (s || '').normalize('NFC').replace(/\s+/g, ' ').trim().toLowerCase();
+  const alvo = norm(nome);
+  let alvoNaLista = false;
+  const lateral = document.querySelector('#pane-side') || document.querySelector('#side');
+  if (alvo && lateral) {
+    for (const s of Array.from(lateral.querySelectorAll('span[title]'))) {
+      if (norm(s.getAttribute('title')) === alvo) { alvoNaLista = true; break; }
+    }
+  }
+
+  const linhas = main ? main.querySelectorAll('[data-id]').length : 0;
+  return {
+    url: location.href.split('?')[0],
+    search_visible: !!busca,
+    search_value: valorBusca,
+    target_in_list: alvoNaLista,
+    header_visible: !!cabecalho,
+    header_titles: titulos,
+    main_visible: !!main,
+    message_rows: linhas,
+  };
+}
+"""
+
 SELF_PHONE_JS = """
 () => {
   const el = document.querySelector('span[title^="+"]');
@@ -1583,6 +1643,20 @@ class WhatsAppService(ThreadActor):
     # representa mudanca de estado. Se ele contasse como alteracao, o painel
     # receberia um "WhatsApp conectado" a cada 3 segundos.
     # ~1 minuto com poll_seconds=3.0 antes de gritar.
+    # Estados EXPLICITOS da tela. Antes existiam so' dois implicitos
+    # ("tem #main" e "_current_chat bate"), e por isso "o grupo apareceu no
+    # resultado da busca" era confundido com "o grupo esta' aberto".
+    CHAT_LIST = "CHAT_LIST"
+    CHAT_SEARCH = "CHAT_SEARCH"
+    CHAT_RESULT = "CHAT_RESULT"
+    CHAT_OPENING = "CHAT_OPENING"
+    CHAT_READY = "CHAT_READY"
+    CHAT_FAILED = "CHAT_FAILED"
+
+    #: Quantas vezes tentar abrir a conversa por ciclo. Sem teto, o bot
+    #: redigitava o nome do grupo na busca para sempre (visto em producao).
+    MAX_OPEN_CHAT_ATTEMPTS = 2
+
     _CICLOS_ATE_DIAGNOSTICAR = 20
     # Reabrir de tempos em tempos, nao a cada ciclo: clicar sem parar na
     # interface atrapalharia o operador usando a mesma janela.
@@ -1972,7 +2046,8 @@ class WhatsAppService(ThreadActor):
             alvo.click(timeout=5_000)
             self._page.wait_for_selector("#main", timeout=6_000)
             self._page.wait_for_timeout(400)
-            self._current_chat = chat_name
+            # NAO seta _current_chat: `#main` existe com qualquer conversa
+            # aberta. Quem confirma o cabecalho e' `_open_chat`.
             return True
         except (PlaywrightTimeout, PlaywrightError):
             return False
@@ -1990,52 +2065,207 @@ class WhatsAppService(ThreadActor):
                 continue
         return None
 
-    def _open_chat(self, chat_name: str) -> bool:
-        if not chat_name:
-            return False
-        if self._current_chat == chat_name:
-            return True
+    # ------------------------------------------------------- estado da tela
+    def _diagnosticar_chat_atual(self, alvo: str = "") -> dict:
+        """O que a tela mostra agora, e por que ainda não está pronta.
 
-        # A conversa pode ja' estar aberta -- inclusive porque o operador a
-        # abriu a mao depois do aviso anterior. Conferir o cabecalho primeiro
-        # evita mexer na busca por nada, que e' justamente onde isto falhava.
+        Uma fonte só para o abridor, o leitor e a guarda de envio. Sem PII:
+        nome do grupo configurado, contagens e booleanos.
+        """
+        alvo = alvo or self.group_name or ""
+        base = {
+            "url": "", "search_visible": False, "search_value": "",
+            "target_group": alvo, "target_in_list": False,
+            "header_visible": False, "header_title": "", "main_visible": False,
+            "message_rows": 0, "chat_ready": False,
+            "current_chat": self._current_chat, "estado": self.CHAT_FAILED,
+            "reason": "",
+        }
+        if self._page is None:
+            base["reason"] = "navegador ainda não está aberto"
+            return base
         try:
-            if _normalizar(self._nome_no_cabecalho()) == _normalizar(chat_name):
-                self._current_chat = chat_name
-                return True
+            bruto = self._page.evaluate(ESTADO_DA_TELA_JS, alvo) or {}
+        except Exception as exc:
+            # Fail-safe: se o JS novo falhar, cair para a checagem antiga em
+            # vez de emudecer o bot. Continua sendo prova de cabeçalho.
+            base["reason"] = f"não consegui ler a tela ({_short(exc)})"
+            try:
+                titulo = self._nome_no_cabecalho()
+            except Exception:
+                titulo = ""
+            if titulo and _normalizar(titulo) == _normalizar(alvo):
+                base.update({"header_title": titulo, "header_visible": True,
+                             "main_visible": True, "message_rows": 1,
+                             "chat_ready": True, "estado": self.CHAT_READY,
+                             "reason": ""})
+            return base
+
+        titulos = [str(x).strip() for x in (bruto.get("header_titles") or []) if str(x).strip()]
+        base.update({
+            "url": bruto.get("url", ""),
+            "search_visible": bool(bruto.get("search_visible")),
+            "search_value": str(bruto.get("search_value") or "").strip(),
+            "target_in_list": bool(bruto.get("target_in_list")),
+            "header_visible": bool(bruto.get("header_visible")),
+            "header_title": self._escolher_titulo(titulos),
+            "main_visible": bool(bruto.get("main_visible")),
+            "message_rows": int(bruto.get("message_rows") or 0),
+        })
+
+        # A decisão mora aqui, num lugar só, com a MESMA normalização do resto
+        # do módulo — não a do JS, que poderia divergir com o tempo.
+        alvo_norm = _normalizar(alvo)
+        titulo_norm = _normalizar(base["header_title"])
+        if not base["main_visible"]:
+            base["reason"] = "nenhuma conversa aberta (#main ausente)"
+            base["estado"] = (self.CHAT_RESULT if base["target_in_list"]
+                              else self.CHAT_SEARCH if base["search_value"]
+                              else self.CHAT_LIST)
+        elif not titulo_norm:
+            base["reason"] = "conversa aberta sem título legível no cabeçalho"
+            base["estado"] = self.CHAT_OPENING
+        elif alvo_norm and titulo_norm != alvo_norm:
+            base["reason"] = "outra conversa está aberta"
+            base["estado"] = self.CHAT_RESULT if base["target_in_list"] else self.CHAT_LIST
+        elif base["message_rows"] <= 0:
+            base["reason"] = "conversa certa, mas as mensagens ainda não carregaram"
+            base["estado"] = self.CHAT_OPENING
+        else:
+            base["chat_ready"] = True
+            base["estado"] = self.CHAT_READY
+        return base
+
+    def _chat_realmente_aberto(self, chat_name: str) -> bool:
+        """Prova composta. `_current_chat` é cache, nunca evidência."""
+        return bool(self._diagnosticar_chat_atual(chat_name).get("chat_ready"))
+
+    def _limpar_busca(self) -> None:
+        """Devolve a lateral para a lista.
+
+        Sem isto a busca fica preenchida, e a volta seguinte reencontra o
+        grupo como RESULTADO em vez de conversa — metade do laço.
+        """
+        try:
+            self._page.keyboard.press("Escape")
         except (PlaywrightTimeout, PlaywrightError):
             pass
 
-        # Clicar na conversa na lista lateral e' mais confiavel do que buscar:
-        # nao depende do campo de busca, que ja' mudou de <div> para <input>.
-        # O grupo de trabalho fica no topo da lista porque e' o mais ativo.
-        if self._abrir_pela_lista(chat_name):
-            return True
+    def _salvar_diagnostico_de_abertura(self, diag: dict) -> str:
+        """Screenshot + estado seguro quando desistimos de abrir a conversa."""
+        try:
+            pasta = Path("diagnostico")
+            pasta.mkdir(parents=True, exist_ok=True)
+            destino = pasta / f"chat-open-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            seguro = {k: v for k, v in diag.items() if k != "search_value"}
+            seguro["search_preenchida"] = bool(diag.get("search_value"))
+            destino.with_suffix(".json").write_text(
+                json.dumps(seguro, ensure_ascii=False, indent=2), encoding="utf-8")
+            try:
+                self._page.screenshot(path=str(destino.with_suffix(".png")))
+            except Exception:
+                pass
+            return str(destino.with_suffix(".json"))
+        except Exception:
+            return ""
 
+    def _open_chat(self, chat_name: str) -> bool:
+        """LISTA → CLIQUE → CONFIRMA CABEÇALHO → CHAT_READY, com teto.
+
+        O laço que isto mata: nada verificava o cabeçalho depois do clique --
+        bastava `#main` existir, e `#main` existe com QUALQUER conversa aberta.
+        Como a busca também nunca era limpa, a volta seguinte reencontrava o
+        grupo como RESULTADO, redigitava o nome e recomeçava, para sempre.
+        """
+        if not chat_name:
+            return False
+
+        # Cache só encurta caminho quando a tela confirma; nunca substitui a
+        # prova.
+        diag = self._diagnosticar_chat_atual(chat_name)
+        if diag["chat_ready"]:
+            if self._current_chat != chat_name:
+                self._log("INFO", f"CHAT: ready=true target='{chat_name}' (já estava aberto)")
+            self._current_chat = chat_name
+            return True
+        self._current_chat = ""
+
+        for tentativa in range(1, self.MAX_OPEN_CHAT_ATTEMPTS + 1):
+            aberto = self._tentar_abrir_conversa(chat_name, diag, tentativa)
+            diag = self._diagnosticar_chat_atual(chat_name)
+            if aberto and diag["chat_ready"]:
+                self._current_chat = chat_name
+                self._log("INFO",
+                          f"CHAT: ready=true target='{chat_name}' "
+                          f"rows={diag['message_rows']} tentativa={tentativa}")
+                self._limpar_busca()
+                return True
+            self._log("WARNING",
+                      f"CHAT: ready=false target='{chat_name}' "
+                      f"estado={diag['estado']} motivo=\"{diag['reason']}\" "
+                      f"tentativa={tentativa}")
+
+        arquivo = self._salvar_diagnostico_de_abertura(diag)
+        self._log(
+            "ERROR",
+            f"Não consegui abrir '{chat_name}' em {self.MAX_OPEN_CHAT_ATTEMPTS} tentativas "
+            f"({diag['reason']}). Parei de tentar neste ciclo"
+            + (f"; diagnóstico em {arquivo}." if arquivo else "."),
+        )
+        self._limpar_busca()
+        return False
+
+    def _tentar_abrir_conversa(self, chat_name: str, diag: dict, tentativa: int) -> bool:
+        """UMA estratégia — e no máximo UM clique de abertura — por tentativa.
+
+        A escolha vem do que a tela mostra, não de uma sequência fixa: com a
+        busca já preenchida com o alvo, digitar de novo era exatamente o laço.
+        """
+        if _normalizar(diag.get("search_value", "")) == _normalizar(chat_name):
+            self._log("INFO",
+                      f"CHAT: search:já_preenchida target='{chat_name}' "
+                      f"tentativa={tentativa} (não vou digitar de novo)")
+            return self._clicar_resultado_da_busca(chat_name)
+
+        if diag.get("target_in_list"):
+            self._log("INFO",
+                      f"CHAT: click target='{chat_name}' origem=lista tentativa={tentativa}")
+            return self._clicar_resultado_da_busca(chat_name)
+
+        return self._buscar_e_clicar(chat_name, tentativa)
+
+    def _buscar_e_clicar(self, chat_name: str, tentativa: int) -> bool:
+        """Digita o nome UMA vez e clica no resultado."""
         try:
             search = self._campo_de_busca()
             if search is None:
-                self._log(
-                    "WARNING",
-                    f"Não encontrei nem a conversa na lista nem o campo de busca "
-                    f"para abrir '{chat_name}'. Abra a conversa manualmente.",
-                )
+                self._log("WARNING",
+                          f"CHAT: search:sem_campo target='{chat_name}' tentativa={tentativa}")
                 return False
             self._page.keyboard.press("Control+A")
             self._page.keyboard.press("Backspace")
+            self._log("INFO", f"CHAT: search:start target='{chat_name}' tentativa={tentativa}")
             search.type(chat_name, delay=25)
             self._page.wait_for_timeout(1200)
-            self._page.locator(f'span[title="{chat_name}"]').first.click(timeout=10_000)
-            self._page.wait_for_selector("#main", timeout=10_000)
-            self._page.wait_for_timeout(400)
-            self._current_chat = chat_name
+        except (PlaywrightTimeout, PlaywrightError) as exc:
+            self._log("WARNING", f"CHAT: search:erro ({_short(exc)}) tentativa={tentativa}")
+            return False
+        return self._clicar_resultado_da_busca(chat_name)
+
+    def _clicar_resultado_da_busca(self, chat_name: str) -> bool:
+        """Clica no resultado do grupo. Achar não é abrir: quem confirma é o
+        cabeçalho, conferido por quem chamou."""
+        try:
+            if not self._page.evaluate(ACHAR_CONVERSA_JS, chat_name):
+                self._log("WARNING", f"CHAT: search:result_found=false target='{chat_name}'")
+                return False
+            self._log("INFO", f"CHAT: search:result_found=true target='{chat_name}'")
+            self._page.locator(f"[{MARCA_ALVO}]").first.click(timeout=5_000)
+            self._page.wait_for_selector("#main", timeout=8_000)
+            self._page.wait_for_timeout(500)
             return True
         except (PlaywrightTimeout, PlaywrightError) as exc:
-            self._log(
-                "WARNING",
-                f"Não consegui abrir a conversa '{chat_name}' automaticamente ({_short(exc)}). "
-                "Abra a conversa manualmente na janela do WhatsApp.",
-            )
+            self._log("WARNING", f"CHAT: click:erro ({_short(exc)}) target='{chat_name}'")
             self._escape()
             return False
 
@@ -2183,6 +2413,22 @@ class WhatsAppService(ThreadActor):
         status = self.status
         chat_id = status.chat_id or self.group_name or "chat"
         chat_name = status.chat_name or self.group_name or "conversa aberta"
+
+        # Ler exige CHAT_READY: cabecalho do grupo certo, #main na tela e
+        # linhas de mensagem. Sem isto, uma tela de resultado de busca (ou a
+        # inicial) podia ser interpretada como conversa e virar solicitacao.
+        if self.group_name:
+            pronto = self._diagnosticar_chat_atual(self.group_name)
+            if not pronto["chat_ready"]:
+                if self._ultima_conversa_errada != pronto["estado"]:
+                    self._ultima_conversa_errada = pronto["estado"]
+                    self._log("WARNING",
+                              f"CHAT: ready=false estado={pronto['estado']} "
+                              f"motivo=\"{pronto['reason']}\" — não vou ler nada daqui.")
+                self._current_chat = ""
+                if self._open_chat(self.group_name):
+                    self._ultima_conversa_errada = ""
+                return
 
         if self.group_name and chat_name and _normalizar(chat_name) != _normalizar(self.group_name):
             # A conversa na tela nao e' a configurada: nao processar nada dela.
