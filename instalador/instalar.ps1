@@ -268,15 +268,10 @@ try {
 import win32com.client, os
 try:
     ws = win32com.client.Dispatch('WScript.Shell')
-    # Desktop
-    desktop = os.path.join(os.environ['USERPROFILE'], 'Desktop', 'Allana Bot.lnk')
-    # OneDrive fallback
-    onedrive = os.path.join(os.environ['USERPROFILE'], 'OneDrive', 'Desktop', 'Allana Bot.lnk')
-    
-    desktop_path = desktop if os.path.exists(os.path.dirname(desktop)) else onedrive
+    desktop = ws.SpecialFolders('Desktop')
     
     paths = [
-        desktop_path,
+        os.path.join(desktop, 'Allana Bot.lnk'),
         os.path.join(os.environ['APPDATA'], r'Microsoft\Windows\Start Menu\Programs\Allana Bot.lnk')
     ]
     for p in paths:
