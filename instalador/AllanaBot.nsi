@@ -28,10 +28,7 @@ Section "Allana Bot" SecBot
   ; Empacota todo o codigo preparado no PAYLOAD
   File /r "${PAYLOAD}\*.*"
   ; O bootstrap chama o instalar.ps1, que faz a copia de fato para LOCALAPPDATA
-  StrCpy $0 ""
-  IfSilent 0 +2
-    StrCpy $0 "-SemPerguntas"
-  ExecWait '"cmd.exe" /c bootstrap.cmd $0'
+  ExecWait '"cmd.exe" /c bootstrap.cmd "-SemPerguntas"'
   
   ; Depois da instalacao, grava o uninstaller no diretorio final e cria atalhos
   SetOutPath "$INSTDIR"

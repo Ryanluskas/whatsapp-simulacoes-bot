@@ -263,7 +263,12 @@ try {
     Write-Host "  Pronto." -ForegroundColor Green
     Write-Host "  Abra pelo atalho 'Allana Bot' ou rode: $Destino\iniciar.bat"
     Write-Host "  O painel responde em http://127.0.0.1:$Porta"
-    if ($SemPerguntas) { Write-Host "  Senha do painel: $Senha" -ForegroundColor Yellow }
+    if ($SemPerguntas -and $script:Senha) { 
+        Write-Host "  Senha do painel: $Senha" -ForegroundColor Yellow 
+        $desk = [Environment]::GetFolderPath("Desktop")
+        $aviso = "A senha do painel Allana Bot e: $Senha`r`nVoce pode muda-la no arquivo $Destino\.env"
+        Set-Content -Path (Join-Path $desk "Senha do Painel Allana.txt") -Value $aviso
+    }
     Write-Host ""
     Write-Host "  Antes do primeiro uso:" -ForegroundColor White
     Write-Host "   1. preencha $Destino\arqueiro\credenciais.ini (acesso ao portal);"
