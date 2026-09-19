@@ -13,6 +13,45 @@ PR que a introduz.
 
 ## [Não lançado]
 
+Revisão de produção: o que está aqui foi encontrado lendo o código e provado
+com teste que reprovava antes. Nada foi validado contra WhatsApp, Evolution ou
+Santander de verdade nesta passada.
+
+### Corrigido
+
+- **O bot deixa de girar na busca do WhatsApp.** Ele digitava o nome do grupo,
+  encontrava, não abria e digitava de novo, sem teto e sem nunca ler a
+  mensagem do consultor. `#main` na tela não prova mais que a conversa certa
+  está aberta: agora exige cabeçalho com o nome do grupo, mensagens na tela e
+  alvo conferido, com no máximo duas tentativas e diagnóstico salvo quando
+  desiste.
+- **Entrega incerta com id conhecido se resolve sozinha.** Quando a Evolution
+  devolve um id sem provar a entrega (`status: ERROR`), o id passa a ser
+  gravado — era descartado. Com ele, o ACK que chega depois pelo webhook fecha
+  a solicitação, e o ACK que chegou antes da resposta do POST também. Antes,
+  os dois caminhos estavam mortos e toda entrega assim esperava alguém abrir o
+  grupo e clicar em "Chegou".
+- **A promoção de uma entrega incerta deixa rastro.** O log e o evento da
+  confirmação sumiam em silêncio (eram gravados de dentro de uma transação já
+  aberta): o painel ao vivo mostrava, um F5 não.
+- **Painel:** o cabeçalho `X-Forwarded-For` deixa de valer sem proxy na frente.
+  Ele é escrito por quem chama — e zerava o limite de tentativas de login.
+  Ligue `TRUST_PROXY_HEADER=true` só se houver um proxy de verdade.
+- **Instalador:** `credenciais.ini` sai com a seção `[acesso]`, que é a que o
+  Arqueiro lê (escrevia `[santander]`, e o login nunca acontecia); a pasta
+  `arqueiro\` é criada antes do arquivo, senão a instalação inteira caía no
+  fim, depois dos 200 MB do Chromium; e "atalho criado" só aparece depois de
+  conferir que o `.lnk` existe.
+
+### Desenvolvimento
+
+- A suíte completa voltava a **não terminar**: os testes que sobem o
+  `main()` neutralizavam `uvicorn.run`, mas o modo desktop (o padrão) não
+  passa por ele e subia um servidor de verdade. Existe agora um ponto único de
+  entrada do servidor (`servir()`), e os testes cortam nele.
+- Testes novos para o que não tinha nenhum: contrato dos scripts de instalação
+  (25) e estrutura do painel — imports de módulo e variáveis de cor.
+
 ## [1.0.4] - 2026-09-19
 
 ### Corrigido
