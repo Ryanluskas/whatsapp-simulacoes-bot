@@ -359,6 +359,46 @@ class TestARotaDoWebhook:
         assert msg["status"] == "delivered"
         assert msg["desfecho"] == "entregue (DELIVERY_ACK)"
 
+    def test_promocao_deixa_rastro_no_log_e_no_evento(self, sistema):
+        """Promover pelo ACK sem deixar rastro e' o mesmo que nao explicar nada.
+
+        O painel monta o historico a partir das tabelas `logs` e `events`. Uma
+        entrega que passou de incerta para entregue pelo webhook e' justamente
+        a que o operador vai querer conferir depois -- ela esteve na fila de
+        "verificar no WhatsApp".
+        """
+        client, manager = sistema
+        agora = "2026-09-18T12:00:00Z"
+        sim_id = manager.db.insert("simulations", {
+            "request_id": "REQ_RASTRO", "status": "completed",
+            "delivery_status": "unconfirmed", "stage": "delivery_unconfirmed",
+            "chat_id": GRUPO, "created_at": agora, "updated_at": agora,
+        })
+        manager.db.insert("messages", {
+            "simulation_id": sim_id, "request_id": "REQ_RASTRO", "direction": "out",
+            "chat_id": GRUPO, "wa_message_id": "MSG_RASTRO", "status": "unconfirmed",
+            "created_at": agora,
+        })
+        r = client.post("/webhook/whatsapp", json={
+            "event": "messages.update",
+            "data": [{"key": {"id": "MSG_RASTRO", "remoteJid": GRUPO},
+                      "update": {"status": "DELIVERY_ACK"}}],
+        }, headers=CABECALHO)
+        assert r.status_code == 200
+
+        assert manager.db.fetchone(
+            "SELECT delivery_status FROM simulations WHERE id=?",
+            (sim_id,))["delivery_status"] == "delivered"
+
+        logs = manager.db.fetchall(
+            "SELECT message FROM logs WHERE message LIKE ?", (f"%#{sim_id}%",))
+        assert logs, "a promocao pelo webhook nao gravou log nenhum"
+
+        eventos = manager.db.fetchall(
+            "SELECT type FROM events WHERE simulation_id=? OR payload_json LIKE ?",
+            (sim_id, f'%"id": {sim_id}%'))
+        assert any(e["type"] == "simulation_updated" for e in eventos),             "o evento da promocao nao foi gravado; um F5 no painel perde a promocao"
+
     def test_update_de_outro_chat_nao_promove(self, sistema):
         client, manager = sistema
         agora = "2026-09-18T12:00:00Z"

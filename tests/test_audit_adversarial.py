@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.actor import ActorTimeout, ThreadActor
-from app.models import (Delivery, EnvioNaoSaiu, EnvioSemProva, IncomingMessage,
+from app.models import (Delivery, Desfecho, EnvioNaoSaiu, EnvioSemProva, IncomingMessage,
                         ParsedRequest, ResultadoEnvio, SimulationJob, SimulationResult)
 from app.state_store import StateStore
 from app.whatsapp import CONNECTED, WhatsAppService
@@ -228,6 +228,98 @@ class TestManagerNaoMandaTextoPorCimaDaDuvida:
         wa = _WhatsappQueFalha(erro_do_texto=ActorTimeout("send na fila", iniciado=False))
         entrega = _manager(tmp_path, wa, imagem=False)._deliver_result(_resultado())
         assert entrega.status == Delivery.RETRYING
+
+
+class _WhatsappIncerto:
+    """A API devolveu um id E disse que nao da' para provar a entrega.
+
+    E' o caso real do `status: ERROR` da Evolution: a mensagem foi criada na
+    instancia (existe id), mas o WhatsApp nao a aceitou. Pode ter chegado.
+    """
+
+    def __init__(self, key_id="BAE5INCERTA"):
+        self.key_id = key_id
+        self.textos = 0
+
+    def render_png(self, html, path, width=900, timeout=60.0):
+        from pathlib import Path
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(png_valido())
+        return str(path)
+
+    def send(self, **_k):
+        self.textos += 1
+        return ResultadoEnvio(
+            ok=False, sem_prova=True, desfecho=Desfecho.INCERTA, provider="evolution",
+            motivo=f"a Evolution devolveu o id {self.key_id} com status ERROR",
+            evidencia={"key_id": self.key_id, "sem_prova": True,
+                       "desfecho": Desfecho.INCERTA})
+
+
+def _linha_da_simulacao(manager):
+    """A solicitacao que o `_resultado()` representa, ja' esperando entrega."""
+    agora = "2026-09-18T12:00:00Z"
+    manager.db.insert("simulations", {
+        "id": 1, "request_id": "REQ000001", "consultant_name": "Consultor",
+        "chat_id": "g@g.us", "source_message_id": "3EB0PEDIDO",
+        "status": "processing", "stage": "replying", "result_ok": 1,
+        "delivery_status": Delivery.PENDING, "created_at": agora, "updated_at": agora})
+
+
+class TestEntregaIncertaComIdConhecido:
+    """Uma entrega incerta COM id nao e' a mesma coisa que uma sem id.
+
+    Com o id gravado, o ACK que chegar depois acha a linha e fecha a entrega
+    sozinho. Sem ele, alguem tem de olhar o grupo -- para uma mensagem que a
+    propria API ja' identificou.
+    """
+
+    def test_o_id_da_mensagem_incerta_fica_gravado(self, tmp_path):
+        wa = _WhatsappIncerto()
+        manager = _manager(tmp_path, wa, imagem=False)
+        _linha_da_simulacao(manager)
+        entrega = manager._deliver_result(_resultado())
+
+        assert entrega.status == Delivery.UNCONFIRMED
+        saida = manager.db.fetchone(
+            "SELECT wa_message_id, status FROM messages WHERE direction='out'")
+        assert saida["status"] == Delivery.UNCONFIRMED
+        assert saida["wa_message_id"] == "BAE5INCERTA", (
+            "sem o id gravado, o ACK do webhook nunca acha esta mensagem")
+        sim = manager.db.fetchone("SELECT sent_message_id FROM simulations WHERE id=1")
+        assert sim["sent_message_id"] == "BAE5INCERTA"
+
+    def test_ack_que_chegou_antes_da_resposta_do_post_fecha_a_entrega(self, tmp_path):
+        """O webhook e' outra conexao: o ACK pode chegar antes do POST voltar."""
+        wa = _WhatsappIncerto()
+        manager = _manager(tmp_path, wa, imagem=False)
+        _linha_da_simulacao(manager)
+        manager.db.insert("evolution_acks", {
+            "message_id": "BAE5INCERTA", "status": "DELIVERY_ACK", "rank": 2,
+            "chat_id": "g@g.us", "created_at": "2026-09-18T12:00:00Z"})
+
+        entrega = manager._deliver_result(_resultado())
+
+        assert entrega.status == Delivery.DELIVERED, (
+            "o ACK ja' provava a entrega; a solicitacao ficou esperando decisao manual")
+        sim = manager.db.fetchone(
+            "SELECT delivery_status, stage, sent_message_id FROM simulations WHERE id=1")
+        assert sim["delivery_status"] == Delivery.DELIVERED
+        assert sim["stage"] == "completed"
+        assert sim["sent_message_id"] == "BAE5INCERTA"
+        assert manager.db.fetchall(
+            "SELECT id FROM logs WHERE message LIKE '%ACK%'"),             "promover sem deixar log esconde de onde veio a confirmacao"
+
+    def test_ack_de_outro_chat_nao_fecha_a_entrega(self, tmp_path):
+        wa = _WhatsappIncerto()
+        manager = _manager(tmp_path, wa, imagem=False)
+        _linha_da_simulacao(manager)
+        manager.db.insert("evolution_acks", {
+            "message_id": "BAE5INCERTA", "status": "DELIVERY_ACK", "rank": 2,
+            "chat_id": "outro@g.us", "created_at": "2026-09-18T12:00:00Z"})
+
+        entrega = manager._deliver_result(_resultado())
+        assert entrega.status == Delivery.UNCONFIRMED
 
 
 # ========================================================== um banco, um processo

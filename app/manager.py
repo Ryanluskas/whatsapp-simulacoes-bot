@@ -774,6 +774,12 @@ class BotManager:
         if rank < 1:
             return
 
+        # A promocao e' uma transacao; o rastro dela vem DEPOIS. Gravar log ou
+        # evento aqui dentro nao funciona: `log` e `publish` abrem a propria
+        # escrita, e `BEGIN IMMEDIATE` dentro de outro `BEGIN` levanta. Os dois
+        # engolem a excecao, entao o efeito era silencioso -- a entrega era
+        # promovida e nao sobrava linha nenhuma para explicar por que.
+        promovida: dict | None = None
         with self.db.write() as conn:
             # 2. Se ja' foi gravado como `unconfirmed`, promove agora.
             linha = conn.execute(
@@ -781,7 +787,7 @@ class BotManager:
                 "WHERE wa_message_id=? AND direction='out'",
                 (message_id,)
             ).fetchone()
-            
+
             if not linha or not linha["simulation_id"]:
                 return
             if chat_id != linha["chat_id"]:
@@ -810,11 +816,26 @@ class BotManager:
                     (Delivery.DELIVERED, agora, agora, stage, message_id, sim_id, Delivery.UNCONFIRMED)
                 )
                 if cur.rowcount > 0:
-                    self.log("INFO", "whatsapp",
-                             f"A entrega #{sim_id} estava incerta e foi confirmada pelo webhook de update ({status_ack}). Promovida para entregue.")
-                    sim_atual = conn.execute("SELECT * FROM simulations WHERE id=?", (sim_id,)).fetchone()
-                    if sim_atual:
-                        self.hub.publish("simulation_updated", dict(sim_atual))
+                    sim_atual = conn.execute(
+                        "SELECT * FROM simulations WHERE id=?", (sim_id,)).fetchone()
+                    promovida = dict(sim_atual) if sim_atual else {"id": sim_id}
+
+        if promovida is None:
+            return
+        request_id = promovida.get("request_id") or ""
+        self.log("INFO", "whatsapp",
+                 f"A entrega #{sim_id} estava incerta e foi confirmada pelo webhook de "
+                 f"update ({status_ack}). Promovida para entregue.",
+                 request_id=request_id,
+                 consultant=promovida.get("consultant_name") or "")
+        self.hub.publish(
+            "simulation_updated", promovida,
+            stage=promovida.get("stage") or "", level="success",
+            title="Entrega confirmada pelo WhatsApp",
+            detail=f"O ACK {status_ack} chegou depois; a entrega deixou de ser incerta.",
+            request_id=request_id, simulation_id=sim_id,
+            consultant_name=promovida.get("consultant_name") or "",
+            chat_id=promovida.get("chat_id") or "")
 
     def _receber_do_navegador(self, message: IncomingMessage) -> None:
         """Porta DURAVEL do modo dom -- o equivalente de ``receber_mensagem``.
@@ -1353,7 +1374,13 @@ class BotManager:
             "quote_status": quote_status,
             "quoted_message_id": citado,
             "quote_error": (getattr(resultado, "quote_error", "") or "") if tipado else "",
-            "enviado_id": self._prova_de_entrega(resultado) if ok else "",
+            # O id vale para os DOIS desfechos, e por motivos diferentes: com
+            # `ok` ele e' a prova de entrega; numa incerta ele e' o unico jeito
+            # de reconhecer esta mensagem quando o ACK chegar pelo webhook
+            # (a Evolution devolve id com `status: ERROR`, e a mensagem pode
+            # ter chegado). Jogar fora era condenar a entrega a decisao manual.
+            # Quem diz "entregue" e' o `status` da linha, nunca este campo.
+            "enviado_id": self._prova_de_entrega(resultado) if (ok or sem_prova) else "",
             "http_status": int(getattr(resultado, "http_status", 0)
                                or evidencia.get("http_status", 0) or 0),
             "transitorio": transitorio,
@@ -1603,7 +1630,7 @@ class BotManager:
                 situacao = Delivery.FAILED
             entrega = self._entrega_de(situacao, registro_txt, media_status, "text")
 
-        self._registrar_entrega(job, result, entrega)
+        entrega = self._registrar_entrega(job, result, entrega)
         self._metrics_dirty.set()
         return entrega
 
@@ -1620,12 +1647,15 @@ class BotManager:
                        quote_error=registro.get("quote_error", "") or "")
 
     def _registrar_entrega(self, job: SimulationJob, result: SimulationResult,
-                           entrega: Entrega) -> None:
+                           entrega: Entrega) -> Entrega:
         """Grava o desfecho da entrega e fecha (ou nao) a solicitacao.
 
         So' aqui a solicitacao vira `completed`/`error`: depois que a
         resposta saiu com prova. Os outros desfechos tem etapa propria e
         dizem ao painel, sem eufemismo, o que falta.
+
+        Devolve a entrega COMO FICOU: uma incerta cujo ACK ja' tinha chegado
+        sai daqui entregue, e quem chamou precisa saber disso.
         """
         status, stage = estado_final(result.ok)
         agora = now_iso()
@@ -1658,18 +1688,21 @@ class BotManager:
                    "sent_message_id": entrega.enviado_id, "reason": entrega.motivo}
 
         # === OUT-OF-ORDER CHECK e ATUALIZAÇÃO ATÔMICA ===
+        ack_adiantado = ""
         with self.db.write() as conn:
             # Reconciliação: Um timeout no POST pode ocorrer DEPOIS do webhook ter recebido o ACK.
             if entrega.status == Delivery.UNCONFIRMED and entrega.enviado_id:
-                ack = conn.execute("SELECT status, rank FROM evolution_acks WHERE message_id=? AND chat_id=?", (entrega.enviado_id, job.chat_id)).fetchone()
+                ack = conn.execute(
+                    "SELECT status, rank FROM evolution_acks "
+                    " WHERE message_id=? AND chat_id=?",
+                    (entrega.enviado_id, job.message.chat_id)).fetchone()
                 if ack and ack["rank"] >= 1:
-                    self.log(
-                        "INFO",
-                        "whatsapp",
-                        f"A entrega #{job.simulation_id} teve POST incerto, mas um ACK já chegou ({ack['status']}). Promovendo para entregue.",
-                    )
-                    entrega.status = Delivery.DELIVERED
-                    entrega.desfecho = f"entregue (ack adiantado {ack['status']})"
+                    # `Entrega` e' congelado de proposito: quem recebeu a
+                    # evidencia nao a reescreve. A promocao gera OUTRA entrega.
+                    ack_adiantado = ack["status"]
+                    entrega = replace(
+                        entrega, status=Delivery.DELIVERED,
+                        desfecho=f"entregue (ack adiantado {ack_adiantado})")
                     campos["delivery_status"] = Delivery.DELIVERED
                     payload["delivery_status"] = Delivery.DELIVERED
                     payload["desfecho"] = entrega.desfecho
@@ -1699,6 +1732,12 @@ class BotManager:
                 )
 
         # Depois da transação no banco, emitimos logs e eventos
+        if ack_adiantado:
+            self.log("INFO", "whatsapp",
+                     f"{job.request_id}: o POST ficou incerto, mas o ACK "
+                     f"{ack_adiantado} da mensagem {entrega.enviado_id} já tinha "
+                     "chegado pelo webhook. Entrega confirmada sem reenviar nada.",
+                     request_id=job.request_id, consultant=consultor)
         if entrega.status == Delivery.DELIVERED:
             self.log("INFO", "whatsapp",
                      f"{job.request_id}: entregue ({resumo}, id "
@@ -1733,7 +1772,7 @@ class BotManager:
             self.hub.publish("delivery_failed", payload, stage=Stage.DELIVERY_FAILED,
                              level="error", title="Entrega falhou",
                              detail=entrega.motivo, **comum)
-
+        return entrega
 
     def _print_do_portal(self, result: SimulationResult, provisorio: Path) -> bool:
         """Copia o print do portal para ``provisorio``. False = usar o card.
