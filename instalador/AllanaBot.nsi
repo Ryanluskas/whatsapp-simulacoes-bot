@@ -35,7 +35,7 @@ Section "Allana Bot" SecBot
   WriteUninstaller "$INSTDIR\uninstall.exe"
 SectionEnd
 
-Section "Desinstalar"
+Section "un.Desinstalar"
   ExecWait 'powershell.exe -ExecutionPolicy Bypass -File "$INSTDIR\instalador\remover.ps1" -Silencioso'
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
