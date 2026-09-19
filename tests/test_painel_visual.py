@@ -97,3 +97,48 @@ class TestEstadoNumLugarSo:
         for estado in ("delivered", "pending", "retrying", "unconfirmed", "failed"):
             linha = re.search(rf"{estado}:\s*\{{[^}}]*\}}", texto)
             assert linha and "icon:" in linha.group(0), f"{estado} sem ícone"
+
+
+class TestOsModulosSeEncontram:
+    """O painel é ES modules servidos direto, sem empacotador.
+
+    Um caminho errado num `import` não quebra o arquivo: quebra o painel
+    INTEIRO, em silêncio, com a página branca e o erro só no console do
+    navegador. Não há build para avisar — então avisa este teste.
+    """
+
+    def test_todo_import_aponta_para_um_arquivo_que_existe(self):
+        padrao = re.compile(r"""(?:import|export)\s[^;]*?from\s+['"]([^'"]+)['"]""", re.S)
+        quebrados: list[str] = []
+        vistos = 0
+        for arquivo in _arquivos(".js"):
+            for alvo in padrao.findall(arquivo.read_text(encoding="utf-8")):
+                if alvo.startswith("http"):
+                    continue
+                vistos += 1
+                destino = (ESTATICOS / alvo.lstrip("/") if alvo.startswith("/")
+                           else arquivo.parent / alvo)
+                if not destino.exists():
+                    quebrados.append(f"{arquivo.relative_to(ESTATICOS)} -> {alvo}")
+        assert vistos, "nenhum import encontrado: o padrão de busca quebrou"
+        assert not quebrados, f"import sem arquivo: {quebrados}"
+
+
+class TestVariavelDeCorSempreDefinida:
+    """`var(--nao-existe)` não é erro de CSS: a regra simplesmente não pinta.
+    O elemento fica transparente ou com a cor herdada, e ninguém vê o defeito
+    — só um contraste estranho em uma tela específica."""
+
+    def test_toda_variavel_usada_tem_definicao(self):
+        sem_comentario = re.compile(r"/\*.*?\*/", re.S)
+        definidos: set[str] = set()
+        for arquivo in _arquivos(".css"):
+            definidos |= set(re.findall(r"(--[A-Za-z0-9_-]+)\s*:",
+                                        arquivo.read_text(encoding="utf-8")))
+        faltando: dict[str, str] = {}
+        for arquivo in _arquivos(".css", ".js", ".html"):
+            texto = sem_comentario.sub("", arquivo.read_text(encoding="utf-8"))
+            for nome in re.findall(r"var\(\s*(--[A-Za-z0-9_-]+)", texto):
+                if nome not in definidos:
+                    faltando[nome] = str(arquivo.relative_to(ESTATICOS))
+        assert not faltando, f"variável de cor sem definição: {faltando}"
