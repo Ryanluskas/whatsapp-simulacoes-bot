@@ -226,7 +226,14 @@ def main(argv: list[str] | None = None) -> int:
             shutdown()
             server.should_exit = True
 
-        icon_path = ROOT / "dashboard" / "static" / "img" / "favicon.png"
+        # No Windows, o pywebview (WinForms) exige um arquivo .ico legitimo, 
+        # caso contrario o System.Drawing.Icon lanca System.ArgumentException.
+        import platform
+        if platform.system() == "Windows":
+            icon_path = ROOT / "instalador" / "allana.ico"
+        else:
+            icon_path = ROOT / "dashboard" / "static" / "img" / "favicon.png"
+            
         if not icon_path.exists():
             icon_path = None
 
