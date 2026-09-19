@@ -13,6 +13,13 @@ PR que a introduz.
 
 ## [Não lançado]
 
+## [1.0.4] - 2026-09-19
+
+### Corrigido
+- O bot volta a marcar a mensagem do usuário (citando-a) ao responder, substituindo a busca por texto pelo clique em coordenadas exatas do menu do WhatsApp Web.
+- O instalador não entra mais em loop de desinstalação para instalações antigas.
+- O atalho do Desktop agora é criado corretamente mesmo em computadores que usam OneDrive para sincronizar a Área de Trabalho.
+
 ### Adicionado
 - **Integração Webhook Evolution:** 
   - `connection.update`: Reflete instantaneamente quedas de conexão ou retornos de QR code direto na interface.
