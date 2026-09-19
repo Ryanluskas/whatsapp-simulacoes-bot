@@ -214,7 +214,7 @@ function Escrever-Env {
 function Registrar-Desinstalador {
     $chave = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AllanaBot"
     New-Item -Path $chave -Force | Out-Null
-    $desinstalar = "powershell.exe -ExecutionPolicy Bypass -File `"$Destino\instalador\desinstalar.ps1`""
+    $desinstalar = "powershell.exe -ExecutionPolicy Bypass -File `"$Destino\instalador\remover.ps1`""
     $tamanho = 0
     try {
         $tamanho = [int](((Get-ChildItem $Destino -Recurse -File -ErrorAction SilentlyContinue |

@@ -36,7 +36,7 @@ Section "Allana Bot" SecBot
 SectionEnd
 
 Section "Desinstalar"
-  ExecWait 'powershell.exe -ExecutionPolicy Bypass -File "$INSTDIR\instalador\desinstalar.ps1" -Silencioso'
+  ExecWait 'powershell.exe -ExecutionPolicy Bypass -File "$INSTDIR\instalador\remover.ps1" -Silencioso'
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 SectionEnd
