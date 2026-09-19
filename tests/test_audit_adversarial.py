@@ -259,7 +259,7 @@ class TestUmProcessoPorBanco:
         banco = (tmp_path / "compartilhado.db").resolve()
         comecou: list[int] = []
         monkeypatch.setattr(entrada.BotManager, "start", lambda self: comecou.append(1))
-        monkeypatch.setattr(entrada.uvicorn, "run", lambda *a, **k: None)
+        monkeypatch.setattr(entrada, "servir", lambda *a, **k: 0)
 
         primeiro = TravaDeInstancia(banco, rotulo="outro checkout", pasta=banco.parent)
         primeiro.adquirir()
