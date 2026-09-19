@@ -210,23 +210,6 @@ function Escrever-Env {
     }
 }
 
-function Criar-Atalhos {
-    Passo "Criando atalhos"
-    $cmd = Join-Path $Destino "iniciar.bat"
-
-    $icone = Join-Path $Destino "instalador\allana.ico"
-    $ws = New-Object -ComObject WScript.Shell
-    $menu = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
-    foreach ($pasta in @($menu, [Environment]::GetFolderPath("Desktop"))) {
-        $lnk = $ws.CreateShortcut((Join-Path $pasta "Allana Bot.lnk"))
-        $lnk.TargetPath = $cmd
-        $lnk.WorkingDirectory = $Destino
-        $lnk.Description = "Central de simulacoes via WhatsApp"
-        if (Test-Path $icone) { $lnk.IconLocation = $icone }
-        $lnk.Save()
-    }
-    Ok "atalho no Menu Iniciar e na Area de Trabalho"
-}
 
 function Registrar-Desinstalador {
     $chave = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AllanaBot"
@@ -274,7 +257,6 @@ try {
     Instalar-Chromium $venvPy
     Perguntar-Configuracao
     Escrever-Env
-    Criar-Atalhos
     Registrar-Desinstalador
 
     Write-Host ""

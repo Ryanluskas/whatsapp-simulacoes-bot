@@ -27,17 +27,23 @@ Section "Allana Bot" SecBot
   
   ; Empacota todo o codigo preparado no PAYLOAD
   File /r "${PAYLOAD}\*.*"
-  
   ; O bootstrap chama o instalar.ps1, que faz a copia de fato para LOCALAPPDATA
-  ExecWait "cmd.exe /c bootstrap.cmd"
+  StrCpy $0 ""
+  IfSilent 0 +2
+    StrCpy $0 "-SemPerguntas"
+  ExecWait '"cmd.exe" /c bootstrap.cmd $0'
   
-  ; Depois da instalacao, grava o uninstaller no diretorio final
+  ; Depois da instalacao, grava o uninstaller no diretorio final e cria atalhos
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
+  CreateShortCut "$DESKTOP\Allana Bot.lnk" "$INSTDIR\iniciar.bat" "" "$INSTDIR\instalador\allana.ico"
+  CreateShortCut "$SMPROGRAMS\Allana Bot.lnk" "$INSTDIR\iniciar.bat" "" "$INSTDIR\instalador\allana.ico"
 SectionEnd
 
 Section "Desinstalar"
   ExecWait 'powershell.exe -ExecutionPolicy Bypass -File "$INSTDIR\instalador\desinstalar.ps1" -Silencioso'
+  Delete "$DESKTOP\Allana Bot.lnk"
+  Delete "$SMPROGRAMS\Allana Bot.lnk"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 SectionEnd
