@@ -285,7 +285,7 @@ class TestLeituraDomNaoPerdePedido:
     Uma queda com o pedido na fila (o ator ocupado enviando) o perdia."""
 
     def _servico(self, tmp_path, recebe):
-        from app.whatsapp import CHAT_INFO_JS, READ_MESSAGES_JS
+        from app.whatsapp import CHAT_INFO_JS, ESTADO_DA_TELA_JS, READ_MESSAGES_JS
 
         s = WhatsAppService(profile_dir=tmp_path / "perfil", group_name="Grupo Teste",
                             state=StateStore(tmp_path / "state.json"), headless=True,
@@ -298,7 +298,13 @@ class TestLeituraDomNaoPerdePedido:
             if script is READ_MESSAGES_JS:
                 return list(s.linhas)
             if script is CHAT_INFO_JS:
-                return {"titulos": ["Grupo Teste"], "jid": _GRUPO_JID}
+                return {"titulos": ["Grupo Teste"], "jid": _GRUPO_JID, "temMain": True}
+            if script is ESTADO_DA_TELA_JS:
+                # O leitor so' roda com a conversa certa PROVADA na tela.
+                return {"url": "https://web.whatsapp.com/", "search_visible": True,
+                        "search_value": "", "target_in_list": True,
+                        "header_visible": True, "header_titles": ["Grupo Teste"],
+                        "main_visible": True, "message_rows": len(s.linhas)}
             return None
 
         s._page = SimpleNamespace(evaluate=evaluate)
