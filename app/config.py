@@ -189,7 +189,11 @@ def load_config(env_file: str | Path | None = None) -> Config:
     } or {"santander"}
 
     return Config(
-        sim_bot_path=_path("SIM_BOT_PATH", r"C:\Users\Ryyan\Downloads\arqueiro"),
+        # Relativo de propósito: `_path` resolve contra a pasta do projeto, e
+        # é exatamente onde o instalador põe o Arqueiro (`<destino>\arqueiro`).
+        # O padrão anterior era a pasta de quem desenvolve — em qualquer outra
+        # máquina o simulador morria dizendo não achar o bot.py lá.
+        sim_bot_path=_path("SIM_BOT_PATH", "arqueiro"),
         simulator_profile_dir=_path("SIMULATOR_PROFILE_DIR", ".simulator-profile"),
         simulator_enabled=_flag("SIMULATOR_ENABLED", "true"),
         job_timeout_seconds=_float("JOB_TIMEOUT_SECONDS", 300.0, minimum=30.0),

@@ -153,6 +153,22 @@ class TestNadaDependeDaMaquinaDeQuemPublica:
         achados = re.findall(r"[A-Za-z]:\\\\?Users\\\\?[A-Za-z0-9._-]+", texto)
         assert not achados, f"{arquivo} tem caminho de máquina: {achados}"
 
+    @pytest.mark.parametrize("arquivo", ["app/config.py", ".env.example", "iniciar.bat"])
+    def test_o_que_e_entregue_nao_aponta_para_a_pasta_de_ninguem(self, arquivo):
+        """O que chega no PC do outro não pode apontar para o PC de quem fez.
+
+        `SIM_BOT_PATH` tinha a pasta da máquina de desenvolvimento como padrão
+        no código E como exemplo no `.env.example` — que o `iniciar.bat` copia
+        para `.env` quando não existe. Em qualquer outra máquina o simulador
+        morre dizendo que não achou o ``bot.py`` numa pasta de usuário que não
+        é a dela — e o nome de quem publicou viaja junto do programa.
+        """
+        caminho = INSTALADOR.parent / arquivo
+        texto = caminho.read_text(encoding="utf-8", errors="replace")
+        achados = re.findall(r"[A-Za-z]:\\?Users\\?[A-Za-z0-9._-]+", texto)
+        # %USERPROFILE%, $env:USERPROFILE e afins são o jeito certo e não casam.
+        assert not achados, f"{arquivo} aponta para a pasta de alguém: {achados}"
+
     def test_o_instalador_baixa_o_python_de_fonte_oficial(self, instalar):
         url = re.search(r'\$PYTHON_URL\s*=\s*"([^"]+)"', instalar)
         assert url and url.group(1).startswith("https://www.python.org/"), (
