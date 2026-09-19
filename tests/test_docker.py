@@ -241,7 +241,7 @@ class TestGuardaDeExposicao:
         for nome in ("WEB_HOST", "DASHBOARD_PASSWORD", "SIMULATOR_MODE",
                      "SESSION_SECRET", "AGENT_TOKEN"):
             monkeypatch.delenv(nome, raising=False)
-        monkeypatch.setattr(entrada.uvicorn, "run", lambda *a, **k: None)
+        monkeypatch.setattr(entrada, "servir", lambda *a, **k: 0)
         env = self._env(tmp_path, WEB_HOST="127.0.0.1", DASHBOARD_PASSWORD="admin",
                         SESSION_SECRET="", AGENT_TOKEN="x")
         assert entrada.main(["--env", env]) == 0
@@ -254,13 +254,14 @@ class TestGuardaDeExposicao:
                       "SESSION_SECRET", "AGENT_TOKEN"):
             monkeypatch.delenv(chave, raising=False)
 
-        # Corta em uvicorn.run: interessa saber que a guarda deixou passar.
+        # Corta em servir(): interessa saber que a guarda deixou passar.
         chamou = {"sim": False}
 
         def falso_run(*_a, **_k):
             chamou["sim"] = True
+            return 0
 
-        monkeypatch.setattr(entrada.uvicorn, "run", falso_run)
+        monkeypatch.setattr(entrada, "servir", falso_run)
         codigo = entrada.main(
             ["--env", self._env(tmp_path, DASHBOARD_PASSWORD="uma-senha-de-verdade")])
         assert codigo == 0

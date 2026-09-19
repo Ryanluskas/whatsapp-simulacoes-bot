@@ -207,9 +207,32 @@ def main(argv: list[str] | None = None) -> int:
 
     manager.start()
     
+    # Quem ADQUIRIU a trava libera. Enquanto isso morava dentro de `servir()`,
+    # um teste que substituía `servir` pulava a liberação e a trava vazava para
+    # o teste seguinte ("já existe uma instância rodando").
+    try:
+        return servir(app, config, log, shutdown)
+    finally:
+        shutdown()
+        # Soltar o perfil explicitamente, além do atexit: um encerramento por
+        # sinal não passa pelo atexit em todos os casos, e um lock órfão faria
+        # o próximo boot recusar subir sem motivo.
+        trava.liberar()
+        trava_do_banco.liberar()
+
+
+def servir(app, config, log, shutdown) -> int:
+    """Sobe o servidor: janela desktop ou só o servidor web.
+
+    Existe como função por um motivo prático: é o ÚNICO ponto onde o processo
+    passa a atender. Enquanto os dois modos viviam soltos dentro de `main()`,
+    os testes que neutralizavam `uvicorn.run` cobriam só o modo web — no modo
+    desktop (o padrão) eles subiam um servidor de verdade e a suíte pendurava
+    para sempre, sem nunca chegar ao assert.
+    """
     if config.desktop_mode:
         import webview
-        
+
         server_config = uvicorn.Config(
             app,
             host=config.web_host,
@@ -226,14 +249,14 @@ def main(argv: list[str] | None = None) -> int:
             shutdown()
             server.should_exit = True
 
-        # No Windows, o pywebview (WinForms) exige um arquivo .ico legitimo, 
+        # No Windows, o pywebview (WinForms) exige um arquivo .ico legitimo,
         # caso contrario o System.Drawing.Icon lanca System.ArgumentException.
         import platform
         if platform.system() == "Windows":
             icon_path = ROOT / "instalador" / "allana.ico"
         else:
             icon_path = ROOT / "dashboard" / "static" / "img" / "favicon.png"
-            
+
         if not icon_path.exists():
             icon_path = None
 
@@ -244,7 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             height=800,
         )
         window.events.closed += on_closed
-        
+
         try:
             webview.start(icon=str(icon_path) if icon_path else None)
         except Exception:
@@ -253,29 +276,23 @@ def main(argv: list[str] | None = None) -> int:
             shutdown()
             server.should_exit = True
             server_thread.join(timeout=3.0)
-            trava.liberar()
-            trava_do_banco.liberar()
-    else:
-        try:
-            uvicorn.run(
-                app,
-                host=config.web_host,
-                port=config.web_port,
-                log_level="info",
-                access_log=False,
-            )
-        except KeyboardInterrupt:
-            pass
-        except Exception:
-            log.exception("Servidor web encerrado com erro")
-            return 1
-        finally:
-            shutdown()
-            # Soltar o perfil explicitamente, alem do atexit: um encerramento por
-            # sinal nao passa pelo atexit em todos os casos, e um lock orfao faria
-            # o proximo boot recusar subir sem motivo.
-            trava.liberar()
-            trava_do_banco.liberar()
+        return 0
+
+    try:
+        uvicorn.run(
+            app,
+            host=config.web_host,
+            port=config.web_port,
+            log_level="info",
+            access_log=False,
+        )
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        log.exception("Servidor web encerrado com erro")
+        return 1
+    finally:
+        shutdown()
     return 0
 
 
