@@ -202,7 +202,7 @@ function Escrever-Env {
         Set-Content -LiteralPath $cred -Encoding UTF8 -Value @(
             "; Acesso do simulador ao portal do Santander.",
             "; Preencha aqui OU defina SANTANDER_CPF / SANTANDER_SENHA no ambiente.",
-            "[santander]",
+            "[acesso]",
             "cpf =",
             "senha ="
         )
