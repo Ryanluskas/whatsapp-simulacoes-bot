@@ -114,6 +114,10 @@ class Config:
     mask_cpf_in_ui: bool
     timezone: str
     retention_days: int
+    #: Só ligue com um proxy de verdade na frente (nginx, Caddy, Cloudflare).
+    #: Sem ele, `X-Forwarded-For` é escrito pelo próprio cliente — e o limite
+    #: de tentativas de login cairia com um IP inventado por tentativa.
+    trust_proxy_header: bool = False
     desktop_mode: bool = False
     #: Onde ficam os PNGs enviados. None = ``<projeto>/comprovantes``.
     comprovantes_dir: Path | None = None
@@ -245,6 +249,7 @@ def load_config(env_file: str | Path | None = None) -> Config:
         desktop_mode=_flag("DESKTOP_MODE", "true"),
         timezone=os.getenv("TIMEZONE", "America/Sao_Paulo").strip() or "America/Sao_Paulo",
         retention_days=_int("RETENTION_DAYS", 180, minimum=7),
+        trust_proxy_header=_flag("TRUST_PROXY_HEADER", "false"),
         comprovantes_dir=(_path("COMPROVANTES_DIR", "comprovantes")
                           if os.getenv("COMPROVANTES_DIR", "").strip() else None),
     )

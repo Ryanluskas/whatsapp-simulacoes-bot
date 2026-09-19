@@ -21,6 +21,10 @@ from tests.test_concurrency import CPFS, FakeSimulator, FakeWhatsApp, _config
 SENHA = "senha-de-teste"
 
 
+def _db_logs(db) -> list[dict]:
+    return db.fetchall("SELECT message FROM logs ORDER BY id")
+
+
 @pytest.fixture()
 def cliente(tmp_path):
     config = _config(tmp_path)
@@ -134,6 +138,28 @@ class TestAutenticacao:
             for _ in range(12)
         ]
         assert 429 in codigos, "login sem limite de tentativas"
+
+    def test_o_limite_nao_cai_com_x_forwarded_for_inventado(self, cliente):
+        """O limite existe contra forca bruta. Um cabecalho que o proprio
+        atacante escreve nao pode zera-lo: bastaria um IP diferente por
+        tentativa para testar senha a noite inteira."""
+        client, _db, _m = cliente
+        codigos = [
+            client.post("/api/login", data={"password": "errada"},
+                        headers={"X-Forwarded-For": f"10.0.0.{i}"}).status_code
+            for i in range(12)
+        ]
+        assert 429 in codigos, (
+            "trocar o X-Forwarded-For zerou o limite de tentativas")
+
+    def test_o_ip_registrado_no_log_nao_aceita_texto_do_cliente(self, cliente):
+        """O que vai para o log do painel nao pode ser escrito pelo cliente."""
+        client, _db, _m = cliente
+        client.post("/api/login", data={"password": "errada"},
+                    headers={"X-Forwarded-For": "1.2.3.4 SENHA ACEITA - login ok"})
+        logs = _db_logs(_db)
+        assert not any("SENHA ACEITA" in (linha.get("message") or "") for linha in logs), (
+            "o cliente escreveu no log de auditoria pelo cabecalho")
 
 
 # =============================================================== dados
