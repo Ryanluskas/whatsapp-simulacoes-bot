@@ -30,11 +30,9 @@ Section "Allana Bot" SecBot
   ; O bootstrap chama o instalar.ps1, que faz a copia de fato para LOCALAPPDATA
   ExecWait '"cmd.exe" /c bootstrap.cmd "-SemPerguntas"'
   
-  ; Depois da instalacao, grava o uninstaller no diretorio final e cria atalhos
+  ; Depois da instalacao, grava o uninstaller no diretorio final
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
-  CreateShortCut "$DESKTOP\Allana Bot.lnk" "$INSTDIR\iniciar.bat" "" "$INSTDIR\instalador\allana.ico"
-  CreateShortCut "$SMPROGRAMS\Allana Bot.lnk" "$INSTDIR\iniciar.bat" "" "$INSTDIR\instalador\allana.ico"
 SectionEnd
 
 Section "Desinstalar"
