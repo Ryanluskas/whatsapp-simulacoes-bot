@@ -64,8 +64,11 @@ if (-not $apagar) {
     if (Test-Path $env_path) { Move-Item $env_path (Join-Path $guardados ".env") -Force -ErrorAction SilentlyContinue }
 }
 
-foreach ($pasta in @((Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"),
-                     [Environment]::GetFolderPath("Desktop"))) {
+foreach ($pasta in @(
+    (Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"),
+    [Environment]::GetFolderPath("Desktop"),
+    (Join-Path $env:USERPROFILE "OneDrive\Desktop")
+)) {
     $lnk = Join-Path $pasta "Allana Bot.lnk"
     if (Test-Path $lnk) { Remove-Item $lnk -Force -ErrorAction SilentlyContinue }
 }

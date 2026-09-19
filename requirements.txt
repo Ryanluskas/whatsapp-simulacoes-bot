@@ -30,3 +30,5 @@ pyyaml>=6.0                  # testes leem o docker-compose.yml
 pywebview>=5.0.0              # janela nativa desktop
 
 
+
+pywin32==312

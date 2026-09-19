@@ -33,25 +33,10 @@ Section "Allana Bot" SecBot
   ; Depois da instalacao, grava o uninstaller no diretorio final
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
-
-  ; Cria atalhos lendo o caminho real (suporta OneDrive)
-  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" "Desktop"
-  ExpandEnvStrings $0 $0
-  ReadRegStr $1 HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" "Programs"
-  ExpandEnvStrings $1 $1
-
-  CreateShortCut "$0\Allana Bot.lnk" "$INSTDIR\iniciar.bat" "" "$INSTDIR\instalador\allana.ico"
-  CreateShortCut "$1\Allana Bot.lnk" "$INSTDIR\iniciar.bat" "" "$INSTDIR\instalador\allana.ico"
 SectionEnd
 
 Section "Desinstalar"
   ExecWait 'powershell.exe -ExecutionPolicy Bypass -File "$INSTDIR\instalador\desinstalar.ps1" -Silencioso'
-  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" "Desktop"
-  ExpandEnvStrings $0 $0
-  ReadRegStr $1 HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" "Programs"
-  ExpandEnvStrings $1 $1
-  Delete "$0\Allana Bot.lnk"
-  Delete "$1\Allana Bot.lnk"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 SectionEnd

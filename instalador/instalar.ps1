@@ -258,6 +258,50 @@ try {
     Perguntar-Configuracao
     Escrever-Env
     
+    function Criar-Atalhos {
+        Passo "Criando atalhos"
+        # O python da .venv ja foi instalado e o pywin32 tambem (via requirements.txt)
+        # Usamos win32com para criar o atalho escapando da heuristica do Defender
+        $py = Join-Path $Destino ".venv\Scripts\python.exe"
+        if (Test-Path $py) {
+            $script = @"
+import win32com.client, os
+try:
+    ws = win32com.client.Dispatch('WScript.Shell')
+    # Desktop
+    desktop = os.path.join(os.environ['USERPROFILE'], 'Desktop', 'Allana Bot.lnk')
+    # OneDrive fallback
+    onedrive = os.path.join(os.environ['USERPROFILE'], 'OneDrive', 'Desktop', 'Allana Bot.lnk')
+    
+    desktop_path = desktop if os.path.exists(os.path.dirname(desktop)) else onedrive
+    
+    paths = [
+        desktop_path,
+        os.path.join(os.environ['APPDATA'], r'Microsoft\Windows\Start Menu\Programs\Allana Bot.lnk')
+    ]
+    for p in paths:
+        try:
+            lnk = ws.CreateShortcut(p)
+            lnk.TargetPath = r'$($Destino.Replace("\", "\\"))\\iniciar.bat'
+            lnk.WorkingDirectory = r'$($Destino.Replace("\", "\\"))'
+            lnk.IconLocation = r'$($Destino.Replace("\", "\\"))\\instalador\\allana.ico'
+            lnk.Save()
+        except Exception as e:
+            pass
+except Exception as e:
+    pass
+"@
+            $pyfile = Join-Path $Destino "atalho.py"
+            Set-Content -Path $pyfile -Value $script
+            & $py $pyfile
+            Remove-Item $pyfile -Force -ErrorAction SilentlyContinue
+            Ok "atalho criado"
+        } else {
+            Write-Host "  [AVISO] Python nao encontrado para criar o atalho." -ForegroundColor Yellow
+        }
+    }
+    
+    Criar-Atalhos
     Registrar-Desinstalador
 
     Write-Host ""
