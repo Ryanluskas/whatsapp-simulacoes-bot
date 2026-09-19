@@ -204,3 +204,36 @@ def test_o_script_ao_menos_compila(arquivo):
     saida = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", ps],
                            capture_output=True, text=True, timeout=120)
     assert saida.returncode == 0, f"{arquivo} não compila:\n{saida.stdout}{saida.stderr}"
+
+
+class TestBinarioNaoVoltaParaOGit:
+    """Executável já entrou no repositório duas vezes ("chore: remove
+    executavel do controle de versao", duas vezes seguidas).
+
+    As linhas que evitariam isso existiam no `.gitignore` — mas tinham sido
+    gravadas em UTF-16 no fim de um arquivo UTF-8. O git lia cada letra
+    separada por um byte zero e nenhum padrão casava: o `.gitignore` parecia
+    certo para quem abria o arquivo e não ignorava nada.
+    """
+
+    GITIGNORE = INSTALADOR.parent / ".gitignore"
+
+    def test_o_gitignore_e_utf8_sem_byte_zero(self):
+        bruto = self.GITIGNORE.read_bytes()
+        assert b"\x00" not in bruto, (
+            "há byte zero no .gitignore: alguém acrescentou linha em UTF-16 "
+            "(Add-Content/Out-File do PowerShell) e esses padrões não valem")
+        bruto.decode("utf-8")   # levanta se não for UTF-8
+
+    @pytest.mark.skipif(not shutil.which("git"), reason="sem git nesta máquina")
+    @pytest.mark.parametrize("caminho", [
+        "instalador/rcedit.exe",
+        "instalador/dist/AllanaBot_v1.0.0-setup.exe",
+        "AllanaBot_v1.0.0-setup.exe",
+    ])
+    def test_o_git_realmente_ignora_o_binario(self, caminho):
+        """Pergunta ao git, não ao arquivo: é o git que decide."""
+        saida = subprocess.run(
+            [shutil.which("git"), "check-ignore", "-q", caminho],
+            cwd=str(self.GITIGNORE.parent), capture_output=True, timeout=60)
+        assert saida.returncode == 0, f"{caminho} NÃO está sendo ignorado pelo git"
