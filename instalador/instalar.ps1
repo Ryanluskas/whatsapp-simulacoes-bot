@@ -197,7 +197,12 @@ function Escrever-Env {
     Set-Content -LiteralPath $env_path -Value $linhas -Encoding UTF8
     Ok "configuracao gravada"
 
+    # A pasta pode nao existir: o pacote pode ter sido montado com
+    # -SemArqueiro. Sem este New-Item, o Set-Content abaixo derruba a
+    # instalacao INTEIRA -- e derruba no fim, depois da .venv e dos 200 MB do
+    # Chromium, com "Could not find a part of the path" na tela.
     $cred = Join-Path $Destino "arqueiro\credenciais.ini"
+    New-Item -ItemType Directory -Force -Path (Join-Path $Destino "arqueiro") | Out-Null
     if (-not (Test-Path $cred)) {
         Set-Content -LiteralPath $cred -Encoding UTF8 -Value @(
             "; Acesso do simulador ao portal do Santander.",
@@ -263,36 +268,49 @@ try {
         # O python da .venv ja foi instalado e o pywin32 tambem (via requirements.txt)
         # Usamos win32com para criar o atalho escapando da heuristica do Defender
         $py = Join-Path $Destino ".venv\Scripts\python.exe"
-        if (Test-Path $py) {
-            $script = @"
-import win32com.client, os
-try:
-    ws = win32com.client.Dispatch('WScript.Shell')
-    desktop = ws.SpecialFolders('Desktop')
-    
-    paths = [
-        os.path.join(desktop, 'Allana Bot.lnk'),
-        os.path.join(os.environ['APPDATA'], r'Microsoft\Windows\Start Menu\Programs\Allana Bot.lnk')
-    ]
-    for p in paths:
-        try:
-            lnk = ws.CreateShortcut(p)
-            lnk.TargetPath = r'$($Destino.Replace("\", "\\"))\\iniciar.bat'
-            lnk.WorkingDirectory = r'$($Destino.Replace("\", "\\"))'
-            lnk.IconLocation = r'$($Destino.Replace("\", "\\"))\\instalador\\allana.ico'
-            lnk.Save()
-        except Exception as e:
-            pass
-except Exception as e:
-    pass
-"@
-            $pyfile = Join-Path $Destino "atalho.py"
-            Set-Content -Path $pyfile -Value $script
-            & $py $pyfile
-            Remove-Item $pyfile -Force -ErrorAction SilentlyContinue
-            Ok "atalho criado"
-        } else {
+        if (-not (Test-Path $py)) {
             Write-Host "  [AVISO] Python nao encontrado para criar o atalho." -ForegroundColor Yellow
+            return
+        }
+        # A area de trabalho vem do proprio Windows (SpecialFolders): com
+        # OneDrive ligado ela NAO e' %USERPROFILE%\Desktop, e um atalho escrito
+        # no lugar errado simplesmente nao aparece para o usuario.
+        # Os caminhos vao como string crua do Python -- sem dobrar a barra. O
+        # `r'...'` ja' e' literal; dobrar gravava a pasta com o separador
+        # repetido dentro do proprio atalho.
+        # Barra no fim quebraria o r'...' do Python (' escapa a aspa).
+        $raiz = $Destino.TrimEnd('\')
+        $script = @"
+import win32com.client, os
+ws = win32com.client.Dispatch('WScript.Shell')
+alvos = [os.path.join(ws.SpecialFolders('Desktop'), 'Allana Bot.lnk'),
+         os.path.join(os.environ['APPDATA'],
+                      r'Microsoft\Windows\Start Menu\Programs\Allana Bot.lnk')]
+for p in alvos:
+    try:
+        lnk = ws.CreateShortcut(p)
+        lnk.TargetPath = r'$raiz\iniciar.bat'
+        lnk.WorkingDirectory = r'$raiz'
+        lnk.IconLocation = r'$raiz\instalador\allana.ico'
+        lnk.Save()
+        print(p)
+    except Exception as e:
+        # Um atalho que falha nao derruba a instalacao -- mas tem de aparecer.
+        print('FALHOU %s: %s' % (p, e))
+"@
+        $pyfile = Join-Path $Destino "atalho.py"
+        Set-Content -Path $pyfile -Value $script
+        $saida = & $py $pyfile 2>&1
+        Remove-Item $pyfile -Force -ErrorAction SilentlyContinue
+
+        # Conferir, e nao anunciar. "atalho criado" impresso sem olhar foi o
+        # que deixou a ausencia do icone passar batido em duas instalacoes.
+        $criados = @($saida | Where-Object { $_ -like "*.lnk" -and (Test-Path $_) })
+        if ($criados.Count -gt 0) {
+            Ok "atalho criado ($($criados.Count)): $($criados -join '; ')"
+        } else {
+            Aviso "NAO consegui criar o atalho. Abra o bot por: $Destino\iniciar.bat"
+            $saida | Where-Object { $_ -like "FALHOU*" } | ForEach-Object { Aviso "  $_" }
         }
     }
     
