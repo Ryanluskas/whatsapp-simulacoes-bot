@@ -1600,3 +1600,134 @@ class TestOLogDizQualVia:
         fonte = inspect.getsource(WhatsAppService._do_send_image)
         assert "_ultima_via_de_citacao" in fonte, (
             "o log de entrega tem de dizer qual via funcionou, não só 'ok'")
+
+
+# ============================== a citação que já estava certa (REQ000008)
+class TestCitacaoJaArmadaNaoEDesfeita:
+    """A resposta saiu sem citar uma mensagem que JÁ estava citada.
+
+    Log de produção, 20/09/2026, REQ000008::
+
+        03:51:38 ERROR  Falha ao escrever a legenda: Locator.click: Timeout
+                        8000ms exceeded.
+        03:51:41 INFO   Havia uma citação pendurada no compositor
+                        ('Ryan\nANDREIA DO NASCIMENTO...'); cancelando antes
+                        de citar.
+        03:52:07 WARNING Cliquei em 'responder' mas a barra de citação não
+                        apareceu no rodapé. Enviando sem a citação.
+
+    A tentativa de imagem tinha armado a citação CERTA. A legenda falhou, o
+    envio caiu para texto — e o PASSO 0 cancelou a barra boa para refazê-la do
+    zero. A segunda tentativa não pegou, e a resposta saiu solta no grupo.
+    """
+
+    def _servico(self, tmp_path):
+        from types import SimpleNamespace
+
+        from app.state_store import StateStore
+        from app.whatsapp import WhatsAppService
+
+        s = WhatsAppService(profile_dir=tmp_path / "perfil", group_name="Grupo Teste",
+                            state=StateStore(tmp_path / "state.json"), headless=True)
+        s._log = lambda *a, **k: None
+        s._page = SimpleNamespace(url="https://web.whatsapp.com/")
+        s.cancelou = 0
+        s.abriu_menu = 0
+        s._cancelar_citacao_pendente = lambda: s.__setattr__("cancelou", s.cancelou + 1)
+        s._abrir_menu_pela_setinha = lambda *a: s.__setattr__("abriu_menu", s.abriu_menu + 1)
+        return s
+
+    def test_a_citacao_certa_e_aproveitada(self, tmp_path):
+        s = self._servico(tmp_path)
+        s._citacao_confirmada = lambda mid, espera=2.0: True
+
+        assert s._passos_da_citacao("3EB0ALVO") is True
+        assert s.cancelou == 0, "cancelou a citação que já era a certa"
+        assert s.abriu_menu == 0, "refez o caminho do menu com a citação pronta"
+
+    def test_citacao_de_outra_mensagem_continua_sendo_cancelada(self, tmp_path):
+        """A proteção contra citar a mensagem ERRADA não pode afrouxar."""
+        s = self._servico(tmp_path)
+        s._citacao_confirmada = lambda mid, espera=2.0: False
+        s._marcas_da_mensagem = lambda mid: {"achou": False}
+
+        from app.whatsapp import GEOMETRIA_DA_LINHA_JS
+
+        def sem_linha(script, *_a):
+            if script is GEOMETRIA_DA_LINHA_JS:
+                return {"achou": False, "motivo": "dublê: a linha não existe"}
+            return ""      # texto da mensagem, marcas: nada na tela
+        s._page.evaluate = sem_linha
+        s._capturar_estado = lambda *a, **k: None
+        s._diagnosticar_citacao_uma_vez = lambda *a, **k: None
+
+        assert s._passos_da_citacao("3EB0ALVO") is False
+        assert s.cancelou == 1, "deixou uma citação de outra mensagem pendurada"
+
+
+# ============================== a legenda com o clique bloqueado (REQ000008)
+class TestLegendaQuandoOCliqueNaoPassa:
+    """`Locator.click: Timeout 8000ms exceeded` com o campo visível na tela.
+
+    No preview da imagem há camada por cima do campo da legenda, e o
+    Playwright recusa clicar onde o evento não chega. O card não saiu, e o
+    consultor recebeu só o texto — sem a imagem que ele usa para mostrar ao
+    cliente.
+    """
+
+    def test_o_foco_por_js_encontra_o_campo_certo(self, navegador):
+        from app.whatsapp import FOCAR_CAMPO_JS
+
+        pagina = navegador.new_page()
+        try:
+            pagina.set_content("""<!doctype html><html><body>
+              <div contenteditable="true" aria-label="compositor"></div>
+              <div contenteditable="true" aria-label="legenda"></div>
+            </body></html>""")
+            assert pagina.evaluate(FOCAR_CAMPO_JS, 1) is True
+            assert pagina.evaluate(
+                "document.activeElement.getAttribute('aria-label')") == "legenda"
+        finally:
+            pagina.close()
+
+    def test_indice_fora_da_lista_nao_mente(self, navegador):
+        """Sem esta prova, `insert_text` escreveria onde estivesse o foco —
+        inclusive no compositor da conversa, mandando a legenda solta."""
+        from app.whatsapp import FOCAR_CAMPO_JS
+
+        pagina = navegador.new_page()
+        try:
+            pagina.set_content('<!doctype html><html><body>'
+                               '<div contenteditable="true"></div></body></html>')
+            assert pagina.evaluate(FOCAR_CAMPO_JS, 7) is False
+        finally:
+            pagina.close()
+
+    def test_so_digita_depois_de_confirmar_o_foco(self):
+        import ast
+        import inspect
+        import textwrap
+
+        from app.whatsapp import WhatsAppService
+
+        fonte = textwrap.dedent(inspect.getsource(WhatsAppService._digitar_legenda))
+        arvore = ast.parse(fonte).body[0]
+        if (arvore.body and isinstance(arvore.body[0], ast.Expr)
+                and isinstance(arvore.body[0].value, ast.Constant)):
+            arvore.body.pop(0)
+        codigo = ast.unparse(arvore)
+
+        onde_foco = codigo.find("FOCAR_CAMPO_JS")
+        onde_digita = codigo.find("insert_text")
+        assert onde_foco != -1, "o foco por JS sumiu; um clique bloqueado volta a perder o card"
+        assert onde_digita != -1
+        assert onde_foco < onde_digita, "digita antes de confirmar o foco"
+
+    def test_o_clique_nao_gasta_oito_segundos(self):
+        """Com a reserva pronta, insistir no clique só atrasa a resposta."""
+        import inspect
+
+        from app.whatsapp import WhatsAppService
+
+        fonte = inspect.getsource(WhatsAppService._digitar_legenda)
+        assert "timeout=8_000" not in fonte

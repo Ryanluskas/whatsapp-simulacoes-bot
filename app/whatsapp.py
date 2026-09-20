@@ -442,6 +442,32 @@ TEXTO_DO_CAMPO_JS = r"""
 }
 """
 
+# Foca o campo SEM ponteiro, e diz se conseguiu.
+#
+# O clique no campo da legenda estourou 8s em producao (REQ000008) com o campo
+# visivel na tela: no preview da imagem ha' camada por cima, e o Playwright
+# recusa clicar onde o evento nao chega. Focar por JS nao depende de ponto
+# nenhum. O retorno e' a prova -- sem ele, `insert_text` escreveria no que
+# estivesse com foco, que pode ser o compositor da conversa.
+FOCAR_CAMPO_JS = r"""
+(indice) => {
+  const el = document.querySelectorAll('[contenteditable="true"]')[indice];
+  if (!el) return false;
+  el.focus();
+  try {
+    // Cursor no fim: com o cursor no inicio, a legenda entraria antes do que
+    // ja' estivesse escrito.
+    const selecao = window.getSelection();
+    const faixa = document.createRange();
+    faixa.selectNodeContents(el);
+    faixa.collapse(false);
+    selecao.removeAllRanges();
+    selecao.addRange(faixa);
+  } catch (e) { /* sem selecao: o foco sozinho ja' serve */ }
+  return document.activeElement === el;
+}
+"""
+
 
 COLAR_IMAGEM_JS = r"""
 ([b64, nome]) => {
@@ -2955,6 +2981,17 @@ class WhatsAppService(ThreadActor):
         # Uma citacao pendurada de um envio anterior faria esta resposta sair
         # grudada na mensagem ERRADA. E enquanto ela estiver la', a
         # verificacao do PASSO 5 acha que citamos sem termos citado.
+        #
+        # MAS: a citacao pendurada pode ser JUSTAMENTE a que queremos. Foi o
+        # que aconteceu no REQ000008 -- a tentativa de imagem armou a citacao
+        # certa, a legenda falhou, e o texto entrou cancelando a barra boa
+        # para refaze-la do zero. A segunda tentativa nao pegou, e a resposta
+        # saiu sem citar uma mensagem que ja' estava citada.
+        if self._citacao_confirmada(message_id, espera=0.5):
+            self._log("INFO", "A citação da mensagem certa já estava armada no "
+                              "compositor; aproveitei em vez de refazer.")
+            self._ultima_via_de_citacao = "reaproveitada"
+            return True
         self._cancelar_citacao_pendente()
 
         # -------------------------------------------------- PASSO 1: a linha
@@ -3554,8 +3591,22 @@ class WhatsAppService(ThreadActor):
 
         indice = escolha["indice"]
         try:
-            alvo = self._page.locator('[contenteditable="true"]').nth(indice)
-            alvo.click(timeout=8_000)
+            # O clique vem primeiro porque e' o que o WhatsApp espera de uma
+            # pessoa. Espera CURTA: com o foco por JS como reserva, insistir
+            # oito segundos num clique que nao passa so' atrasa a resposta.
+            try:
+                self._page.locator('[contenteditable="true"]').nth(indice).click(
+                    timeout=3_000)
+            except (PlaywrightTimeout, PlaywrightError) as exc:
+                self._log("INFO", f"O clique na legenda não passou ({_short(exc)}); "
+                                  "vou focar o campo direto.")
+            # Focar SEMPRE, e conferir. Sem esta prova, `insert_text` escreveria
+            # no que estivesse com foco -- inclusive no compositor da conversa,
+            # que mandaria a legenda solta para o grupo.
+            if not self._page.evaluate(FOCAR_CAMPO_JS, indice):
+                self._log("ERROR", "Não consegui pôr o foco no campo da legenda; "
+                                   "não vou digitar às cegas.")
+                return False
             self._page.keyboard.insert_text(caption)
             self._page.wait_for_timeout(250)
         except (PlaywrightTimeout, PlaywrightError) as exc:
