@@ -804,9 +804,21 @@ class EvolutionClient:
             # Sem key.id nao ha' mensagem provada -- muito menos citacao provada.
             quote_status = (conferir_citacao(corpo, quote_message_id) if enviado_id
                             else QuoteStatus.UNVERIFIED)
+        # QUANDO A API CITOU OUTRA COISA, o que vai para a evidencia e' o id
+        # que ELA devolveu -- nao o que pedimos. O portao do manager compara
+        # esse campo com a origem gravada; guardar o id pedido esconderia
+        # justamente a divergencia que ele existe para pegar.
+        if citado and quote_status == QuoteStatus.NOT_APPLIED:
+            stanza_devolvido = _procurar_stanza(corpo) or ""
+            quote_error = (quote_error or
+                           f"a Evolution citou {stanza_devolvido or '(sem stanzaId)'} "
+                           f"em vez de {quote_message_id}")
+        else:
+            stanza_devolvido = ""
         comum = dict(via=via, provider="evolution", quote_status=quote_status,
                      http_status=http_status, quote_error=quote_error,
-                     quoted_message_id=quote_message_id if citado else "")
+                     quoted_message_id=(stanza_devolvido if stanza_devolvido
+                                        else (quote_message_id if citado else "")))
         evidencia = {"http_status": http_status, "corpo": _resumo(corpo),
                      "quote_status": quote_status}
         if quote_error:

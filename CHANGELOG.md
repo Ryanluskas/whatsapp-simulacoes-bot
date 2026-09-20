@@ -13,6 +13,28 @@ PR que a introduz.
 
 ## [Não lançado]
 
+### Corrigido
+
+- **A resposta só sai citando a mensagem que originou o pedido.** No grupo,
+  algumas respostas saíam presas ao pedido certo e outras soltas, sem
+  diferença aparente. O banco explicou: das 25 mensagens de saída gravadas,
+  **nenhuma** registrava qual mensagem tinha sido citada — e a conferência do
+  modo DOM comparava **texto**, enquanto sete pares de solicitações do mesmo
+  dia tinham o mesmo cliente. Agora:
+  - uma regra central (`app/citacao.py`) decide, e é a mesma para as duas
+    camadas: a resposta não sai se a citação apontar outra mensagem
+    (`QUOTE_ID_MISMATCH`) ou se for para outra conversa (`QUOTE_CHAT_MISMATCH`);
+  - a origem vem da **linha gravada**, não da mensagem que o processo carregou
+    na memória — o que sobrevive a reinício, reenvio e job antigo;
+  - a saída passa a registrar `quoted_message_id`: dá para auditar depois qual
+    mensagem foi citada;
+  - no DOM, sem o id na tela **não se cita** (a busca por texto saiu); com
+    duas mensagens de texto idêntico visíveis, a citação sai mas é registrada
+    como `unverified` — nunca `ok`;
+  - na Evolution, um `stanzaId` diferente do pedido grava o id que voltou e
+    marca `not_applied`, com os dois ids no log.
+
+
 ## [1.0.4] - 2026-09-19
 
 ### Corrigido

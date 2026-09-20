@@ -312,3 +312,47 @@ class TestAOrigemVemSempreDoBanco:
                             request_id="REQ000003")
         assert len(wa.enviados) == 1
         assert wa.enviados[0]["quote"] == "", "citou um id que não existe"
+
+
+# ============================================ a camada Evolution, com HTTP falso
+class TestEvolutionCitaOQueFoiPedido:
+    """§5 do pedido: o `stanzaId` da resposta tem de ser o origin_message_id.
+
+    Sem servidor real: a resposta HTTP é montada aqui e lida pelo mesmo código
+    que lê a Evolution de verdade.
+    """
+
+    def _resultado(self, stanza: str | None, pedido: str):
+        from app.evolution import EvolutionClient
+
+        corpo = {"key": {"id": "3EB0RESPOSTA"}, "status": "PENDING",
+                 "message": {"conversation": "resposta"}}
+        if stanza is not None:
+            corpo["message"]["contextInfo"] = {"stanzaId": stanza}
+        cliente = EvolutionClient.__new__(EvolutionClient)
+        cliente._lembrar_envio = lambda *a, **k: None
+        return cliente._resultado_aceito(
+            dict(corpo, _http_status=201), {"text": "resposta"}, campo="text",
+            via="texto", tipo_midia="nenhum", citado=True,
+            quote_message_id=pedido, quote_status=QuoteStatus.UNVERIFIED,
+            quote_error="")
+
+    def test_stanza_igual_ao_pedido_e_ok(self):
+        r = self._resultado("2AORIGEM0001", "2AORIGEM0001")
+        assert r.quote_status == QuoteStatus.OK
+        assert r.quoted_message_id == "2AORIGEM0001"
+        assert r.quoted_ok is True
+
+    def test_stanza_diferente_nao_e_citacao_correta(self):
+        """E o id que VOLTOU é o que fica gravado -- é ele que denuncia."""
+        r = self._resultado("2AOUTRA9999", "2AORIGEM0001")
+        assert r.quote_status == QuoteStatus.NOT_APPLIED
+        assert r.quoted_ok is False
+        assert r.quoted_message_id == "2AOUTRA9999", (
+            "guardar o id PEDIDO esconderia a divergência do portão")
+        assert "2AOUTRA9999" in r.quote_error and "2AORIGEM0001" in r.quote_error
+
+    def test_sem_stanza_nunca_vira_ok(self):
+        r = self._resultado(None, "2AORIGEM0001")
+        assert r.quote_status == QuoteStatus.UNVERIFIED
+        assert r.quoted_ok is False
