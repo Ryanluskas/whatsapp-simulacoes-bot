@@ -25,6 +25,8 @@ from typing import Any, NamedTuple
 
 from . import analytics, mensagens
 from .cards import build_result_html
+from .citacao import (QUOTE_CHAT_MISMATCH, QUOTE_ID_MISMATCH, Origem,
+                      conferir_integridade, linha_de_log)
 from .clock import iso_atras, now_iso, parse_iso, utc_now
 from .config import ROOT, Config
 from .consultants import ConsultantRepository
@@ -1363,6 +1365,47 @@ class BotManager:
             "motivo": erro,
         }
 
+    def _origem_gravada(self, simulation_id: int | None) -> Origem | None:
+        """A origem como o BANCO a conhece -- None quando nao ha' solicitacao.
+
+        Recusa confiar na mensagem que o chamador trouxe: depois de um
+        reinicio, de um reenvio ou de um job antigo em memoria, e' esta linha
+        que diz a quem a resposta pertence.
+        """
+        if not simulation_id:
+            return None
+        linha = self.db.fetchone(
+            "SELECT request_id, source_message_id, chat_id, participant "
+            "  FROM simulations WHERE id=?", (simulation_id,))
+        return Origem.da_linha(dict(linha)) if linha else None
+
+    def _conferir_o_que_foi_citado(self, origem: Origem, evid: dict,
+                                   request_id: str, consultor: str) -> dict:
+        """A camada citou o que devia? Confere DEPOIS, contra o gravado.
+
+        O portao de antes garante que pedimos a mensagem certa. Este confere o
+        que voltou: na Evolution, o ``stanzaId`` da resposta; no modo dom, o id
+        da linha que a citacao mirou. Divergiu, a mensagem ja' saiu -- nao da'
+        para desfazer --, mas o sistema NAO chama aquilo de citacao correta.
+        `not_applied` e' exatamente isso: saiu citando outra coisa.
+        """
+        citado = str(evid.get("quoted_message_id") or "")
+        if not citado or citado == origem.message_id:
+            return evid
+        self.log(
+            "ERROR", "whatsapp",
+            linha_de_log(origem, alvo=citado, chat_id=origem.chat_id,
+                         estrategia=str(evid.get("provider") or "-"),
+                         quote_status=QuoteStatus.NOT_APPLIED,
+                         motivo=QUOTE_ID_MISMATCH)
+            + " — a resposta saiu citando outra mensagem.",
+            request_id=request_id, consultant=consultor)
+        corrigido = dict(evid)
+        corrigido["quote_status"] = QuoteStatus.NOT_APPLIED
+        corrigido["quote_error"] = (
+            f"{QUOTE_ID_MISMATCH}: citou {citado}, a origem e' {origem.message_id}")
+        return corrigido
+
     @staticmethod
     def _status_da_mensagem(ok: bool, evid: dict, status_ok: str) -> str:
         if ok:
@@ -1382,15 +1425,21 @@ class BotManager:
             nivel, resultado = "ERROR", evid["desfecho"] or "falhou"
         motivo = f" motivo={evid['motivo']}" if evid["motivo"] else ""
         citacao = f" quote_error={evid['quote_error']}" if evid["quote_error"] else ""
+        # A identidade sai pela mesma funcao que o portao usa: o log e' a
+        # versao legivel da regra, nao uma segunda formatacao que pode
+        # divergir dela.
+        identidade = linha_de_log(
+            Origem(request_id=request_id, message_id=message.message_id,
+                   chat_id=message.chat_id, participant=message.participant),
+            alvo=evid["quoted_message_id"], chat_id=message.chat_id,
+            estrategia=evid["provider"], quote_status=evid["quote_status"],
+            delivery_status=resultado, wa_message_id=evid["enviado_id"])
         self.log(
             nivel, "whatsapp",
-            f"{request_id or 'sem REQ'} envio={tipo} tentativa={tentativa} "
-            f"provider={evid['provider']} http={evid['http_status'] or '-'} "
-            f"desfecho={resultado} origin_message_id={message.message_id or '-'} "
-            f"quote_message_id={evid['quoted_message_id'] or '-'} "
-            f"quote_participant={_mascarar_jid(message.participant)} "
-            f"quote_status={evid['quote_status'] or '-'} "
-            f"sent_message_id={evid['enviado_id'] or '-'}{motivo}{citacao}",
+            f"{identidade} envio={tipo} tentativa={tentativa} "
+            f"http={evid['http_status'] or '-'} "
+            f"quote_participant={_mascarar_jid(message.participant)}"
+            f"{motivo}{citacao}",
             request_id=request_id, consultant=consultor,
         )
 
@@ -1455,6 +1504,38 @@ class BotManager:
         error = ""
         resultado = None
         talvez_saiu = False
+
+        # PORTAO DE INTEGRIDADE, antes de qualquer envio.
+        #
+        # A origem vem da LINHA GRAVADA (`_origem_da_linha` no caminho da
+        # entrega; a propria mensagem no da recusa). Se a resposta fosse sair
+        # em outra conversa, ela nao sai: e' melhor o consultor esperar do que
+        # o pedido de um cliente aparecer no grupo errado.
+        # A origem e' a do BANCO. A `message` que chegou aqui pode ter vindo
+        # de um job em memoria; se ela discordar da linha gravada, quem vale e'
+        # a linha -- e a divergencia vira bloqueio, nao uma resposta pendurada
+        # na mensagem de outro pedido.
+        origem = self._origem_gravada(simulation_id) or Origem(
+            request_id=request_id, message_id=message.message_id,
+            chat_id=message.chat_id, participant=message.participant)
+        quer_citar = bool(self.config.reply_quote and message.message_id)
+        portao = conferir_integridade(origem, alvo=message.message_id,
+                                      chat_id=message.chat_id,
+                                      com_citacao=quer_citar)
+        if not portao and portao.motivo in (QUOTE_ID_MISMATCH, QUOTE_CHAT_MISMATCH):
+            self.log("ERROR", "whatsapp",
+                     linha_de_log(origem, alvo=message.message_id,
+                                  chat_id=message.chat_id, estrategia="portao",
+                                  quote_status="blocked", motivo=portao.motivo)
+                     + f" — {portao.detalhe}. Não enviei.",
+                     request_id=request_id, consultant=consultant_name)
+            registro.update(motivo=f"{portao.motivo}: {portao.detalhe}",
+                            transitorio=False, sem_prova=False)
+            self.db.update("messages", {"status": "failed", "error": portao.motivo,
+                                        "desfecho": Desfecho.RECUSADA},
+                           {"id": linha_id})
+            return False
+
         try:
             resultado = self.whatsapp.send(
                 chat_id=message.chat_id,
@@ -1475,6 +1556,7 @@ class BotManager:
             talvez_saiu = bool(getattr(exc, "sem_prova", False))
 
         evid = self._evidencia(resultado, error, message, talvez_saiu=talvez_saiu)
+        evid = self._conferir_o_que_foi_citado(origem, evid, request_id, consultant_name)
         registro.update(evid, ok=ok)
         saiu = self._versao_que_saiu(resultado, text, texto_sem_citacao)
         self._log_de_envio("texto", request_id, message, evid, tentativa, ok, consultant_name)
@@ -1868,6 +1950,29 @@ class BotManager:
         # justamente na camada nova.
         envio = None
         talvez_saiu = False
+
+        # O MESMO portao do texto. A origem do job vem do banco (o `recover`
+        # remonta o job a partir da linha), entao vale depois de reinicio.
+        origem = Origem(request_id=job.request_id,
+                        message_id=job.message.message_id,
+                        chat_id=job.message.chat_id,
+                        participant=job.message.participant)
+        portao = conferir_integridade(
+            origem, alvo=job.message.message_id, chat_id=job.message.chat_id,
+            com_citacao=bool(self.config.reply_quote and job.message.message_id))
+        if not portao and portao.motivo in (QUOTE_ID_MISMATCH, QUOTE_CHAT_MISMATCH):
+            self.log("ERROR", "whatsapp",
+                     linha_de_log(origem, alvo=job.message.message_id,
+                                  chat_id=job.message.chat_id, estrategia="portao",
+                                  quote_status="blocked", motivo=portao.motivo)
+                     + f" — {portao.detalhe}. Não enviei a imagem.",
+                     request_id=job.request_id, consultant=consultant)
+            registro["media_status"] = "blocked"
+            self.db.update("messages", {"status": "failed", "error": portao.motivo,
+                                        "desfecho": Desfecho.RECUSADA},
+                           {"id": linha_id})
+            return False
+
         try:
             envio = self.whatsapp.send_image(
                 chat_id=job.message.chat_id,
@@ -1886,6 +1991,7 @@ class BotManager:
             motivo = "" if envio else (getattr(envio, "motivo", "") or "a camada não explicou")
 
         evid = self._evidencia(envio, motivo, job.message, talvez_saiu=talvez_saiu)
+        evid = self._conferir_o_que_foi_citado(origem, evid, job.request_id, consultant)
         registro.update(evid, ok=bool(envio))
         # A legenda que REALMENTE saiu: com citação sai a curta, sem citação
         # sai a que leva o nome do consultor. Gravar a versão errada faria o

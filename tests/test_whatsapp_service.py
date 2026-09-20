@@ -350,26 +350,28 @@ class TestCitacaoDaMensagem:
         monkeypatch.setattr(s, "_try_quote", lambda _id: consegue_citar)
         # A citação só vale com PROVA: clicar em "Responder" não basta, a
         # barra tem de aparecer no rodapé. O dublê precisa cobrir os dois.
-        monkeypatch.setattr(s, "_citacao_confirmada",
-                            lambda _id, espera=2.0: consegue_citar)
+        # `_citar` devolve o que foi PROVADO (`ok`/`unverified`/vazio), nao um
+        # booleano: quem responde pela prova e' `_conferir_citacao`.
+        monkeypatch.setattr(s, "_conferir_citacao",
+                            lambda _id, espera=2.0: "ok" if consegue_citar else "")
         monkeypatch.setattr(s, "_fechar_encaminhamento", lambda: False)
         monkeypatch.setattr(s, "_limpar_preview", lambda: None)
         return s, registros
 
     def test_falha_ao_citar_vira_aviso(self, tmp_path, monkeypatch):
         s, registros = self._servico(tmp_path, monkeypatch, consegue_citar=False)
-        assert s._citar("false_g@g.us_M_x@c.us", "texto") is False
+        assert s._citar("false_g@g.us_M_x@c.us", "texto") == ""
         assert [n for n, _ in registros] == ["WARNING"], (
             "sem este aviso, ninguém descobre que o menu 'Responder' mudou")
 
     def test_citacao_bem_sucedida_nao_polui_o_log(self, tmp_path, monkeypatch):
         s, registros = self._servico(tmp_path, monkeypatch, consegue_citar=True)
-        assert s._citar("false_g@g.us_M_x@c.us", "texto") is True
+        assert s._citar("false_g@g.us_M_x@c.us", "texto") == "ok"
         assert registros == []
 
     def test_sem_id_para_citar_nao_tenta_nem_avisa(self, tmp_path, monkeypatch):
         s, registros = self._servico(tmp_path, monkeypatch, consegue_citar=False)
-        assert s._citar("", "texto") is False
+        assert s._citar("", "texto") == ""
         assert registros == []
 
 
