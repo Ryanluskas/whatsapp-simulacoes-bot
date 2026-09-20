@@ -175,6 +175,11 @@ def parse_request(
     if not orgao and len(uteis) > 1:
         orgao = uteis[1]
 
+    # Swap se o nome extraido for um estado e o orgao for o nome
+    estados = {"ac", "al", "ap", "am", "ba", "ce", "df", "es", "go", "ma", "mt", "ms", "mg", "pa", "pb", "pr", "pe", "pi", "rj", "rn", "rs", "ro", "rr", "sc", "sp", "se", "to", "acre", "alagoas", "amapá", "amapa", "amazonas", "bahia", "ceará", "ceara", "distrito federal", "espírito santo", "espirito santo", "goiás", "goias", "maranhão", "maranhao", "mato grosso", "mato grosso do sul", "minas gerais", "pará", "para", "paraíba", "paraiba", "paraná", "parana", "pernambuco", "piauí", "piaui", "rio de janeiro", "rio grande do norte", "rio grande do sul", "rondônia", "rondonia", "roraima", "santa catarina", "são paulo", "sao paulo", "sergipe", "tocantins"}
+    if nome_cliente.lower() in estados and orgao.lower() not in estados and orgao != "":
+        nome_cliente, orgao = orgao, nome_cliente
+
     consultor = (campos.get("consultor") or fallback_consultant or "Consultor").strip()
 
     return (

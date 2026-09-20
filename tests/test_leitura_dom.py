@@ -919,7 +919,7 @@ class TestNuncaLerAsProprias:
 
     DELE_SEM_PREFIXO = """
       <div role="row">
-        <div data-id="3EB0AAAAAAAAAAAAAAAAAA">
+        <div data-id="2AF4AAAAAAAAAAAAAAAAAA">
           <div class="copyable-text" data-pre-plain-text="[02:05, 30/08/2026] Ryan: ">
             <span class="selectable-text"><span>Maria Tabaré 316.196.143.91</span></span>
           </div>

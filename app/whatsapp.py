@@ -217,9 +217,20 @@ EH_NOSSA_JS = r"""
                         .trim().toLowerCase();
 
   const ehNossa = (el, id, nomeProprio) => {
+    // Tres provas INDEPENDENTES, e basta uma. A ordem e' da mais forte para a
+    // mais fraca, mas nenhuma delas pode responder "nao e' nossa" sozinha.
+    //
+    // Era o que acontecia: a comparacao de nome tinha `return` direto, entao
+    // um BOT_SELF_NAME diferente do nome real da conta DESLIGAVA as outras
+    // duas. Em 20/09/2026 o grupo mostrava "Operacional", o .env dizia
+    // "Operacional Capital", e o bot passou a tratar mensagens da propria
+    // conta como pedido de consultor -- tres solicitacoes criadas a partir do
+    // que ele mesmo tinha enviado, todas com id "3EB0", que a prova (2)
+    // reconheceria na hora.
+    //
     // 1) Quem assinou a mensagem.
     const autor = autorDaLinha(el);
-    if (autor && nomeProprio) return norm(autor) === norm(nomeProprio);
+    if (autor && nomeProprio && norm(autor) === norm(nomeProprio)) return true;
     // 2) Prefixo do id: o WhatsApp Web gera "3EB0..." no que ele mesmo envia.
     //
     // `album-` na frente: quando o WhatsApp agrupa varias imagens nossas, o
@@ -426,6 +437,32 @@ TEXTO_DO_CAMPO_JS = r"""
 (indice) => {
   const el = document.querySelectorAll('[contenteditable="true"]')[indice];
   return el ? (el.innerText || '') : '';
+}
+"""
+
+# Foca o campo SEM ponteiro, e diz se conseguiu.
+#
+# O clique no campo da legenda estourou 8s em producao (REQ000008) com o campo
+# visivel na tela: no preview da imagem ha' camada por cima, e o Playwright
+# recusa clicar onde o evento nao chega. Focar por JS nao depende de ponto
+# nenhum. O retorno e' a prova -- sem ele, `insert_text` escreveria no que
+# estivesse com foco, que pode ser o compositor da conversa.
+FOCAR_CAMPO_JS = r"""
+(indice) => {
+  const el = document.querySelectorAll('[contenteditable="true"]')[indice];
+  if (!el) return false;
+  el.focus();
+  try {
+    // Cursor no fim: com o cursor no inicio, a legenda entraria antes do que
+    // ja' estivesse escrito.
+    const selecao = window.getSelection();
+    const faixa = document.createRange();
+    faixa.selectNodeContents(el);
+    faixa.collapse(false);
+    selecao.removeAllRanges();
+    selecao.addRange(faixa);
+  } catch (e) { /* sem selecao: o foco sozinho ja' serve */ }
+  return document.activeElement === el;
 }
 """
 
@@ -1486,6 +1523,31 @@ def parse_data_id(data_id: str) -> tuple[str, str]:
     return chat_jid, sender_jid
 
 
+def id_de_mensagem_nossa(data_id: str) -> bool:
+    """A mensagem com este ``data-id`` foi enviada por NOS?
+
+    Segunda camada, em Python: o mesmo julgamento que o JS faz na tela, feito
+    de novo aqui, sem depender de nome configurado nem de seletor. Em
+    20/09/2026 o JS deixou passar tres mensagens da propria conta -- o
+    ``BOT_SELF_NAME`` nao batia com o nome real da conta no grupo -- e nao
+    havia mais ninguem conferindo antes de virarem solicitacao.
+
+    Duas familias de id, e a ordem importa:
+
+    * formato classico -- ``true_`` saiu daqui, ``false_`` chegou de fora. O
+      prefixo manda, e um ``3EB0`` no meio nao significa nada;
+    * id pelado -- o WhatsApp Web gera ``3EB0...`` no que ele mesmo envia.
+      Conferido no banco de producao: 15 mensagens de consultor chegaram com
+      id em ``2A...``/``AC...``; as 3 da propria conta, em ``3EB0``.
+    """
+    nu = (data_id or "").strip()
+    if nu.startswith("album-"):      # album de imagens NOSSAS
+        nu = nu[len("album-"):]
+    if nu.startswith("false_"):
+        return False
+    return nu.startswith("true_") or nu.startswith("3EB0")
+
+
 def parse_pre_plain(meta: str) -> tuple[str, str]:
     """``[15:32, 27/08/2026] Ryan: `` -> ("15:32, 27/08/2026", "Ryan")."""
     match = _PRE_PLAIN.match((meta or "").strip())
@@ -2223,6 +2285,18 @@ class WhatsAppService(ThreadActor):
             message_id = row.get("id", "")
             if not message_id or self.state.has_seen(message_id):
                 continue
+            if id_de_mensagem_nossa(message_id):
+                # Nao deveria chegar aqui: o JS ja' filtra pela autoria na
+                # tela. Se chegou, aquele sinal falhou -- e responder a
+                # propria resposta e' o defeito mais caro deste bot. Marca
+                # como vista (nao volta no proximo ciclo) e diz por que.
+                self.state.mark_seen(message_id)
+                self._log("WARNING",
+                          f"Mensagem {message_id[:28]} tem id de mensagem NOSSA e passou "
+                          "pelo filtro de autoria da tela; ignorada aqui. Confira o "
+                          f"BOT_SELF_NAME ({self.bot_self_name!r}) contra o nome que a "
+                          "conta usa no grupo.")
+                continue
             text = clean_text(row.get("text", ""))
             if not text:
                 self.state.mark_seen(message_id)
@@ -2661,6 +2735,17 @@ class WhatsAppService(ThreadActor):
         # Uma citacao pendurada de um envio anterior faria esta resposta sair
         # grudada na mensagem ERRADA. E enquanto ela estiver la', a
         # verificacao do PASSO 5 acha que citamos sem termos citado.
+        #
+        # MAS: a citacao pendurada pode ser JUSTAMENTE a que queremos. Foi o
+        # que aconteceu no REQ000008 -- a tentativa de imagem armou a citacao
+        # certa, a legenda falhou, e o texto entrou cancelando a barra boa
+        # para refaze-la do zero. A segunda tentativa nao pegou, e a resposta
+        # saiu sem citar uma mensagem que ja' estava citada.
+        if self._citacao_confirmada(message_id, espera=0.5):
+            self._log("INFO", "A citação da mensagem certa já estava armada no "
+                              "compositor; aproveitei em vez de refazer.")
+            self._ultima_via_de_citacao = "reaproveitada"
+            return True
         self._cancelar_citacao_pendente()
 
         # -------------------------------------------------- PASSO 1: a linha
@@ -2730,7 +2815,17 @@ class WhatsAppService(ThreadActor):
 
         # Clicar no ELEMENTO marcado; a coordenada e' o ultimo recurso.
         try:
-            pagina.locator(f"[{MARCA_RESPONDER}]").first.click(timeout=4_000)
+            loc = pagina.locator(f"[{MARCA_RESPONDER}]").first
+            try:
+                loc.focus()
+                loc.press("Enter")
+            except: pass
+            
+            loc.click(timeout=3_000, force=True)
+            try:
+                loc.evaluate('el => { let target = el.closest(\'li, [role="menuitem"], [role="button"]\') || el; target.click(); }')
+            except:
+                pass
         except (PlaywrightTimeout, PlaywrightError):
             pagina.mouse.click(item["x"], item["y"])
 
@@ -3260,8 +3355,22 @@ class WhatsAppService(ThreadActor):
 
         indice = escolha["indice"]
         try:
-            alvo = self._page.locator('[contenteditable="true"]').nth(indice)
-            alvo.click(timeout=8_000)
+            # O clique vem primeiro porque e' o que o WhatsApp espera de uma
+            # pessoa. Espera CURTA: com o foco por JS como reserva, insistir
+            # oito segundos num clique que nao passa so' atrasa a resposta.
+            try:
+                self._page.locator('[contenteditable="true"]').nth(indice).click(
+                    timeout=3_000)
+            except (PlaywrightTimeout, PlaywrightError) as exc:
+                self._log("INFO", f"O clique na legenda não passou ({_short(exc)}); "
+                                  "vou focar o campo direto.")
+            # Focar SEMPRE, e conferir. Sem esta prova, `insert_text` escreveria
+            # no que estivesse com foco -- inclusive no compositor da conversa,
+            # que mandaria a legenda solta para o grupo.
+            if not self._page.evaluate(FOCAR_CAMPO_JS, indice):
+                self._log("ERROR", "Não consegui pôr o foco no campo da legenda; "
+                                   "não vou digitar às cegas.")
+                return False
             self._page.keyboard.insert_text(caption)
             self._page.wait_for_timeout(250)
         except (PlaywrightTimeout, PlaywrightError) as exc:
