@@ -570,3 +570,89 @@ class TestEvolutionStatusErrorNaoEEntregue:
             _GRUPO_JID, "g", "resposta")
         assert r.ok and r.enviado_id == "BAE5OK"
 
+
+
+# ================================================ autoria: a segunda camada
+class TestSegundaCamadaDeAutoria:
+    """Uma mensagem NOSSA nunca pode virar solicitacao, nem quando o filtro
+    da tela falha.
+
+    Em 20/09/2026 ele falhou: `BOT_SELF_NAME` dizia "Operacional Capital", a
+    conta se chamava "Operacional" no grupo, e a comparacao de nome
+    respondia sozinha -- desligando as outras duas provas. Tres solicitacoes
+    nasceram do que o proprio bot tinha enviado. Todas com id "3EB0".
+    """
+
+    def _servico(self, tmp_path, linhas, recebe=None):
+        from app.whatsapp import CHAT_INFO_JS, ESTADO_DA_TELA_JS, READ_MESSAGES_JS
+
+        avisos: list[str] = []
+        s = WhatsAppService(profile_dir=tmp_path / "perfil", group_name="Grupo Teste",
+                            state=StateStore(tmp_path / "state.json"), headless=True,
+                            on_incoming=recebe or (lambda m: None))
+        s._log = lambda nivel, msg, *a, **k: avisos.append(f"{nivel}: {msg}")
+        s._conferir_nome_proprio = lambda: None
+        s.linhas = linhas
+
+        def evaluate(script, *_args):
+            if script is READ_MESSAGES_JS:
+                return list(s.linhas)
+            if script is CHAT_INFO_JS:
+                return {"titulos": ["Grupo Teste"], "jid": _GRUPO_JID, "temMain": True}
+            if script is ESTADO_DA_TELA_JS:
+                return {"url": "https://web.whatsapp.com/", "search_visible": True,
+                        "search_value": "", "target_in_list": True,
+                        "header_visible": True, "header_titles": ["Grupo Teste"],
+                        "main_visible": True, "message_rows": len(s.linhas)}
+            return None
+
+        s._page = SimpleNamespace(evaluate=evaluate)
+        s.avisos = avisos
+        return s
+
+    #: Um pedido de verdade: nome, CPF valido e orgao.
+    PEDIDO = "Cliente Teste\n52998224725\nAmapá"
+
+    def test_id_pelado_de_mensagem_nossa_nao_vira_pedido(self, tmp_path):
+        recebidas: list[str] = []
+        s = self._servico(tmp_path, [{"id": "3EB0PRIMEIRA", "text": "antiga", "meta": ""}],
+                          recebe=lambda m: recebidas.append(m.message_id))
+        s._poll_messages()      # linha de base
+        s.linhas.append({"id": "3EB0C1D2E3F4", "text": self.PEDIDO,
+                         "meta": "[02:04, 20/09/2026] Operacional: "})
+        s._poll_messages()
+
+        assert recebidas == [], "o bot criou solicitacao a partir da propria mensagem"
+        assert s.state.has_seen("3EB0C1D2E3F4"), "sem marcar, ela voltaria no proximo ciclo"
+        assert any("id de mensagem NOSSA" in a for a in s.avisos), (
+            "ignorou em silencio: ninguem descobriria que a autoria da tela falhou")
+
+    def test_a_mensagem_do_consultor_continua_passando(self, tmp_path):
+        recebidas: list[str] = []
+        s = self._servico(tmp_path, [{"id": _data_id("2AF4ANTIGA"), "text": "oi", "meta": ""}],
+                          recebe=lambda m: recebidas.append(m.message_id))
+        s._poll_messages()
+        nova = _data_id("2AF4NOVA")
+        s.linhas.append({"id": nova, "text": self.PEDIDO,
+                         "meta": "[02:05, 20/09/2026] Ryan: "})
+        s._poll_messages()
+        assert recebidas == [nova]
+
+
+class TestIdDeMensagemNossa:
+    """A regra, isolada. `false_` e `true_` vem do formato classico; o id
+    pelado "3EB0" e' o que esta instalacao serve."""
+
+    @pytest.mark.parametrize("data_id,nossa", [
+        ("3EB0566994AE2D2798E44D", True),
+        ("album-3EB0AA-3EB0BB", True),
+        ("true_5562000@g.us_BBB", True),
+        # `false_` manda no formato classico: o "3EB0" interno nao decide nada.
+        ("false_120363@g.us_3EB0AAAA_5562111@c.us", False),
+        ("2AF4AAAABBBBCCCC", False),
+        ("ACC81234567890", False),
+        ("", False),
+    ])
+    def test_tabela(self, data_id, nossa):
+        from app.whatsapp import id_de_mensagem_nossa
+        assert id_de_mensagem_nossa(data_id) is nossa

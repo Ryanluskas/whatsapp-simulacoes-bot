@@ -219,9 +219,20 @@ EH_NOSSA_JS = r"""
                         .trim().toLowerCase();
 
   const ehNossa = (el, id, nomeProprio) => {
+    // Tres provas INDEPENDENTES, e basta uma. A ordem e' da mais forte para a
+    // mais fraca, mas nenhuma delas pode responder "nao e' nossa" sozinha.
+    //
+    // Era o que acontecia: a comparacao de nome tinha `return` direto, entao
+    // um BOT_SELF_NAME diferente do nome real da conta DESLIGAVA as outras
+    // duas. Em 20/09/2026 o grupo mostrava "Operacional", o .env dizia
+    // "Operacional Capital", e o bot passou a tratar mensagens da propria
+    // conta como pedido de consultor -- tres solicitacoes criadas a partir do
+    // que ele mesmo tinha enviado, todas com id "3EB0", que a prova (2)
+    // reconheceria na hora.
+    //
     // 1) Quem assinou a mensagem.
     const autor = autorDaLinha(el);
-    if (autor && nomeProprio) return norm(autor) === norm(nomeProprio);
+    if (autor && nomeProprio && norm(autor) === norm(nomeProprio)) return true;
     // 2) Prefixo do id: o WhatsApp Web gera "3EB0..." no que ele mesmo envia.
     //
     // `album-` na frente: quando o WhatsApp agrupa varias imagens nossas, o
@@ -1546,6 +1557,31 @@ def parse_data_id(data_id: str) -> tuple[str, str]:
     return chat_jid, sender_jid
 
 
+def id_de_mensagem_nossa(data_id: str) -> bool:
+    """A mensagem com este ``data-id`` foi enviada por NOS?
+
+    Segunda camada, em Python: o mesmo julgamento que o JS faz na tela, feito
+    de novo aqui, sem depender de nome configurado nem de seletor. Em
+    20/09/2026 o JS deixou passar tres mensagens da propria conta -- o
+    ``BOT_SELF_NAME`` nao batia com o nome real da conta no grupo -- e nao
+    havia mais ninguem conferindo antes de virarem solicitacao.
+
+    Duas familias de id, e a ordem importa:
+
+    * formato classico -- ``true_`` saiu daqui, ``false_`` chegou de fora. O
+      prefixo manda, e um ``3EB0`` no meio nao significa nada;
+    * id pelado -- o WhatsApp Web gera ``3EB0...`` no que ele mesmo envia.
+      Conferido no banco de producao: 15 mensagens de consultor chegaram com
+      id em ``2A...``/``AC...``; as 3 da propria conta, em ``3EB0``.
+    """
+    nu = (data_id or "").strip()
+    if nu.startswith("album-"):      # album de imagens NOSSAS
+        nu = nu[len("album-"):]
+    if nu.startswith("false_"):
+        return False
+    return nu.startswith("true_") or nu.startswith("3EB0")
+
+
 def parse_pre_plain(meta: str) -> tuple[str, str]:
     """``[15:32, 27/08/2026] Ryan: `` -> ("15:32, 27/08/2026", "Ryan")."""
     match = _PRE_PLAIN.match((meta or "").strip())
@@ -2468,6 +2504,18 @@ class WhatsAppService(ThreadActor):
         for row in rows:
             message_id = row.get("id", "")
             if not message_id or self.state.has_seen(message_id):
+                continue
+            if id_de_mensagem_nossa(message_id):
+                # Nao deveria chegar aqui: o JS ja' filtra pela autoria na
+                # tela. Se chegou, aquele sinal falhou -- e responder a
+                # propria resposta e' o defeito mais caro deste bot. Marca
+                # como vista (nao volta no proximo ciclo) e diz por que.
+                self.state.mark_seen(message_id)
+                self._log("WARNING",
+                          f"Mensagem {message_id[:28]} tem id de mensagem NOSSA e passou "
+                          "pelo filtro de autoria da tela; ignorada aqui. Confira o "
+                          f"BOT_SELF_NAME ({self.bot_self_name!r}) contra o nome que a "
+                          "conta usa no grupo.")
                 continue
             text = clean_text(row.get("text", ""))
             if not text:
