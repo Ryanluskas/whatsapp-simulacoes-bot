@@ -19,6 +19,17 @@ Santander de verdade nesta passada.
 
 ### Corrigido
 
+- **O bot deixa de responder às próprias mensagens.** Encontrado em produção:
+  três solicitações nasceram do que ele mesmo tinha enviado. A comparação do
+  `BOT_SELF_NAME` com o autor da mensagem desligava as outras duas provas de
+  autoria (o prefixo do id e o recibo de entrega) quando o nome não batia — e
+  ele não batia: a conta se chama "Operacional" no grupo e o `.env` trazia o
+  padrão "Operacional Capital". As três provas voltam a ser independentes, e
+  agora há uma segunda camada em Python: antes de virar solicitação, o id da
+  mensagem é julgado de novo, sem depender de nome nem de seletor. Se uma
+  mensagem nossa chegar até ali, sai um aviso no log em vez de silêncio.
+  **Confira o `BOT_SELF_NAME` do seu `.env`:** o bot diz no boot, em ERROR,
+  qual é o nome que a conta realmente usa no grupo.
 - **O bot deixa de girar na busca do WhatsApp.** Ele digitava o nome do grupo,
   encontrava, não abria e digitava de novo, sem teto e sem nunca ler a
   mensagem do consultor. `#main` na tela não prova mais que a conversa certa
