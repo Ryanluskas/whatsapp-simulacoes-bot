@@ -244,6 +244,90 @@ function Registrar-Desinstalador {
     if (Test-Path $icone) { Set-ItemProperty $chave DisplayIcon $icone }
 }
 
+function Pasta-Da-Area-De-Trabalho {
+    <# Onde o usuario REALMENTE ve os arquivos.
+
+    Com o OneDrive sincronizando a area de trabalho, ela nao e'
+    %USERPROFILE%\Desktop -- e um arquivo escrito no lugar errado simplesmente
+    nao existe para quem instalou. Quem sabe o caminho certo e' o proprio
+    shell (SpecialFolders), a mesma fonte que o atalho usa.
+    #>
+    $py = Join-Path $Destino ".venv\Scripts\python.exe"
+    if (Test-Path $py) {
+        try {
+            $achado = & $py -c "import win32com.client; print(win32com.client.Dispatch('WScript.Shell').SpecialFolders('Desktop'))" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $achado -and (Test-Path $achado)) { return "$achado".Trim() }
+        } catch {}
+    }
+    $reserva = [Environment]::GetFolderPath("Desktop")
+    if ($reserva -and (Test-Path $reserva)) { return $reserva }
+    return (Join-Path $env:USERPROFILE "Desktop")
+}
+
+function Escrever-Senha-Na-Area-De-Trabalho {
+    <# O unico registro da senha sorteada numa instalacao sem perguntas.
+
+    A janela do instalador fecha sozinha nesse modo (nao ha' `pause`), entao
+    a senha impressa na tela some junto com ela. O arquivo precisa se explicar
+    inteiro: o que e' aquilo, o que fazer com a senha e que ele mesmo pode --
+    e deve -- ser apagado depois.
+
+    Texto em ASCII de proposito, como o resto deste script: o arquivo .ps1 nao
+    tem BOM, e no PowerShell 5.1 isso faria acento virar simbolo estranho.
+    #>
+    # `[IO.Path]::Combine` e nao `Join-Path`: o segundo valida a unidade e
+    # LEVANTA se ela nao existir. Com $ErrorActionPreference = "Stop", isso
+    # abortaria a instalacao inteira no ultimo passo -- com tudo ja' instalado.
+    $desk = Pasta-Da-Area-De-Trabalho
+    $arquivo = [IO.Path]::Combine("$desk", "Senha do Painel Allana.txt")
+    $texto = @"
+ALLANA BOT - SENHA DO PAINEL
+============================
+
+Esta e' a senha para entrar no painel da Allana:
+
+    $script:Senha
+
+O painel abre pelo atalho "Allana Bot" ou em http://127.0.0.1:$Porta
+
+O QUE FAZER AGORA
+-----------------
+1) Guarde esta senha num lugar seguro: gerenciador de senhas, cofre do
+   navegador, ou anotada onde so' voce tem acesso.
+
+2) Depois de guardar, APAGUE ESTE ARQUIVO. Enquanto ele estiver aqui,
+   qualquer pessoa que usar este computador le' a senha do painel -- e o
+   painel mostra CPF de cliente.
+
+Apagar este arquivo nao quebra nada: o programa nunca o le'.
+
+PARA TROCAR A SENHA
+-------------------
+Abra o arquivo abaixo, mude a linha DASHBOARD_PASSWORD= e inicie o bot de novo:
+
+    $Destino\.env
+
+Gerado pelo instalador em $(Get-Date -Format 'dd/MM/yyyy HH:mm').
+"@
+    # Conferir, nunca anunciar: se o arquivo nao existir, a pessoa precisa
+    # saber AGORA -- e' a unica copia da senha que ela tem. E nada aqui pode
+    # derrubar uma instalacao que ja' terminou.
+    $gravou = $false
+    try {
+        Set-Content -LiteralPath $arquivo -Value $texto -Encoding UTF8
+        $gravou = Test-Path -LiteralPath $arquivo
+    } catch {
+        Aviso "Nao consegui gravar a senha na area de trabalho: $($_.Exception.Message)"
+    }
+    if ($gravou) {
+        Ok "senha tambem anotada em: $arquivo (guarde e apague o arquivo)"
+    } else {
+        Aviso "NAO consegui deixar a senha na area de trabalho."
+        Aviso "Anote agora: $script:Senha"
+        Aviso "Ela tambem esta em $Destino\.env (linha DASHBOARD_PASSWORD)."
+    }
+}
+
 # ------------------------------------------------------------------ execucao
 Write-Host ""
 Write-Host "  Allana Bot - instalacao" -ForegroundColor White
@@ -321,11 +405,9 @@ for p in alvos:
     Write-Host "  Pronto." -ForegroundColor Green
     Write-Host "  Abra pelo atalho 'Allana Bot' ou rode: $Destino\iniciar.bat"
     Write-Host "  O painel responde em http://127.0.0.1:$Porta"
-    if ($SemPerguntas -and $script:Senha) { 
-        Write-Host "  Senha do painel: $Senha" -ForegroundColor Yellow 
-        $desk = [Environment]::GetFolderPath("Desktop")
-        $aviso = "A senha do painel Allana Bot e: $Senha`r`nVoce pode muda-la no arquivo $Destino\.env"
-        Set-Content -Path (Join-Path $desk "Senha do Painel Allana.txt") -Value $aviso
+    if ($SemPerguntas -and $script:Senha) {
+        Write-Host "  Senha do painel: $Senha" -ForegroundColor Yellow
+        Escrever-Senha-Na-Area-De-Trabalho
     }
     Write-Host ""
     Write-Host "  Antes do primeiro uso:" -ForegroundColor White

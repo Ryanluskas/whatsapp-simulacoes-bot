@@ -42,6 +42,14 @@ Santander de verdade nesta passada.
   `arqueiro\` é criada antes do arquivo, senão a instalação inteira caía no
   fim, depois dos 200 MB do Chromium; e "atalho criado" só aparece depois de
   conferir que o `.lnk` existe.
+- **O arquivo com a senha do painel se explica.** Numa instalação silenciosa
+  a senha é sorteada e a janela fecha sozinha: o `Senha do Painel Allana.txt`
+  na área de trabalho é o único registro dela. Ele passa a dizer do que é a
+  senha, onde o painel abre, que a senha deve ser guardada num lugar seguro,
+  que **o arquivo pode e deve ser apagado depois** — e como trocar a senha no
+  `.env`. Ele também passa a ser escrito na área de trabalho que o Windows
+  informa (a de verdade, mesmo com OneDrive), e a instalação avisa se não
+  conseguiu gravá-lo, em vez de terminar como se tivesse gravado.
 
 ### Desenvolvimento
 

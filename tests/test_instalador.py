@@ -253,3 +253,81 @@ class TestBinarioNaoVoltaParaOGit:
             [shutil.which("git"), "check-ignore", "-q", caminho],
             cwd=str(self.GITIGNORE.parent), capture_output=True, timeout=60)
         assert saida.returncode == 0, f"{caminho} NÃO está sendo ignorado pelo git"
+
+
+class TestOArquivoDaSenhaSeExplica:
+    """Numa instalação silenciosa (como o NSIS sempre roda) a senha do painel
+    é sorteada, a janela fecha sozinha e o `.txt` na área de trabalho é o
+    ÚNICO registro dela. Então ele tem de se explicar inteiro — e dizer que
+    pode ser apagado depois, porque quem lê o painel lê CPF de cliente.
+    """
+
+    @pytest.fixture()
+    def bloco(self) -> str:
+        """Só a função que escreve o arquivo, do `function` ao fim do bloco."""
+        texto = _texto("instalar.ps1")
+        inicio = texto.index("function Escrever-Senha-Na-Area-De-Trabalho")
+        return texto[inicio:texto.index("# --------", inicio)]
+
+    def test_continua_gravando_o_arquivo(self, instalar):
+        assert "Senha do Painel Allana.txt" in instalar, (
+            "o arquivo da senha sumiu; numa instalação silenciosa ninguém mais "
+            "descobre a senha do painel")
+        assert "Escrever-Senha-Na-Area-De-Trabalho" in instalar
+
+    @pytest.mark.parametrize("trecho,porque", [
+        ("SENHA DO PAINEL", "não diz do que é a senha"),
+        ("Guarde esta senha", "não manda guardar a senha"),
+        ("APAGUE ESTE ARQUIVO", "não avisa que o arquivo pode ser apagado"),
+        ("DASHBOARD_PASSWORD", "não diz como trocar a senha"),
+    ])
+    def test_o_texto_cobre_o_que_a_pessoa_precisa(self, bloco, trecho, porque):
+        assert trecho in bloco, f"o arquivo da senha {porque}"
+
+    def test_nao_depende_do_console_nem_de_pause(self, bloco):
+        """A janela fecha sozinha no modo silencioso: nada de esperar tecla.
+
+        Olha o CÓDIGO, não os comentários — que falam de `pause` justamente
+        para explicar por que ele não pode estar aqui.
+        """
+        codigo = re.sub(r"<#.*?#>", "", bloco, flags=re.S)
+        codigo = "\n".join(ln for ln in codigo.splitlines()
+                           if not ln.lstrip().startswith("#"))
+        for proibido in ("Read-Host", "pause", "[Console]::ReadKey"):
+            assert proibido not in codigo, (
+                f"o arquivo da senha depende de {proibido}, e nesse modo não há "
+                "ninguém olhando a janela")
+
+    def test_gravar_a_senha_nao_pode_derrubar_a_instalacao(self, bloco):
+        """É o último passo, com tudo já instalado.
+
+        `Join-Path` valida a unidade e LEVANTA quando ela não existe; com
+        `$ErrorActionPreference = "Stop"` isso abortaria a instalação inteira
+        no fim. A montagem do caminho é `[IO.Path]::Combine`, e a escrita é
+        protegida.
+        """
+        assert "[IO.Path]::Combine" in bloco
+        assert "Join-Path $desk" not in bloco
+        assert "try {" in bloco and "catch {" in bloco
+
+    def test_a_falha_de_escrita_mostra_a_senha(self, bloco):
+        """Sem o arquivo, a senha tem de aparecer em algum lugar."""
+        assert "Anote agora" in bloco and "$script:Senha" in bloco
+
+    def test_a_area_de_trabalho_vem_do_shell(self, instalar):
+        """Com o OneDrive, a área de trabalho não é %USERPROFILE%\Desktop.
+
+        É o mesmo motivo pelo qual o atalho passou a usar `SpecialFolders`.
+        """
+        inicio = instalar.index("function Pasta-Da-Area-De-Trabalho")
+        bloco = instalar[inicio:instalar.index("function Escrever-Senha")]
+        assert "SpecialFolders('Desktop')" in bloco
+        assert 'GetFolderPath("Desktop")' in bloco, "sem reserva se o python falhar"
+
+    def test_o_script_continua_em_ascii(self):
+        """O .ps1 não tem BOM: no PowerShell 5.1, um acento no arquivo vira
+        símbolo estranho dentro do texto que a pessoa vai ler."""
+        bruto = (INSTALADOR / "instalar.ps1").read_bytes()
+        assert bruto[:3] != b"\xef\xbb\xbf", "o arquivo ganhou BOM"
+        fora = [b for b in bruto if b > 127]
+        assert not fora, f"{len(fora)} byte(s) não-ASCII em instalar.ps1"
