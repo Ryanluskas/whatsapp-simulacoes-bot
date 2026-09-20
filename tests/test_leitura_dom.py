@@ -917,9 +917,15 @@ class TestNuncaLerAsProprias:
         </div>
       </div>"""
 
+    # O id de quem RECEBE nao comeca em "3EB0". Conferido no banco de
+    # producao (20/09/2026): 15 mensagens de consultor, ids em "2A..." e
+    # "AC..."; as 3 da propria conta, todas em "3EB0". A versao anterior
+    # deste dublê dava "3EB0" a uma mensagem do Ryan -- uma combinacao que
+    # nunca apareceu de verdade e que, se existisse, faria o prefixo deixar
+    # de valer como prova de autoria.
     DELE_SEM_PREFIXO = """
       <div role="row">
-        <div data-id="3EB0AAAAAAAAAAAAAAAAAA">
+        <div data-id="2AF4AAAAAAAAAAAAAAAAAA">
           <div class="copyable-text" data-pre-plain-text="[02:05, 30/08/2026] Ryan: ">
             <span class="selectable-text"><span>Maria Tabaré 316.196.143.91</span></span>
           </div>
@@ -1342,3 +1348,101 @@ class TestAlbumNossoEhNosso:
 
     def test_id_recebido_continua_sendo_lido(self, navegador):
         assert self._nossa(navegador, "2A729AF7029257E5696C") is False
+
+
+# ===================================================== autoria: o caso real
+#
+# Em producao (20/09/2026) o bot respondeu as PROPRIAS respostas: o banco
+# registrou tres mensagens `direction='in'` com `sender_name='Operacional'` e
+# `wa_message_id` comecando em "3EB0" -- ou seja, nossas. O boot ja' avisava:
+#
+#   ERROR whatsapp: BOT_SELF_NAME='Operacional Capital' NAO aparece entre os
+#   autores das mensagens visiveis: ['Ryan', 'Operacional'].
+#
+# A conta se chama "Operacional" no grupo; o .env dizia "Operacional Capital".
+def _msg_pelada(data_id: str, autor: str, texto: str, extra: str = "") -> str:
+    """Como a instalacao REAL serve: sem message-in/out e com data-id pelado."""
+    return f"""
+    <div role="row">
+      <div class="x1c4 focusable-list-item" data-id="{data_id}">
+        {extra}
+        <div class="copyable-text" data-pre-plain-text="[19:47, 29/08/2026] {autor}: ">
+          <span class="selectable-text"><span>{texto}</span></span>
+        </div>
+      </div>
+    </div>"""
+
+
+class TestNomeErradoNaoLiberaOLaco:
+    """O nome proprio errado nao pode DESLIGAR as outras provas de autoria.
+
+    O `.env` traz um nome; o grupo mostra outro (o dono trocou o nome da
+    conta, ou a instalacao veio com o padrao). Nesse caso a comparacao de
+    nome nao diz nada -- e as duas provas que restam (o id que o proprio
+    WhatsApp gera para o que ele envia, e o recibo de entrega) precisam
+    continuar valendo. Antes, a comparacao de nome respondia sozinha: nome
+    diferente, "nao e' nossa", e a resposta do bot voltava como pedido.
+    """
+
+    def test_id_do_whatsapp_prova_que_a_mensagem_e_nossa(self, navegador):
+        html = _pagina(_msg_pelada("3EB0C1D2E3F401", "Operacional",
+                                   "Ivone Teste\n428.888.324-53\nAmapá"))
+        assert _ler(navegador, html) == [], (
+            "nome proprio diferente do configurado fez o bot ler a propria "
+            "resposta como pedido de consultor")
+
+    def test_recibo_de_entrega_prova_que_a_mensagem_e_nossa(self, navegador):
+        html = _pagina(_msg_pelada(
+            "ABCDEF123456", "Operacional", "428.888.324-53",
+            extra='<span data-icon="msg-dblcheck"></span>'))
+        assert _ler(navegador, html) == []
+
+    def test_album_nosso_continua_sendo_nosso(self, navegador):
+        html = _pagina(_msg_pelada("album-3EB0AA-3EB0BB", "Operacional",
+                                   "428.888.324-53"))
+        assert _ler(navegador, html) == []
+
+    def test_a_mensagem_do_consultor_continua_entrando(self, navegador):
+        """A correcao nao pode fechar a porta de quem manda pedido."""
+        html = _pagina(_msg_pelada(f"{GRUPO}_XYZ_5562111@c.us", "Ryan",
+                                   "Ivone Teste"))
+        assert [m["text"] for m in _ler(navegador, html)] == ["Ivone Teste"]
+
+    def test_o_nome_certo_continua_valendo(self, navegador):
+        """Com o nome batendo, a mensagem e' nossa mesmo sem id conhecido."""
+        html = _pagina(_msg_pelada("ZZZ999", "Operacional Capital", "resposta do bot"))
+        assert _ler(navegador, html) == []
+
+
+class TestOTextoLidoNaoEODaCitacao:
+    """Quando a mensagem RESPONDE outra, a previa da citacao vem junto na
+    linha -- e ela contem o texto original, com CPF e tudo.
+
+    Ler a previa no lugar do corpo e' duplamente ruim: o bot perde o que a
+    pessoa realmente escreveu, e a marca que identifica as nossas respostas
+    (que vive no corpo) nao aparece -- entao nem a segunda camada de defesa
+    reconhece a mensagem como nossa.
+    """
+
+    def _com_citacao(self, autor: str, citado: str, corpo: str, data_id: str) -> str:
+        return _pagina(f"""
+        <div role="row">
+          <div class="x1c4 focusable-list-item" data-id="{data_id}">
+            <div data-testid="quoted-message">
+              <span class="selectable-text"><span>{citado}</span></span>
+            </div>
+            <div class="copyable-text" data-pre-plain-text="[19:47, 29/08/2026] {autor}: ">
+              <span class="selectable-text"><span>{corpo}</span></span>
+            </div>
+          </div>
+        </div>""")
+
+    def test_le_o_corpo_e_nao_a_previa_citada(self, navegador):
+        html = self._com_citacao(
+            "Ryan", citado="Ivone Teste\n428.888.324-53",
+            corpo="na verdade e' a Maria", data_id=f"{GRUPO}_Q1_5562111@c.us")
+        assert [m["text"] for m in _ler(navegador, html)] == ["na verdade e' a Maria"]
+
+    def test_sem_citacao_nada_muda(self, navegador):
+        html = _pagina(_msg_pelada(f"{GRUPO}_Q2_5562111@c.us", "Ryan", "Ivone Teste"))
+        assert [m["text"] for m in _ler(navegador, html)] == ["Ivone Teste"]

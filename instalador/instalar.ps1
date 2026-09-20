@@ -197,12 +197,17 @@ function Escrever-Env {
     Set-Content -LiteralPath $env_path -Value $linhas -Encoding UTF8
     Ok "configuracao gravada"
 
+    # A pasta pode nao existir: o pacote pode ter sido montado com
+    # -SemArqueiro. Sem este New-Item, o Set-Content abaixo derruba a
+    # instalacao INTEIRA -- e derruba no fim, depois da .venv e dos 200 MB do
+    # Chromium, com "Could not find a part of the path" na tela.
     $cred = Join-Path $Destino "arqueiro\credenciais.ini"
+    New-Item -ItemType Directory -Force -Path (Join-Path $Destino "arqueiro") | Out-Null
     if (-not (Test-Path $cred)) {
         Set-Content -LiteralPath $cred -Encoding UTF8 -Value @(
             "; Acesso do simulador ao portal do Santander.",
             "; Preencha aqui OU defina SANTANDER_CPF / SANTANDER_SENHA no ambiente.",
-            "[santander]",
+            "[acesso]",
             "cpf =",
             "senha ="
         )
@@ -239,6 +244,90 @@ function Registrar-Desinstalador {
     if (Test-Path $icone) { Set-ItemProperty $chave DisplayIcon $icone }
 }
 
+function Pasta-Da-Area-De-Trabalho {
+    <# Onde o usuario REALMENTE ve os arquivos.
+
+    Com o OneDrive sincronizando a area de trabalho, ela nao e'
+    %USERPROFILE%\Desktop -- e um arquivo escrito no lugar errado simplesmente
+    nao existe para quem instalou. Quem sabe o caminho certo e' o proprio
+    shell (SpecialFolders), a mesma fonte que o atalho usa.
+    #>
+    $py = Join-Path $Destino ".venv\Scripts\python.exe"
+    if (Test-Path $py) {
+        try {
+            $achado = & $py -c "import win32com.client; print(win32com.client.Dispatch('WScript.Shell').SpecialFolders('Desktop'))" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $achado -and (Test-Path $achado)) { return "$achado".Trim() }
+        } catch {}
+    }
+    $reserva = [Environment]::GetFolderPath("Desktop")
+    if ($reserva -and (Test-Path $reserva)) { return $reserva }
+    return (Join-Path $env:USERPROFILE "Desktop")
+}
+
+function Escrever-Senha-Na-Area-De-Trabalho {
+    <# O unico registro da senha sorteada numa instalacao sem perguntas.
+
+    A janela do instalador fecha sozinha nesse modo (nao ha' `pause`), entao
+    a senha impressa na tela some junto com ela. O arquivo precisa se explicar
+    inteiro: o que e' aquilo, o que fazer com a senha e que ele mesmo pode --
+    e deve -- ser apagado depois.
+
+    Texto em ASCII de proposito, como o resto deste script: o arquivo .ps1 nao
+    tem BOM, e no PowerShell 5.1 isso faria acento virar simbolo estranho.
+    #>
+    # `[IO.Path]::Combine` e nao `Join-Path`: o segundo valida a unidade e
+    # LEVANTA se ela nao existir. Com $ErrorActionPreference = "Stop", isso
+    # abortaria a instalacao inteira no ultimo passo -- com tudo ja' instalado.
+    $desk = Pasta-Da-Area-De-Trabalho
+    $arquivo = [IO.Path]::Combine("$desk", "Senha do Painel Allana.txt")
+    $texto = @"
+ALLANA BOT - SENHA DO PAINEL
+============================
+
+Esta e' a senha para entrar no painel da Allana:
+
+    $script:Senha
+
+O painel abre pelo atalho "Allana Bot" ou em http://127.0.0.1:$Porta
+
+O QUE FAZER AGORA
+-----------------
+1) Guarde esta senha num lugar seguro: gerenciador de senhas, cofre do
+   navegador, ou anotada onde so' voce tem acesso.
+
+2) Depois de guardar, APAGUE ESTE ARQUIVO. Enquanto ele estiver aqui,
+   qualquer pessoa que usar este computador le' a senha do painel -- e o
+   painel mostra CPF de cliente.
+
+Apagar este arquivo nao quebra nada: o programa nunca o le'.
+
+PARA TROCAR A SENHA
+-------------------
+Abra o arquivo abaixo, mude a linha DASHBOARD_PASSWORD= e inicie o bot de novo:
+
+    $Destino\.env
+
+Gerado pelo instalador em $(Get-Date -Format 'dd/MM/yyyy HH:mm').
+"@
+    # Conferir, nunca anunciar: se o arquivo nao existir, a pessoa precisa
+    # saber AGORA -- e' a unica copia da senha que ela tem. E nada aqui pode
+    # derrubar uma instalacao que ja' terminou.
+    $gravou = $false
+    try {
+        Set-Content -LiteralPath $arquivo -Value $texto -Encoding UTF8
+        $gravou = Test-Path -LiteralPath $arquivo
+    } catch {
+        Aviso "Nao consegui gravar a senha na area de trabalho: $($_.Exception.Message)"
+    }
+    if ($gravou) {
+        Ok "senha tambem anotada em: $arquivo (guarde e apague o arquivo)"
+    } else {
+        Aviso "NAO consegui deixar a senha na area de trabalho."
+        Aviso "Anote agora: $script:Senha"
+        Aviso "Ela tambem esta em $Destino\.env (linha DASHBOARD_PASSWORD)."
+    }
+}
+
 # ------------------------------------------------------------------ execucao
 Write-Host ""
 Write-Host "  Allana Bot - instalacao" -ForegroundColor White
@@ -263,36 +352,49 @@ try {
         # O python da .venv ja foi instalado e o pywin32 tambem (via requirements.txt)
         # Usamos win32com para criar o atalho escapando da heuristica do Defender
         $py = Join-Path $Destino ".venv\Scripts\python.exe"
-        if (Test-Path $py) {
-            $script = @"
-import win32com.client, os
-try:
-    ws = win32com.client.Dispatch('WScript.Shell')
-    desktop = ws.SpecialFolders('Desktop')
-    
-    paths = [
-        os.path.join(desktop, 'Allana Bot.lnk'),
-        os.path.join(os.environ['APPDATA'], r'Microsoft\Windows\Start Menu\Programs\Allana Bot.lnk')
-    ]
-    for p in paths:
-        try:
-            lnk = ws.CreateShortcut(p)
-            lnk.TargetPath = r'$($Destino.Replace("\", "\\"))\\iniciar.bat'
-            lnk.WorkingDirectory = r'$($Destino.Replace("\", "\\"))'
-            lnk.IconLocation = r'$($Destino.Replace("\", "\\"))\\instalador\\allana.ico'
-            lnk.Save()
-        except Exception as e:
-            pass
-except Exception as e:
-    pass
-"@
-            $pyfile = Join-Path $Destino "atalho.py"
-            Set-Content -Path $pyfile -Value $script
-            & $py $pyfile
-            Remove-Item $pyfile -Force -ErrorAction SilentlyContinue
-            Ok "atalho criado"
-        } else {
+        if (-not (Test-Path $py)) {
             Write-Host "  [AVISO] Python nao encontrado para criar o atalho." -ForegroundColor Yellow
+            return
+        }
+        # A area de trabalho vem do proprio Windows (SpecialFolders): com
+        # OneDrive ligado ela NAO e' %USERPROFILE%\Desktop, e um atalho escrito
+        # no lugar errado simplesmente nao aparece para o usuario.
+        # Os caminhos vao como string crua do Python -- sem dobrar a barra. O
+        # `r'...'` ja' e' literal; dobrar gravava a pasta com o separador
+        # repetido dentro do proprio atalho.
+        # Barra no fim quebraria o r'...' do Python (' escapa a aspa).
+        $raiz = $Destino.TrimEnd('\')
+        $script = @"
+import win32com.client, os
+ws = win32com.client.Dispatch('WScript.Shell')
+alvos = [os.path.join(ws.SpecialFolders('Desktop'), 'Allana Bot.lnk'),
+         os.path.join(os.environ['APPDATA'],
+                      r'Microsoft\Windows\Start Menu\Programs\Allana Bot.lnk')]
+for p in alvos:
+    try:
+        lnk = ws.CreateShortcut(p)
+        lnk.TargetPath = r'$raiz\iniciar.bat'
+        lnk.WorkingDirectory = r'$raiz'
+        lnk.IconLocation = r'$raiz\instalador\allana.ico'
+        lnk.Save()
+        print(p)
+    except Exception as e:
+        # Um atalho que falha nao derruba a instalacao -- mas tem de aparecer.
+        print('FALHOU %s: %s' % (p, e))
+"@
+        $pyfile = Join-Path $Destino "atalho.py"
+        Set-Content -Path $pyfile -Value $script
+        $saida = & $py $pyfile 2>&1
+        Remove-Item $pyfile -Force -ErrorAction SilentlyContinue
+
+        # Conferir, e nao anunciar. "atalho criado" impresso sem olhar foi o
+        # que deixou a ausencia do icone passar batido em duas instalacoes.
+        $criados = @($saida | Where-Object { $_ -like "*.lnk" -and (Test-Path $_) })
+        if ($criados.Count -gt 0) {
+            Ok "atalho criado ($($criados.Count)): $($criados -join '; ')"
+        } else {
+            Aviso "NAO consegui criar o atalho. Abra o bot por: $Destino\iniciar.bat"
+            $saida | Where-Object { $_ -like "FALHOU*" } | ForEach-Object { Aviso "  $_" }
         }
     }
     
@@ -303,11 +405,9 @@ except Exception as e:
     Write-Host "  Pronto." -ForegroundColor Green
     Write-Host "  Abra pelo atalho 'Allana Bot' ou rode: $Destino\iniciar.bat"
     Write-Host "  O painel responde em http://127.0.0.1:$Porta"
-    if ($SemPerguntas -and $script:Senha) { 
-        Write-Host "  Senha do painel: $Senha" -ForegroundColor Yellow 
-        $desk = [Environment]::GetFolderPath("Desktop")
-        $aviso = "A senha do painel Allana Bot e: $Senha`r`nVoce pode muda-la no arquivo $Destino\.env"
-        Set-Content -Path (Join-Path $desk "Senha do Painel Allana.txt") -Value $aviso
+    if ($SemPerguntas -and $script:Senha) {
+        Write-Host "  Senha do painel: $Senha" -ForegroundColor Yellow
+        Escrever-Senha-Na-Area-De-Trabalho
     }
     Write-Host ""
     Write-Host "  Antes do primeiro uso:" -ForegroundColor White

@@ -25,6 +25,7 @@ import asyncio
 import hmac
 import csv
 import io
+import ipaddress
 import json
 import os
 import re
@@ -112,14 +113,31 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
 
     Auth = Depends(require_auth)
 
+    def quem_chamou(request: Request) -> str:
+        """De onde veio a requisição — só o que o cliente NÃO escolhe.
+
+        ``X-Forwarded-For`` é escrito por quem chama. Confiar nele sem proxy
+        na frente custava duas coisas: o limite de tentativas caía (um IP
+        inventado por tentativa e a senha do painel vira questão de tempo) e
+        o texto do cabeçalho entrava no log de auditoria, que o operador lê
+        como se fosse nosso.
+
+        Com ``TRUST_PROXY_HEADER=true`` o cabeçalho passa a valer — e mesmo aí
+        só como endereço IP de verdade, nunca como texto livre.
+        """
+        direto = request.client.host if request.client else "desconhecido"
+        if not config.trust_proxy_header:
+            return direto
+        primeiro = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+        try:
+            return str(ipaddress.ip_address(primeiro))
+        except ValueError:
+            return direto
+
     @api.post("/api/login")
     async def login(request: Request, password: str = Form(...)):
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            client = forwarded.split(",")[0].strip()
-        else:
-            client = request.client.host if request.client else "desconhecido"
-            
+        client = quem_chamou(request)
+
         if not login_limiter.allow(client):
             raise HTTPException(
                 status_code=429,

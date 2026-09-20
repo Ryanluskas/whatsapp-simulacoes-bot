@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.actor import ActorTimeout, ThreadActor
-from app.models import (Delivery, EnvioNaoSaiu, EnvioSemProva, IncomingMessage,
+from app.models import (Delivery, Desfecho, EnvioNaoSaiu, EnvioSemProva, IncomingMessage,
                         ParsedRequest, ResultadoEnvio, SimulationJob, SimulationResult)
 from app.state_store import StateStore
 from app.whatsapp import CONNECTED, WhatsAppService
@@ -230,6 +230,98 @@ class TestManagerNaoMandaTextoPorCimaDaDuvida:
         assert entrega.status == Delivery.RETRYING
 
 
+class _WhatsappIncerto:
+    """A API devolveu um id E disse que nao da' para provar a entrega.
+
+    E' o caso real do `status: ERROR` da Evolution: a mensagem foi criada na
+    instancia (existe id), mas o WhatsApp nao a aceitou. Pode ter chegado.
+    """
+
+    def __init__(self, key_id="BAE5INCERTA"):
+        self.key_id = key_id
+        self.textos = 0
+
+    def render_png(self, html, path, width=900, timeout=60.0):
+        from pathlib import Path
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_bytes(png_valido())
+        return str(path)
+
+    def send(self, **_k):
+        self.textos += 1
+        return ResultadoEnvio(
+            ok=False, sem_prova=True, desfecho=Desfecho.INCERTA, provider="evolution",
+            motivo=f"a Evolution devolveu o id {self.key_id} com status ERROR",
+            evidencia={"key_id": self.key_id, "sem_prova": True,
+                       "desfecho": Desfecho.INCERTA})
+
+
+def _linha_da_simulacao(manager):
+    """A solicitacao que o `_resultado()` representa, ja' esperando entrega."""
+    agora = "2026-09-18T12:00:00Z"
+    manager.db.insert("simulations", {
+        "id": 1, "request_id": "REQ000001", "consultant_name": "Consultor",
+        "chat_id": "g@g.us", "source_message_id": "3EB0PEDIDO",
+        "status": "processing", "stage": "replying", "result_ok": 1,
+        "delivery_status": Delivery.PENDING, "created_at": agora, "updated_at": agora})
+
+
+class TestEntregaIncertaComIdConhecido:
+    """Uma entrega incerta COM id nao e' a mesma coisa que uma sem id.
+
+    Com o id gravado, o ACK que chegar depois acha a linha e fecha a entrega
+    sozinho. Sem ele, alguem tem de olhar o grupo -- para uma mensagem que a
+    propria API ja' identificou.
+    """
+
+    def test_o_id_da_mensagem_incerta_fica_gravado(self, tmp_path):
+        wa = _WhatsappIncerto()
+        manager = _manager(tmp_path, wa, imagem=False)
+        _linha_da_simulacao(manager)
+        entrega = manager._deliver_result(_resultado())
+
+        assert entrega.status == Delivery.UNCONFIRMED
+        saida = manager.db.fetchone(
+            "SELECT wa_message_id, status FROM messages WHERE direction='out'")
+        assert saida["status"] == Delivery.UNCONFIRMED
+        assert saida["wa_message_id"] == "BAE5INCERTA", (
+            "sem o id gravado, o ACK do webhook nunca acha esta mensagem")
+        sim = manager.db.fetchone("SELECT sent_message_id FROM simulations WHERE id=1")
+        assert sim["sent_message_id"] == "BAE5INCERTA"
+
+    def test_ack_que_chegou_antes_da_resposta_do_post_fecha_a_entrega(self, tmp_path):
+        """O webhook e' outra conexao: o ACK pode chegar antes do POST voltar."""
+        wa = _WhatsappIncerto()
+        manager = _manager(tmp_path, wa, imagem=False)
+        _linha_da_simulacao(manager)
+        manager.db.insert("evolution_acks", {
+            "message_id": "BAE5INCERTA", "status": "DELIVERY_ACK", "rank": 2,
+            "chat_id": "g@g.us", "created_at": "2026-09-18T12:00:00Z"})
+
+        entrega = manager._deliver_result(_resultado())
+
+        assert entrega.status == Delivery.DELIVERED, (
+            "o ACK ja' provava a entrega; a solicitacao ficou esperando decisao manual")
+        sim = manager.db.fetchone(
+            "SELECT delivery_status, stage, sent_message_id FROM simulations WHERE id=1")
+        assert sim["delivery_status"] == Delivery.DELIVERED
+        assert sim["stage"] == "completed"
+        assert sim["sent_message_id"] == "BAE5INCERTA"
+        assert manager.db.fetchall(
+            "SELECT id FROM logs WHERE message LIKE '%ACK%'"),             "promover sem deixar log esconde de onde veio a confirmacao"
+
+    def test_ack_de_outro_chat_nao_fecha_a_entrega(self, tmp_path):
+        wa = _WhatsappIncerto()
+        manager = _manager(tmp_path, wa, imagem=False)
+        _linha_da_simulacao(manager)
+        manager.db.insert("evolution_acks", {
+            "message_id": "BAE5INCERTA", "status": "DELIVERY_ACK", "rank": 2,
+            "chat_id": "outro@g.us", "created_at": "2026-09-18T12:00:00Z"})
+
+        entrega = manager._deliver_result(_resultado())
+        assert entrega.status == Delivery.UNCONFIRMED
+
+
 # ========================================================== um banco, um processo
 class TestUmProcessoPorBanco:
     """Dois checkouts (ou duas portas) com o mesmo DB_PATH subiam juntos: a
@@ -259,7 +351,7 @@ class TestUmProcessoPorBanco:
         banco = (tmp_path / "compartilhado.db").resolve()
         comecou: list[int] = []
         monkeypatch.setattr(entrada.BotManager, "start", lambda self: comecou.append(1))
-        monkeypatch.setattr(entrada.uvicorn, "run", lambda *a, **k: None)
+        monkeypatch.setattr(entrada, "servir", lambda *a, **k: 0)
 
         primeiro = TravaDeInstancia(banco, rotulo="outro checkout", pasta=banco.parent)
         primeiro.adquirir()
@@ -285,7 +377,7 @@ class TestLeituraDomNaoPerdePedido:
     Uma queda com o pedido na fila (o ator ocupado enviando) o perdia."""
 
     def _servico(self, tmp_path, recebe):
-        from app.whatsapp import CHAT_INFO_JS, READ_MESSAGES_JS
+        from app.whatsapp import CHAT_INFO_JS, ESTADO_DA_TELA_JS, READ_MESSAGES_JS
 
         s = WhatsAppService(profile_dir=tmp_path / "perfil", group_name="Grupo Teste",
                             state=StateStore(tmp_path / "state.json"), headless=True,
@@ -298,7 +390,13 @@ class TestLeituraDomNaoPerdePedido:
             if script is READ_MESSAGES_JS:
                 return list(s.linhas)
             if script is CHAT_INFO_JS:
-                return {"titulos": ["Grupo Teste"], "jid": _GRUPO_JID}
+                return {"titulos": ["Grupo Teste"], "jid": _GRUPO_JID, "temMain": True}
+            if script is ESTADO_DA_TELA_JS:
+                # O leitor so' roda com a conversa certa PROVADA na tela.
+                return {"url": "https://web.whatsapp.com/", "search_visible": True,
+                        "search_value": "", "target_in_list": True,
+                        "header_visible": True, "header_titles": ["Grupo Teste"],
+                        "main_visible": True, "message_rows": len(s.linhas)}
             return None
 
         s._page = SimpleNamespace(evaluate=evaluate)
@@ -472,3 +570,89 @@ class TestEvolutionStatusErrorNaoEEntregue:
             _GRUPO_JID, "g", "resposta")
         assert r.ok and r.enviado_id == "BAE5OK"
 
+
+
+# ================================================ autoria: a segunda camada
+class TestSegundaCamadaDeAutoria:
+    """Uma mensagem NOSSA nunca pode virar solicitacao, nem quando o filtro
+    da tela falha.
+
+    Em 20/09/2026 ele falhou: `BOT_SELF_NAME` dizia "Operacional Capital", a
+    conta se chamava "Operacional" no grupo, e a comparacao de nome
+    respondia sozinha -- desligando as outras duas provas. Tres solicitacoes
+    nasceram do que o proprio bot tinha enviado. Todas com id "3EB0".
+    """
+
+    def _servico(self, tmp_path, linhas, recebe=None):
+        from app.whatsapp import CHAT_INFO_JS, ESTADO_DA_TELA_JS, READ_MESSAGES_JS
+
+        avisos: list[str] = []
+        s = WhatsAppService(profile_dir=tmp_path / "perfil", group_name="Grupo Teste",
+                            state=StateStore(tmp_path / "state.json"), headless=True,
+                            on_incoming=recebe or (lambda m: None))
+        s._log = lambda nivel, msg, *a, **k: avisos.append(f"{nivel}: {msg}")
+        s._conferir_nome_proprio = lambda: None
+        s.linhas = linhas
+
+        def evaluate(script, *_args):
+            if script is READ_MESSAGES_JS:
+                return list(s.linhas)
+            if script is CHAT_INFO_JS:
+                return {"titulos": ["Grupo Teste"], "jid": _GRUPO_JID, "temMain": True}
+            if script is ESTADO_DA_TELA_JS:
+                return {"url": "https://web.whatsapp.com/", "search_visible": True,
+                        "search_value": "", "target_in_list": True,
+                        "header_visible": True, "header_titles": ["Grupo Teste"],
+                        "main_visible": True, "message_rows": len(s.linhas)}
+            return None
+
+        s._page = SimpleNamespace(evaluate=evaluate)
+        s.avisos = avisos
+        return s
+
+    #: Um pedido de verdade: nome, CPF valido e orgao.
+    PEDIDO = "Cliente Teste\n52998224725\nAmapá"
+
+    def test_id_pelado_de_mensagem_nossa_nao_vira_pedido(self, tmp_path):
+        recebidas: list[str] = []
+        s = self._servico(tmp_path, [{"id": "3EB0PRIMEIRA", "text": "antiga", "meta": ""}],
+                          recebe=lambda m: recebidas.append(m.message_id))
+        s._poll_messages()      # linha de base
+        s.linhas.append({"id": "3EB0C1D2E3F4", "text": self.PEDIDO,
+                         "meta": "[02:04, 20/09/2026] Operacional: "})
+        s._poll_messages()
+
+        assert recebidas == [], "o bot criou solicitacao a partir da propria mensagem"
+        assert s.state.has_seen("3EB0C1D2E3F4"), "sem marcar, ela voltaria no proximo ciclo"
+        assert any("id de mensagem NOSSA" in a for a in s.avisos), (
+            "ignorou em silencio: ninguem descobriria que a autoria da tela falhou")
+
+    def test_a_mensagem_do_consultor_continua_passando(self, tmp_path):
+        recebidas: list[str] = []
+        s = self._servico(tmp_path, [{"id": _data_id("2AF4ANTIGA"), "text": "oi", "meta": ""}],
+                          recebe=lambda m: recebidas.append(m.message_id))
+        s._poll_messages()
+        nova = _data_id("2AF4NOVA")
+        s.linhas.append({"id": nova, "text": self.PEDIDO,
+                         "meta": "[02:05, 20/09/2026] Ryan: "})
+        s._poll_messages()
+        assert recebidas == [nova]
+
+
+class TestIdDeMensagemNossa:
+    """A regra, isolada. `false_` e `true_` vem do formato classico; o id
+    pelado "3EB0" e' o que esta instalacao serve."""
+
+    @pytest.mark.parametrize("data_id,nossa", [
+        ("3EB0566994AE2D2798E44D", True),
+        ("album-3EB0AA-3EB0BB", True),
+        ("true_5562000@g.us_BBB", True),
+        # `false_` manda no formato classico: o "3EB0" interno nao decide nada.
+        ("false_120363@g.us_3EB0AAAA_5562111@c.us", False),
+        ("2AF4AAAABBBBCCCC", False),
+        ("ACC81234567890", False),
+        ("", False),
+    ])
+    def test_tabela(self, data_id, nossa):
+        from app.whatsapp import id_de_mensagem_nossa
+        assert id_de_mensagem_nossa(data_id) is nossa

@@ -90,7 +90,7 @@ try {
         }
         Set-Content -LiteralPath (Join-Path $destinoArq "credenciais.ini.exemplo") -Encoding UTF8 -Value @(
             "; Copie para credenciais.ini e preencha. Este arquivo NUNCA vai no pacote.",
-            "[santander]",
+            "[acesso]",
             "cpf =",
             "senha ="
         )
