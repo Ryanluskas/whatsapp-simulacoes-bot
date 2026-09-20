@@ -224,6 +224,9 @@ class SimulationJob:
     simulation_id: int
     consultant_id: int | None = None
     attempt: int = 1
+    #: Quantas vezes o AMBIENTE impediu esta solicitação de rodar (navegador
+    #: que não abre). Conta separado de ``attempt``: uma não gasta a outra.
+    ambientais: int = 0
     created_at: datetime = field(default_factory=utc_now)
 
 
@@ -234,6 +237,11 @@ class SimulationResult:
     status: str = ""
     error: str = ""
     retryable: bool = False
+    #: Falha de AMBIENTE, não do pedido: o navegador do simulador não abriu,
+    #: o perfil está em uso, o Playwright não subiu. Repetir depois pode dar
+    #: certo -- mas gastar as tentativas do consultor nisso faz o pedido dele
+    #: morrer por um problema que não é dele.
+    ambiental: bool = False
     reduction_value: float = 0.0
     margin: str = ""
     contracts: tuple = ()

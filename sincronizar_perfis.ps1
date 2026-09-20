@@ -15,7 +15,21 @@
 #
 #  USO:  clique com o botao direito -> "Executar com o PowerShell"
 #        ou:  powershell -ExecutionPolicy Bypass -File sincronizar_perfis.ps1
+#
+#  -Somente simulador   copia SO' para o perfil do Santander
+#  -Somente whatsapp    copia SO' para o perfil do WhatsApp
+#  (sem -Somente: os dois, como sempre foi)
+#
+#  Por que escolher: o perfil do WhatsApp guarda a SESSAO ja' conectada. Se o
+#  seu Brave do dia a dia nao estiver logado no WhatsApp Web, sobrescrever
+#  aquele perfil custa um QR Code novo. Quando o que voce quer e' a senha do
+#  Santander salva, `-Somente simulador` resolve sem tocar no WhatsApp.
 # =============================================================================
+[CmdletBinding()]
+param(
+    [ValidateSet("ambos", "whatsapp", "simulador")]
+    [string]$Somente = "ambos"
+)
 
 $ErrorActionPreference = "Stop"
 $raiz = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -40,9 +54,13 @@ $origem = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data"
 # esse destino e' pulado.
 $origemNorm = (Resolve-Path $origem -EA SilentlyContinue).Path
 $destinos = @{}
-foreach ($par in @(@("WHATSAPP_PROFILE_DIR", ".whatsapp-profile", "WhatsApp Web"),
-                   @("SIMULATOR_PROFILE_DIR", ".simulator-profile", "simulador (Santander)"))) {
-    $chave, $padrao, $rotulo = $par
+foreach ($par in @(@("WHATSAPP_PROFILE_DIR", ".whatsapp-profile", "WhatsApp Web", "whatsapp"),
+                   @("SIMULATOR_PROFILE_DIR", ".simulator-profile", "simulador (Santander)", "simulador"))) {
+    $chave, $padrao, $rotulo, $apelido = $par
+    if ($Somente -ne "ambos" -and $Somente -ne $apelido) {
+        Write-Host "  [--] $rotulo fora desta sincronizacao (-Somente $Somente)." -ForegroundColor DarkGray
+        continue
+    }
     $valor = $padrao
     if (Test-Path ".env") {
         $linha = Select-String -Path ".env" -Pattern "^$chave=(.*)$" -EA SilentlyContinue |
@@ -59,7 +77,12 @@ foreach ($par in @(@("WHATSAPP_PROFILE_DIR", ".whatsapp-profile", "WhatsApp Web"
 }
 if ($destinos.Count -eq 0) {
     Write-Host ""
-    Write-Host "  Nada a sincronizar: os dois servicos ja apontam para o seu perfil." -ForegroundColor Green
+    if ($Somente -eq "ambos") {
+        Write-Host "  Nada a sincronizar: os dois servicos ja apontam para o seu perfil." -ForegroundColor Green
+    } else {
+        Write-Host "  Nada a sincronizar para '$Somente': ou ele ja aponta para o seu" -ForegroundColor Green
+        Write-Host "  perfil do Brave, ou o nome esta errado." -ForegroundColor Green
+    }
     Write-Host ""
     Read-Host "Enter para fechar"
     exit 0
@@ -142,8 +165,13 @@ Write-Host ""
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host "  Pronto." -ForegroundColor Green
 Write-Host ""
-Write-Host "  Os dois navegadores do bot agora abrem com as suas senhas" -ForegroundColor Gray
-Write-Host "  e sessoes salvas, cada um no seu proprio diretorio." -ForegroundColor Gray
+if ($Somente -eq "ambos") {
+    Write-Host "  Os dois navegadores do bot agora abrem com as suas senhas" -ForegroundColor Gray
+    Write-Host "  e sessoes salvas, cada um no seu proprio diretorio." -ForegroundColor Gray
+} else {
+    Write-Host "  O navegador do $Somente agora abre com as suas senhas e" -ForegroundColor Gray
+    Write-Host "  sessoes salvas. O outro perfil ficou como estava." -ForegroundColor Gray
+}
 Write-Host ""
 Write-Host "  Seu Brave do dia a dia continua livre - as copias sao" -ForegroundColor Gray
 Write-Host "  independentes e nao travam o seu perfil." -ForegroundColor Gray

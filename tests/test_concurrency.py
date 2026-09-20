@@ -20,7 +20,8 @@ from app.db import Database
 from app.events import EventHub
 from app.jobs import QueueService
 from app.manager import BotManager
-from app.models import IncomingMessage, SimulationJob, SimulationResult, Stage, Status
+from app.models import (IncomingMessage, ParsedRequest, SimulationJob,
+                        SimulationResult, Stage, Status)
 from app.whatsapp import WhatsAppStatus
 
 TZ = ZoneInfo("America/Sao_Paulo")
@@ -684,3 +685,127 @@ class TestFilaEPosicao:
         itens = queue.snapshot()
         assert itens[0]["request_id"] == "REQ_PROC"
         assert itens[0]["stage_label"] == "Consultando sistema"
+
+
+# ================================ falha de ambiente não gasta o pedido
+class _SimuladorSemNavegador:
+    """O navegador do simulador não abre — nada a ver com o pedido.
+
+    20/09/2026: o perfil do Brave ficou preso e o Playwright estourou
+    `launch_persistent_context: Timeout 180000ms exceeded`. Como isso contava
+    como tentativa, DUAS falhas de ambiente matavam a solicitação: o consultor
+    recebia "não consegui simular" por um Brave aberto na máquina do operador.
+    """
+
+    name = "sem-navegador"
+
+    def __init__(self, falhas: int = 99):
+        self.falhas = falhas
+        self.tentativas: list[int] = []
+
+    def execute(self, job, on_stage=None, timeout=None):
+        self.tentativas.append(job.attempt)
+        if len(self.tentativas) <= self.falhas:
+            return SimulationResult(
+                job=job, ok=False, status="Erro",
+                error="falha ao abrir o navegador do simulador: Timeout",
+                retryable=True, ambiental=True)
+        return SimulationResult(job=job, ok=True, status="Não", margin="R$ 0,00")
+
+    def start(self): pass
+    def stop(self, timeout=None): pass
+    def warm_up(self): pass
+
+
+class TestFalhaDeAmbienteNaoGastaTentativa:
+    def _fila(self, db, hub, simulador, ambiente_rapido):
+        from app import jobs as modulo_jobs
+        ambiente_rapido(modulo_jobs)
+        fila = QueueService(db=db, hub=hub, simulators=[simulador], max_attempts=2,
+                            job_timeout=10.0)
+        fila.start()
+        return fila
+
+    @pytest.fixture()
+    def ambiente_rapido(self, monkeypatch):
+        def aplicar(modulo_jobs):
+            monkeypatch.setattr(modulo_jobs, "ESPERA_DE_AMBIENTE_SEGUNDOS", 0.05)
+        return aplicar
+
+    def _job(self, db):
+        agora = "2026-09-20T10:00:00Z"
+        sim_id = db.insert("simulations", {
+            "request_id": "REQ000100", "consultant_name": "Ryan", "chat_id": "g@g.us",
+            "cpf": CPFS[0], "bank": "Santander", "contract": "1",
+            "status": Status.QUEUED, "stage": Status.QUEUED, "attempts": 0,
+            "max_attempts": 2, "created_at": agora, "updated_at": agora,
+        })
+        return SimulationJob(
+            request=ParsedRequest(consultant_name="Ryan", cpf=CPFS[0],
+                                  bank="Santander", contract="1"),
+            message=_mensagem(0), request_id="REQ000100", simulation_id=sim_id)
+
+    def test_volta_para_a_fila_sem_consumir_tentativa(self, tmp_path, ambiente_rapido):
+        config = _config(tmp_path)
+        db = Database(config.db_path)
+        hub = EventHub(db)
+        simulador = _SimuladorSemNavegador(falhas=3)
+        fila = self._fila(db, hub, simulador, ambiente_rapido)
+        try:
+            fila.submit(self._job(db))
+            fim = time.monotonic() + 15
+            while time.monotonic() < fim and len(simulador.tentativas) < 4:
+                time.sleep(0.05)
+        finally:
+            fila.stop()
+
+        assert len(simulador.tentativas) >= 4, "desistiu depois de duas falhas de ambiente"
+        assert set(simulador.tentativas) == {1}, (
+            f"a falha de ambiente gastou tentativa do consultor: {simulador.tentativas}")
+
+    def test_o_teto_existe_para_nao_virar_laco(self, tmp_path, ambiente_rapido):
+        from app.jobs import MAX_FALHAS_DE_AMBIENTE
+
+        config = _config(tmp_path)
+        db = Database(config.db_path)
+        hub = EventHub(db)
+        simulador = _SimuladorSemNavegador(falhas=99)
+        fila = self._fila(db, hub, simulador, ambiente_rapido)
+        try:
+            fim = time.monotonic() + 20
+            fila.submit(self._job(db))
+            while time.monotonic() < fim:
+                linha = db.fetchone("SELECT status FROM simulations WHERE request_id='REQ000100'")
+                if linha and linha["status"] in (Status.ERROR, Status.INTERRUPTED):
+                    break
+                time.sleep(0.1)
+        finally:
+            fila.stop()
+
+        assert len(simulador.tentativas) <= MAX_FALHAS_DE_AMBIENTE + 2, (
+            f"ficou repetindo sem fim: {len(simulador.tentativas)} execuções")
+
+    def test_o_log_diz_o_que_fazer(self, tmp_path, ambiente_rapido):
+        config = _config(tmp_path)
+        db = Database(config.db_path)
+        hub = EventHub(db)
+        avisos: list[str] = []
+        simulador = _SimuladorSemNavegador(falhas=1)
+        from app import jobs as modulo_jobs
+        ambiente_rapido(modulo_jobs)
+        fila = QueueService(db=db, hub=hub, simulators=[simulador], max_attempts=2,
+                            job_timeout=10.0,
+                            on_log=lambda n, s, m, **k: avisos.append(m))
+        fila.start()
+        try:
+            fila.submit(self._job(db))
+            fim = time.monotonic() + 15
+            while time.monotonic() < fim and len(simulador.tentativas) < 2:
+                time.sleep(0.05)
+        finally:
+            fila.stop()
+
+        ambiente = [a for a in avisos if "sem" in a.lower() and "tentativa" in a.lower()]
+        assert ambiente, f"nenhum aviso explicou a espera: {avisos}"
+        assert any("feche" in a.lower() for a in ambiente), (
+            "o aviso não diz o que o operador precisa fazer")
