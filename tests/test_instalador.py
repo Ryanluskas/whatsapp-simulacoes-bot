@@ -202,14 +202,15 @@ class TestAtalhoNaoMenteQueFoiCriado:
 
 
 @pytest.mark.skipif(not POWERSHELL, reason="sem PowerShell nesta máquina")
-@pytest.mark.parametrize("arquivo", ["instalar.ps1", "remover.ps1", "montar-setup.ps1"])
+@pytest.mark.parametrize("arquivo", ["instalar.ps1", "remover.ps1", "montar-setup.ps1",
+                                     "../sincronizar_perfis.ps1"])
 def test_o_script_ao_menos_compila(arquivo):
     """Um erro de sintaxe aqui é uma instalação que morre na primeira linha.
 
     Só ANALISA o script (`Parser::ParseFile`); nada é executado — ninguém
     instala, copia ou apaga coisa alguma para este teste passar.
     """
-    caminho = str(INSTALADOR / arquivo)
+    caminho = str((INSTALADOR / arquivo).resolve())
     ps = (
         "$e = $null; "
         f"$null = [System.Management.Automation.Language.Parser]::ParseFile('{caminho}', "
@@ -331,3 +332,52 @@ class TestOArquivoDaSenhaSeExplica:
         assert bruto[:3] != b"\xef\xbb\xbf", "o arquivo ganhou BOM"
         fora = [b for b in bruto if b > 127]
         assert not fora, f"{len(fora)} byte(s) não-ASCII em instalar.ps1"
+
+
+class TestSincronizarPerfisDoBrave:
+    """`sincronizar_perfis.ps1` copia o perfil pessoal do Brave para os perfis
+    do bot — é assim que o WhatsApp e o Santander nascem com as senhas e
+    sessões salvas, sem que o bot precise abrir o SEU perfil (o Chromium
+    tranca o diretório: dois navegadores no mesmo perfil não sobem).
+
+    O que se perde num erro aqui não é pequeno: a sessão do WhatsApp Web já
+    conectada, ou as senhas que não decifram sem o `Local State`.
+    """
+
+    @pytest.fixture()
+    def script(self) -> str:
+        caminho = INSTALADOR.parent / "sincronizar_perfis.ps1"
+        assert caminho.is_file(), "sincronizar_perfis.ps1 sumiu da raiz"
+        return caminho.read_text(encoding="utf-8", errors="replace")
+
+    def test_recusa_copiar_com_o_brave_aberto(self, script):
+        """Copiar um perfil em uso gera perfil corrompido."""
+        assert "Get-Process brave" in script
+        trecho = script[script.index("Get-Process brave"):]
+        assert "exit 1" in trecho[:800], "o script segue mesmo com o Brave aberto"
+
+    def test_guarda_o_perfil_anterior_em_vez_de_apagar(self, script):
+        assert "Move-Item $destino $backup" in script, (
+            "o perfil anterior (com a sessão do WhatsApp) seria apagado sem volta")
+        assert ".bak-$carimbo" in script
+
+    def test_leva_o_local_state(self, script):
+        """Sem ele, o `Login Data` copiado não decifra e o autofill não aparece."""
+        assert '"$origem\Local State"' in script
+
+    def test_nao_exclui_onde_mora_a_sessao(self, script):
+        excluir = script[script.index("$excluir = @("):script.index("Write-Host \"\"")]
+        for guardar in ("IndexedDB", "Local Storage", "Login Data"):
+            assert guardar not in excluir, (
+                f"{guardar} entrou na lista de exclusão: a sessão/senha não viaja")
+
+    def test_remove_as_travas_de_instancia(self, script):
+        assert 'Filter "Singleton*"' in script, (
+            "a trava do perfil de origem viajaria junto e o navegador do bot não subiria")
+
+    @pytest.mark.parametrize("valor", ["ambos", "whatsapp", "simulador"])
+    def test_o_somente_escolhe_o_destino(self, script, valor):
+        """Sincronizar os dois quando você só quer a senha do Santander custa
+        a sessão do WhatsApp, se o Brave pessoal não estiver logado nela."""
+        assert f'"{valor}"' in script
+        assert "$Somente -ne $apelido" in script, "o filtro por destino sumiu"
