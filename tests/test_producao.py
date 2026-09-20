@@ -1918,3 +1918,63 @@ class TestReinicioEmCadaPontoDaEntrega:
             assert len(s.servidor.envios()) == 1
         finally:
             s.desligar()
+
+
+class TestNavegadorDoSimulador:
+    """O que o simulador faz quando o navegador não abre — e o que ele avisa.
+
+    20/09/2026: o perfil do Brave ficou preso, o Playwright esperou os 180 s
+    do padrão e a fila parou sem explicação. Com o perfil REAL do navegador, a
+    limpeza de órfãos se recusa a agir (fecharia as abas do operador), então
+    ninguém conserta sozinho: é preciso dizer ao operador o que fazer.
+    """
+
+    def test_a_espera_do_navegador_e_curta_e_explicita(self):
+        from app.simulator import SimulatorService
+
+        assert SimulatorService._ESPERA_DO_NAVEGADOR_MS <= 90_000, (
+            "voltou a esperar o padrão do Playwright: três minutos de fila parada")
+        import inspect
+        fonte = inspect.getsource(SimulatorService._ensure_browser)
+        assert fonte.count("_ESPERA_DO_NAVEGADOR_MS") >= 2, (
+            "alguma das chamadas de launch ficou sem prazo próprio")
+
+    def test_perfil_pessoal_gera_aviso_com_a_saida(self, tmp_path, monkeypatch):
+        from app.simulator import SimulatorService
+
+        servico = SimulatorService.__new__(SimulatorService)
+        avisos: list[tuple[str, str]] = []
+        servico._log = lambda nivel, msg: avisos.append((nivel, msg))
+
+        pessoal = (tmp_path / "BraveSoftware" / "Brave-Browser" / "User Data")
+        pessoal.mkdir(parents=True)
+        servico._avisar_se_perfil_pessoal(pessoal)
+        servico._avisar_se_perfil_pessoal(pessoal)      # não repete
+
+        assert len(avisos) == 1, f"avisou {len(avisos)} vezes (deveria ser uma)"
+        nivel, texto = avisos[0]
+        assert nivel == "WARNING"
+        assert "sincronizar_perfis.ps1" in texto, "o aviso não diz como resolver"
+
+    def test_perfil_proprio_nao_gera_aviso(self, tmp_path):
+        from app.simulator import SimulatorService
+
+        servico = SimulatorService.__new__(SimulatorService)
+        avisos: list[str] = []
+        servico._log = lambda nivel, msg: avisos.append(msg)
+        proprio = tmp_path / "perfis" / "simulador"
+        proprio.mkdir(parents=True)
+        servico._avisar_se_perfil_pessoal(proprio)
+        assert avisos == []
+
+    def test_falha_ao_abrir_o_navegador_e_ambiental(self):
+        """`ambiental` é o que impede a falha de máquina de matar o pedido."""
+        import inspect
+
+        from app.simulator import SimulatorService
+
+        fonte = inspect.getsource(SimulatorService._run_job)
+        trecho = fonte[fonte.index("_ensure_browser"):]
+        trecho = trecho[:trecho.index("request = job.request")]
+        assert "ambiental=True" in trecho, (
+            "a falha ao abrir o navegador voltou a gastar tentativa do consultor")
