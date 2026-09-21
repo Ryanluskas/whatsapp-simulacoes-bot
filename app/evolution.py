@@ -49,6 +49,13 @@ DELAY_HUMANO_MS = 1200
 #: Reenviar nao resolve -- so' um humano abrindo ``/manager`` resolve.
 LICENCA_PENDENTE = "LICENSE_REQUIRED"
 
+#: Os eventos que o bot precisa receber, com o nome que a Evolution v2.3.7
+#: guarda na lista ``events`` do webhook. Ela so' entrega o que esta' na lista
+#: (``webhook.controller.ts``, ``emit``): sem ``MESSAGES_UPSERT`` nenhum pedido
+#: chega; sem ``MESSAGES_UPDATE`` nenhum ACK; sem ``CONNECTION_UPDATE`` a queda
+#: da conexao so' aparece na proxima consulta de estado.
+EVENTOS_NECESSARIOS = ("MESSAGES_UPSERT", "MESSAGES_UPDATE", "CONNECTION_UPDATE")
+
 # --------------------------------------------------------------- classificacao
 #
 # A regra que manda aqui: **so' se manda de novo quando ha' prova de que a
@@ -398,6 +405,10 @@ class EvolutionClient:
             "evolution_state": "unknown",
             "webhook_configured": None,
             "webhook_points_to_bot": None,
+            "webhook_events_missing": None,
+            "webhook_by_events": None,
+            "groups_ignored": None,
+            "evolution_version": None,
             "checked_at": "",
         }
 
@@ -631,6 +642,8 @@ class EvolutionClient:
         """
         configurado: bool | None = None
         aponta: bool | None = None
+        faltando: list[str] | None = None
+        por_evento: bool | None = None
         try:
             resposta = self._http().get(f"/webhook/find/{self.instance}")
         except (httpx.TimeoutException, httpx.TransportError):
@@ -650,9 +663,62 @@ class EvolutionClient:
                     url = str(dados.get("url") or "")
                     configurado = bool(dados.get("enabled")) and bool(url)
                     aponta = ("/webhook/whatsapp" in url) if url else False
+                if isinstance(dados, dict):
+                    # Os eventos assinados e o `byEvents`: com ele ligado a
+                    # Evolution poe o nome do evento no fim da URL, e a rota do
+                    # bot nao atende esse caminho. Nomes, nunca a URL.
+                    eventos = dados.get("events")
+                    if isinstance(eventos, list):
+                        assinados = {str(e).strip().upper() for e in eventos}
+                        faltando = [e for e in EVENTOS_NECESSARIOS if e not in assinados]
+                    if isinstance(dados.get("webhookByEvents"), bool):
+                        por_evento = dados["webhookByEvents"]
         self._anotar_diagnostico(webhook_configured=configurado,
-                                 webhook_points_to_bot=aponta)
+                                 webhook_points_to_bot=aponta,
+                                 webhook_events_missing=faltando,
+                                 webhook_by_events=por_evento)
         return configurado
+
+    def conferir_grupos_ignorados(self) -> bool | None:
+        """``groupsIgnore`` esta' ligado na instancia? (``/settings/find``)
+
+        Ligado, a Evolution descarta mensagem de grupo ANTES do webhook -- nos
+        dois eventos, ``messages.upsert`` e ``messages.update``. O bot nunca
+        ve' um pedido e nada no log dele explica por que. ``None`` = nao deu
+        para conferir. So' o booleano sai daqui: a mesma resposta traz o
+        ``wavoipToken``, que e' segredo.
+        """
+        valor: bool | None = None
+        try:
+            resposta = self._http().get(f"/settings/find/{self.instance}")
+        except (httpx.TimeoutException, httpx.TransportError):
+            resposta = None
+        if resposta is not None and resposta.status_code < 400:
+            try:
+                dados = resposta.json()
+            except ValueError:
+                dados = None
+            if isinstance(dados, dict) and isinstance(dados.get("groupsIgnore"), bool):
+                valor = dados["groupsIgnore"]
+        self._anotar_diagnostico(groups_ignored=valor)
+        return valor
+
+    def conferir_versao(self) -> str:
+        """A versao que a Evolution diz ser (``GET /``). "" = nao deu para saber."""
+        versao = ""
+        try:
+            resposta = self._http().get("/")
+        except (httpx.TimeoutException, httpx.TransportError):
+            resposta = None
+        if resposta is not None and resposta.status_code < 400:
+            try:
+                dados = resposta.json()
+            except ValueError:
+                dados = None
+            if isinstance(dados, dict) and isinstance(dados.get("version"), str):
+                versao = dados["version"].strip()[:32]
+        self._anotar_diagnostico(evolution_version=versao or None)
+        return versao
 
     def request_reconnect(self) -> None:
         try:
