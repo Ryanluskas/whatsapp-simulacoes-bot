@@ -34,7 +34,7 @@ def _setinha(pagina, data_id: str) -> tuple[int, list[str]]:
     """(quantas achou, rótulos). Zero ou uma: agora é UM botão nomeado."""
     from app.whatsapp import BOTAO_DE_OPCOES_JS, GEOMETRIA_DA_LINHA_JS
 
-    pagina.evaluate(GEOMETRIA_DA_LINHA_JS, [data_id, ""])
+    pagina.evaluate(GEOMETRIA_DA_LINHA_JS, data_id)
     achado = pagina.evaluate(BOTAO_DE_OPCOES_JS) or {}
     if not achado.get("achou"):
         return 0, []
@@ -186,15 +186,40 @@ class TestAcharConversaNaLista:
     """
 
     def _achar(self, navegador, html: str, nome: str):
+        """(achou, marcados). O JS passou a devolver TAMBÉM quantas conversas
+        têm aquele nome -- com mais de uma, ele se recusa a escolher."""
         from app.whatsapp import ACHAR_CONVERSA_JS, MARCA_ALVO
         pagina = navegador.new_page()
         try:
             pagina.set_content(html)
-            achou = pagina.evaluate(ACHAR_CONVERSA_JS, nome)
+            resposta = pagina.evaluate(ACHAR_CONVERSA_JS, nome)
             marcados = pagina.locator(f"[{MARCA_ALVO}]").count()
-            return achou, marcados
+            return bool(resposta["achou"]), marcados
         finally:
             pagina.close()
+
+    def _quantos(self, navegador, html: str, nome: str) -> int:
+        from app.whatsapp import ACHAR_CONVERSA_JS
+        pagina = navegador.new_page()
+        try:
+            pagina.set_content(html)
+            return int(pagina.evaluate(ACHAR_CONVERSA_JS, nome)["quantos"])
+        finally:
+            pagina.close()
+
+    def test_dois_grupos_com_o_mesmo_nome_nao_sao_adivinhados(self, navegador):
+        """RISCO CONHECIDO do modo dom: a conversa é identificada pelo NOME.
+
+        O JID não aparece na lista lateral. Com dois grupos homônimos — uma
+        cópia, um grupo antigo, um homônimo de outra empresa — abrir "o
+        primeiro" mandaria dado de cliente para o grupo errado. Escolher é de
+        uma pessoa, não do bot.
+        """
+        html = _barra_lateral(["Joselia Teste", GRUPO_NOME, GRUPO_NOME])
+        assert self._achar(navegador, html, GRUPO_NOME) == (False, 0), (
+            "escolheu um entre dois grupos de mesmo nome")
+        assert self._quantos(navegador, html, GRUPO_NOME) == 2, (
+            "sem a contagem, o log não explica por que não abriu")
 
     def test_acha_pelo_nome_exato(self, navegador):
         html = _barra_lateral(["Joselia Teste", GRUPO_NOME, "Tobias Testão"])
@@ -563,7 +588,7 @@ class TestNuncaEncaminhar:
                 <div role="row" data-id="false_g@g.us_A_x@c.us">
                   <div role="button" aria-haspopup="true" aria-label="Encaminhar">x</div>
                 </div></div></body></html>""")
-            pagina.evaluate(GEOMETRIA_DA_LINHA_JS, ["false_g@g.us_A_x@c.us", ""])
+            pagina.evaluate(GEOMETRIA_DA_LINHA_JS, "false_g@g.us_A_x@c.us")
             achado = pagina.evaluate(BOTAO_DE_OPCOES_JS)
             assert not achado["achou"], "o botão de encaminhar virou a setinha"
         finally:
@@ -919,7 +944,7 @@ class TestNuncaLerAsProprias:
 
     DELE_SEM_PREFIXO = """
       <div role="row">
-        <div data-id="3EB0AAAAAAAAAAAAAAAAAA">
+        <div data-id="2AF4AAAAAAAAAAAAAAAAAA">
           <div class="copyable-text" data-pre-plain-text="[02:05, 30/08/2026] Ryan: ">
             <span class="selectable-text"><span>Maria Tabaré 316.196.143.91</span></span>
           </div>

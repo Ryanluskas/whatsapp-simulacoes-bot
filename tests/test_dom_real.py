@@ -40,7 +40,7 @@ def _setinha(pagina, data_id: str) -> tuple[int, list[str]]:
     """(quantas achou, rótulos). Zero ou uma: agora é UM botão nomeado."""
     from app.whatsapp import BOTAO_DE_OPCOES_JS, GEOMETRIA_DA_LINHA_JS
 
-    pagina.evaluate(GEOMETRIA_DA_LINHA_JS, [data_id, ""])
+    pagina.evaluate(GEOMETRIA_DA_LINHA_JS, data_id)
     achado = pagina.evaluate(BOTAO_DE_OPCOES_JS) or {}
     if not achado.get("achou"):
         return 0, []
@@ -1506,7 +1506,7 @@ class TestReancorarAntesDeCadaClique:
                   <span class="selectable-text">Maria Tabaré</span>
                 </div>
               </div></div></body></html>""")
-            r = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, ["2A1", "Maria Tabaré"])
+            r = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, "2A1")
             assert r["achou"] is True
             assert pagina.locator(f"[{MARCA_BALAO}]").count() == 1
         finally:
@@ -1524,18 +1524,27 @@ class TestReancorarAntesDeCadaClique:
               <div role="row"><div data-id="2A2" style="display:block;width:200px;height:40px">
                 <span class="selectable-text">segunda</span></div></div>
               </div></body></html>""")
-            pagina.evaluate(GEOMETRIA_DA_LINHA_JS, ["2A1", "primeira"])
-            pagina.evaluate(GEOMETRIA_DA_LINHA_JS, ["2A2", "segunda"])
+            pagina.evaluate(GEOMETRIA_DA_LINHA_JS, "2A1")
+            pagina.evaluate(GEOMETRIA_DA_LINHA_JS, "2A2")
             marcados = pagina.locator(f"[{MARCA_BALAO}]")
             assert marcados.count() == 1, "sobrou a marca da mensagem anterior"
             assert "segunda" in marcados.first.inner_text()
         finally:
             pagina.close()
 
-    def test_texto_parecido_em_duas_mensagens_nao_vira_citacao(self, navegador):
-        """Citar "a última parecida" respondia o pedido de OUTRO consultor.
+    def test_sem_o_id_na_tela_nao_se_cita_de_jeito_nenhum(self, navegador):
+        """A reserva pelo texto SAIU — e a ausência dela é a correção.
 
-        Sem o data-id, a reserva pelo texto só vale se apontar UMA linha.
+        Este teste checava a reserva: sem `data-id`, procurar pelo texto e
+        citar quando ele apontasse UMA linha. A regra parecia segura e não é:
+        no grupo deste bot o mesmo cliente se repete o tempo todo (no banco de
+        20/09, sete pares de solicitações com o mesmo nome), e "uma linha só"
+        depende de quanto a tela mostra naquele instante. Citar por
+        aproximação é como a resposta de um pedido acaba pendurada na mensagem
+        de outro.
+
+        Agora: sem o id na tela, não se cita. A resposta sai sem citação, com
+        o nome de quem pediu, e o motivo vai para o log.
         """
         from app.whatsapp import GEOMETRIA_DA_LINHA_JS
 
@@ -1543,17 +1552,62 @@ class TestReancorarAntesDeCadaClique:
         try:
             pagina.set_content("""<!doctype html><html><body><div id="main">
               <div role="row"><div data-id="2AOUTRO" style="display:block;width:200px;height:40px">
-                <span class="selectable-text">Maria Tabaré 11144477735</span></div></div>
+                <span class="selectable-text">Cliente Teste 11144477735</span></div></div>
               <div role="row"><div data-id="2ANOVO" style="display:block;width:200px;height:40px">
-                <span class="selectable-text">Maria Tabaré 52998224725</span></div></div>
+                <span class="selectable-text">Cliente Teste 52998224725</span></div></div>
               </div></body></html>""")
-            r = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, ["id-que-mudou", "Maria Tabaré"])
+            # Texto ambíguo: recusa.
+            r = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, "id-que-mudou")
             assert r["achou"] is False, "citou por aproximação"
-            assert "2" in r["motivo"]
 
-            unica = pagina.evaluate(GEOMETRIA_DA_LINHA_JS,
-                                    ["id-que-mudou", "Maria Tabaré 52998224725"])
-            assert unica["achou"] is True and unica["via"] == "texto"
+            # Texto ÚNICO: continua recusando, porque o id é que manda.
+            unica = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, "id-que-mudou")
+            assert unica["achou"] is False, (
+                "voltou a citar pelo texto: um id que mudou de formato faria a "
+                "resposta escolher a mensagem pelo conteúdo")
+
+            # Com o id certo: acha, e diz QUAL id marcou.
+            certa = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, "2ANOVO")
+            assert certa["achou"] is True and certa["via"] == "data-id"
+            assert certa["dataId"] == "2ANOVO"
+        finally:
+            pagina.close()
+
+    def test_irmao_identico_na_tela_e_contado(self, navegador):
+        """Duas mensagens com o MESMO texto: dá para citar, não dá para provar.
+
+        O contador vira `quote_status=unverified` em vez de `ok` — a diferença
+        entre "citei" e "afirmo qual citei".
+        """
+        from app.whatsapp import GEOMETRIA_DA_LINHA_JS
+
+        pagina = navegador.new_page()
+        try:
+            pagina.set_content("""<!doctype html><html><body><div id="main">
+              <div role="row"><div data-id="2AUM" style="display:block;width:200px;height:40px">
+                <span class="selectable-text">Cliente Teste 52998224725 AMAPA</span></div></div>
+              <div role="row"><div data-id="2ADOIS" style="display:block;width:200px;height:40px">
+                <span class="selectable-text">Cliente Teste 52998224725 AMAPA</span></div></div>
+              </div></body></html>""")
+            r = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, "2ADOIS")
+            assert r["achou"] is True and r["dataId"] == "2ADOIS"
+            assert r["iguais"] == 2, f"não contou o irmão idêntico: {r}"
+        finally:
+            pagina.close()
+
+    def test_mensagem_unica_nao_e_marcada_como_ambigua(self, navegador):
+        from app.whatsapp import GEOMETRIA_DA_LINHA_JS
+
+        pagina = navegador.new_page()
+        try:
+            pagina.set_content("""<!doctype html><html><body><div id="main">
+              <div role="row"><div data-id="2AUM" style="display:block;width:200px;height:40px">
+                <span class="selectable-text">Cliente Teste 52998224725</span></div></div>
+              <div role="row"><div data-id="2ADOIS" style="display:block;width:200px;height:40px">
+                <span class="selectable-text">Outro Cliente 11144477735</span></div></div>
+              </div></body></html>""")
+            r = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, "2AUM")
+            assert r["achou"] is True and r["iguais"] == 1
         finally:
             pagina.close()
 
@@ -1564,7 +1618,7 @@ class TestReancorarAntesDeCadaClique:
         pagina = navegador.new_page()
         try:
             pagina.set_content('<!doctype html><html><body><div id="main"></div></body></html>')
-            r = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, ["2A1", "sumiu"])
+            r = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, "2A1")
             assert r["achou"] is False, (
                 "sem a linha, clicar em coordenada abriria o menu do grupo")
         finally:

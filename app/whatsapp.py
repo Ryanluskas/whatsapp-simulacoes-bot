@@ -136,6 +136,11 @@ _PRE_PLAIN = re.compile(r"^\[(?P<time>[^\]]+)\]\s*(?P<name>.*?):\s*$")
 # composta (c). Sao strings diferentes byte a byte e o seletor nunca casaria,
 # sem nenhum sintoma alem de "nao achei". Normalizar resolve isso e de quebra
 # tolera espaco duplo e diferenca de maiuscula.
+#
+# TODO (divida tecnica, ver docs/DIVIDA-TECNICA.md secao 1): o NOME nao e' um
+# identificador estavel -- e' ele que acaba gravado em `simulations.chat_id`.
+# Dois grupos homonimos hoje sao recusados (abaixo), mas o certo e' gravar o
+# JID, que ja' esta' na tela dentro do `data-id` das mensagens.
 MARCA_ALVO = "data-allana-alvo"
 
 ACHAR_CONVERSA_JS = """
@@ -151,13 +156,23 @@ ACHAR_CONVERSA_JS = """
              || document.querySelector('#side')
              || document;
 
-  for (const el of Array.from(lista.querySelectorAll('span[title]'))) {
-    if (norm(el.getAttribute('title')) !== alvo) continue;
-    const clicavel = el.closest('[role="listitem"], [role="row"], div[tabindex]') || el;
-    clicavel.setAttribute('data-allana-alvo', '1');
-    return true;
+  // TODAS as conversas com esse nome, nao a primeira.
+  //
+  // O modo dom identifica a conversa pelo NOME (o JID nao aparece na tela).
+  // Dois grupos com o mesmo nome -- "Santander Capital Simulacoes" e uma
+  // copia, um grupo antigo, um homonimo -- fariam o bot abrir o primeiro da
+  // lista e mandar dados de cliente para o grupo errado. Com mais de um, nao
+  // se escolhe: quem decide e' uma pessoa.
+  const iguais = Array.from(lista.querySelectorAll('span[title]'))
+    .filter((el) => norm(el.getAttribute('title')) === alvo);
+
+  if (iguais.length !== 1) {
+    return { achou: false, quantos: iguais.length };
   }
-  return false;
+  const el = iguais[0];
+  const clicavel = el.closest('[role="listitem"], [role="row"], div[tabindex]') || el;
+  clicavel.setAttribute('data-allana-alvo', '1');
+  return { achou: true, quantos: 1 };
 }
 """
 
@@ -217,9 +232,20 @@ EH_NOSSA_JS = r"""
                         .trim().toLowerCase();
 
   const ehNossa = (el, id, nomeProprio) => {
+    // Tres provas INDEPENDENTES, e basta uma. A ordem e' da mais forte para a
+    // mais fraca, mas nenhuma delas pode responder "nao e' nossa" sozinha.
+    //
+    // Era o que acontecia: a comparacao de nome tinha `return` direto, entao
+    // um BOT_SELF_NAME diferente do nome real da conta DESLIGAVA as outras
+    // duas. Em 20/09/2026 o grupo mostrava "Operacional", o .env dizia
+    // "Operacional Capital", e o bot passou a tratar mensagens da propria
+    // conta como pedido de consultor -- tres solicitacoes criadas a partir do
+    // que ele mesmo tinha enviado, todas com id "3EB0", que a prova (2)
+    // reconheceria na hora.
+    //
     // 1) Quem assinou a mensagem.
     const autor = autorDaLinha(el);
-    if (autor && nomeProprio) return norm(autor) === norm(nomeProprio);
+    if (autor && nomeProprio && norm(autor) === norm(nomeProprio)) return true;
     // 2) Prefixo do id: o WhatsApp Web gera "3EB0..." no que ele mesmo envia.
     //
     // `album-` na frente: quando o WhatsApp agrupa varias imagens nossas, o
@@ -426,6 +452,32 @@ TEXTO_DO_CAMPO_JS = r"""
 (indice) => {
   const el = document.querySelectorAll('[contenteditable="true"]')[indice];
   return el ? (el.innerText || '') : '';
+}
+"""
+
+# Foca o campo SEM ponteiro, e diz se conseguiu.
+#
+# O clique no campo da legenda estourou 8s em producao (REQ000008) com o campo
+# visivel na tela: no preview da imagem ha' camada por cima, e o Playwright
+# recusa clicar onde o evento nao chega. Focar por JS nao depende de ponto
+# nenhum. O retorno e' a prova -- sem ele, `insert_text` escreveria no que
+# estivesse com foco, que pode ser o compositor da conversa.
+FOCAR_CAMPO_JS = r"""
+(indice) => {
+  const el = document.querySelectorAll('[contenteditable="true"]')[indice];
+  if (!el) return false;
+  el.focus();
+  try {
+    // Cursor no fim: com o cursor no inicio, a legenda entraria antes do que
+    // ja' estivesse escrito.
+    const selecao = window.getSelection();
+    const faixa = document.createRange();
+    faixa.selectNodeContents(el);
+    faixa.collapse(false);
+    selecao.removeAllRanges();
+    selecao.addRange(faixa);
+  } catch (e) { /* sem selecao: o foco sozinho ja' serve */ }
+  return document.activeElement === el;
 }
 """
 
@@ -860,7 +912,11 @@ MARCA_RESPONDER = "data-allana-responder"
 # pelado (2A729AF70...) num elemento interno, e mirar nele fazia todas as vias
 # falharem sem explicacao.
 GEOMETRIA_DA_LINHA_JS = r"""
-([dataId, textoAlvo]) => {
+// So' o data-id entra aqui. O parametro de TEXTO que existia foi removido de
+// proposito: enquanto ele existir, alguem volta a usa-lo como identidade -- e
+// identidade por texto e' como a resposta de um pedido acaba pendurada na
+// mensagem de outro (sete pares de clientes repetidos num unico dia).
+(dataId) => {
   const norm = (s) => (s || '').normalize('NFC').replace(/\s+/g, '').toLowerCase();
   document.querySelectorAll('[data-allana-linha]').forEach(
     (el) => el.removeAttribute('data-allana-linha'));
@@ -879,29 +935,33 @@ GEOMETRIA_DA_LINHA_JS = r"""
     }
   }
 
-  // Reserva: pelo texto. O data-id muda de formato entre versoes do
-  // WhatsApp, o texto do pedido nao.
+  // NAO ha' reserva por texto -- e essa ausencia e' a correcao.
   //
-  // So' vale se o texto apontar UMA linha. Antes pegava a ultima parecida:
-  // dois pedidos com o mesmo cliente (ou o mesmo comeco de texto) faziam a
-  // resposta citar a mensagem de OUTRO consultor. Na duvida, nao cita -- a
-  // resposta sai sem citacao e com o nome de quem pediu.
-  let ambigua = 0;
-  if (!linha && textoAlvo) {
-    const alvo = norm(textoAlvo).slice(0, 24);
-    if (alvo) {
-      const parecidas = [...document.querySelectorAll('div[role="row"]')]
-        .filter((el) => norm(el.innerText).includes(alvo));
-      if (parecidas.length === 1) { linha = parecidas[0]; via = 'texto'; }
-      else ambigua = parecidas.length;
-    }
+  // Procurar a mensagem pelo texto encontra QUALQUER uma com aquele texto, e
+  // neste grupo o mesmo cliente se repete o tempo todo (no banco de 20/09,
+  // sete pares de solicitacoes com o mesmo nome). Citar por aproximacao e'
+  // como a resposta de um pedido acaba pendurada na mensagem de outro. Sem o
+  // id na tela, nao se cita: a resposta sai sem citacao, com o nome de quem
+  // pediu, e o log registra o motivo.
+  if (!linha) {
+    return { achou: false, via: '', motivo: 'a mensagem original nao esta na tela',
+             dataId: '' };
   }
 
-  if (!linha && ambigua > 1) {
-    return { achou: false, via: '',
-             motivo: `o texto casa com ${ambigua} mensagens; nao cito por aproximacao` };
+  // Quantas linhas VISIVEIS tem exatamente este texto (contando esta).
+  //
+  // Com mais de uma, a conferencia da barra de citacao -- que compara texto
+  // -- nao consegue distinguir qual delas o WhatsApp citou. Isso nao impede
+  // de citar: impede de AFIRMAR que citou (vira `unverified`, nunca `ok`).
+  const corpoDoAlvo = norm(linha.innerText);
+  let iguais = 0;
+  if (corpoDoAlvo.length >= 8) {
+    for (const outra of document.querySelectorAll('div[role="row"]')) {
+      const r = outra.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      if (norm(outra.innerText) === corpoDoAlvo) iguais += 1;
+    }
   }
-  if (!linha) return { achou: false, via: '', motivo: 'a mensagem nao esta na tela' };
 
   linha.setAttribute('data-allana-linha', '1');
   // Marcar tambem o BALAO: e' nele que o botao direito precisa cair, e
@@ -940,6 +1000,9 @@ GEOMETRIA_DA_LINHA_JS = r"""
     // explica o defeito acima.
     centroDaLinha: { x: linhaR.x + linhaR.width / 2, y: linhaR.y + linhaR.height / 2 },
     texto: (linha.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 60),
+    // O id que foi REALMENTE marcado, devolvido para quem pediu conferir.
+    dataId: (linha.querySelector('[data-id]') || linha).getAttribute('data-id') || dataId,
+    iguais: iguais,
   };
 }
 """
@@ -1143,32 +1206,6 @@ MENU_ABERTO_JS = r"""
 """
 
 
-# O CORPO da mensagem, sem o nome do autor e sem o horario.
-#
-# `linha.innerText` traz "Ryan AMEN JESUS 00:47" -- autor na frente, horario
-# atras. A barra de citacao mostra so' o corpo, entao comparar com o texto da
-# linha inteira falha justamente nas mensagens CURTAS, onde o horario cabe
-# dentro do trecho comparado. Isso fazia o bot descartar uma citacao que tinha
-# funcionado, e cair para o envio sem citacao sem motivo nenhum.
-TEXTO_DA_MENSAGEM_JS = r"""
-(dataId) => {
-  let linha = null;
-  for (const el of document.querySelectorAll('[data-id]')) {
-    if (el.getAttribute('data-id') === dataId) {
-      linha = el.closest('div[role="row"]') || el;
-      break;
-    }
-  }
-  if (!linha) return '';
-
-  const corpo = linha.querySelector('span.selectable-text');
-  if (corpo && (corpo.innerText || '').trim()) return corpo.innerText.trim();
-
-  // Sem o span (imagem com legenda, por exemplo): tira o horario do fim.
-  return (linha.innerText || '').replace(/\s+/g, ' ').trim()
-                                .replace(/\s*\d{1,2}:\d{2}\s*$/, '');
-}
-"""
 
 # O que a BARRA DE CITACAO mostra da mensagem original: o autor e a PRIMEIRA
 # LINHA. Nada mais.
@@ -1486,6 +1523,31 @@ def parse_data_id(data_id: str) -> tuple[str, str]:
     return chat_jid, sender_jid
 
 
+def id_de_mensagem_nossa(data_id: str) -> bool:
+    """A mensagem com este ``data-id`` foi enviada por NOS?
+
+    Segunda camada, em Python: o mesmo julgamento que o JS faz na tela, feito
+    de novo aqui, sem depender de nome configurado nem de seletor. Em
+    20/09/2026 o JS deixou passar tres mensagens da propria conta -- o
+    ``BOT_SELF_NAME`` nao batia com o nome real da conta no grupo -- e nao
+    havia mais ninguem conferindo antes de virarem solicitacao.
+
+    Duas familias de id, e a ordem importa:
+
+    * formato classico -- ``true_`` saiu daqui, ``false_`` chegou de fora. O
+      prefixo manda, e um ``3EB0`` no meio nao significa nada;
+    * id pelado -- o WhatsApp Web gera ``3EB0...`` no que ele mesmo envia.
+      Conferido no banco de producao: 15 mensagens de consultor chegaram com
+      id em ``2A...``/``AC...``; as 3 da propria conta, em ``3EB0``.
+    """
+    nu = (data_id or "").strip()
+    if nu.startswith("album-"):      # album de imagens NOSSAS
+        nu = nu[len("album-"):]
+    if nu.startswith("false_"):
+        return False
+    return nu.startswith("true_") or nu.startswith("3EB0")
+
+
 def parse_pre_plain(meta: str) -> tuple[str, str]:
     """``[15:32, 27/08/2026] Ryan: `` -> ("15:32, 27/08/2026", "Ryan")."""
     match = _PRE_PLAIN.match((meta or "").strip())
@@ -1558,6 +1620,11 @@ class WhatsAppService(ThreadActor):
         #: Autor e corpo da mensagem que estamos citando, colhidos no
         #: PASSO 1. No PASSO 5 a linha pode ter saido do DOM.
         self._marcas_da_citacao: dict = {}
+        #: O alvo tinha irmao identico na tela? Decide entre `ok` e
+        #: `unverified` -- ver `_conferir_citacao`.
+        self._alvo_ambiguo = False
+        #: O id que a citacao mirou. E' a prova gravada na saida.
+        self._alvo_citado = ""
         # Qual via armou a citacao. Vai para o log de entrega.
         self._ultima_via_de_citacao = ""
         self._anexo_diagnosticado = False
@@ -1966,7 +2033,18 @@ class WhatsAppService(ThreadActor):
         trabalho fica no topo da lista porque e' o mais ativo.
         """
         try:
-            if not self._page.evaluate(ACHAR_CONVERSA_JS, chat_name):
+            achado = self._page.evaluate(ACHAR_CONVERSA_JS, chat_name) or {}
+            if isinstance(achado, dict) and int(achado.get("quantos") or 0) > 1:
+                # RISCO CONHECIDO do modo dom: a conversa e' identificada pelo
+                # NOME, nao pelo JID. Com dois grupos homonimos na lista, abrir
+                # "o primeiro" poderia mandar dado de cliente para o grupo
+                # errado. Na duvida, nao abre.
+                self._log("ERROR",
+                          f"Ha' {achado['quantos']} conversas com o nome "
+                          f"'{_curto_titulo(chat_name)}' na lista. Não vou adivinhar "
+                          "qual é a certa: renomeie ou arquive a outra.")
+                return False
+            if not (achado.get("achou") if isinstance(achado, dict) else achado):
                 return False
             alvo = self._page.locator(f"[{MARCA_ALVO}]").first
             alvo.click(timeout=5_000)
@@ -2223,6 +2301,18 @@ class WhatsAppService(ThreadActor):
             message_id = row.get("id", "")
             if not message_id or self.state.has_seen(message_id):
                 continue
+            if id_de_mensagem_nossa(message_id):
+                # Nao deveria chegar aqui: o JS ja' filtra pela autoria na
+                # tela. Se chegou, aquele sinal falhou -- e responder a
+                # propria resposta e' o defeito mais caro deste bot. Marca
+                # como vista (nao volta no proximo ciclo) e diz por que.
+                self.state.mark_seen(message_id)
+                self._log("WARNING",
+                          f"Mensagem {message_id[:28]} tem id de mensagem NOSSA e passou "
+                          "pelo filtro de autoria da tela; ignorada aqui. Confira o "
+                          f"BOT_SELF_NAME ({self.bot_self_name!r}) contra o nome que a "
+                          "conta usa no grupo.")
+                continue
             text = clean_text(row.get("text", ""))
             if not text:
                 self.state.mark_seen(message_id)
@@ -2437,9 +2527,13 @@ class WhatsAppService(ThreadActor):
         # mensagem no meio do texto.
         self._page.keyboard.insert_text(text)
         self._page.wait_for_timeout(120)
-        entregue = ResultadoEnvio(ok=True, via="texto", quoted_ok=citou,
-                                  tipo_midia="nenhum", provider="dom",
-                                  quote_status=self._situacao_da_citacao(quote_message_id, citou))
+        entregue = ResultadoEnvio(
+            ok=True, via="texto", quoted_ok=citou == QuoteStatus.OK,
+            tipo_midia="nenhum", provider="dom",
+            quote_status=self._situacao_da_citacao(quote_message_id, citou),
+            # A PROVA de qual mensagem foi citada. Sem ela ninguem consegue
+            # auditar depois: em producao, 25 saidas gravadas e zero com o id.
+            quoted_message_id=self._alvo_citado)
         # A partir do Enter o texto pode ter saido: falha daqui em diante nao
         # e' "nao enviou" -- e' EnvioSemProva, salvo se o texto estiver no chat.
         try:
@@ -2454,14 +2548,47 @@ class WhatsAppService(ThreadActor):
         self._lembrar_do_que_enviamos(text)
         return entregue
 
-    def _situacao_da_citacao(self, quote_message_id: str, citou: bool) -> str:
-        """Traduz o ``citou`` da tela para o vocabulario comum de evidencia."""
+    def _situacao_da_citacao(self, quote_message_id: str, citou) -> str:
+        """Traduz o que a tela provou para o vocabulario comum de evidencia.
+
+        ``citou`` chega como o status de ``_citar`` (``ok``/``unverified``/
+        vazio). Aceita booleano tambem, para nao quebrar quem ainda passa o
+        valor antigo -- mas o caminho de producao usa o status.
+        """
         if not (self.reply_quote and quote_message_id):
             return QuoteStatus.NONE
-        # Aqui "citou" ja' e' a barra de citacao CONFIRMADA no rodape.
-        return QuoteStatus.OK if citou else QuoteStatus.FALLBACK
+        if citou is True:
+            return QuoteStatus.OK
+        if not citou:
+            return QuoteStatus.FALLBACK
+        return str(citou)
 
-    def _citar(self, message_id: str, tipo: str) -> bool:
+    def _desarmar_citacao_nao_provada(self, tipo: str) -> str:
+        """NAO PROVADA nao vira resposta citada. Desarma e devolve "" (sem citacao).
+
+        A barra esta' armada e o texto bate, mas ha' outra mensagem igual na
+        tela: nao da' para dizer contra QUAL delas o WhatsApp vai ancorar.
+        Enviar assim e' aceitar responder ao pedido de outro cliente. A
+        resposta sai sem citacao, com o nome do consultor no texto.
+
+        Existe uma vez so' porque e' uma regra so': dois lugares chamam, e
+        nenhum dos dois reescreve a decisao.
+        """
+        desarmou = self._cancelar_citacao_pendente()
+        self._alvo_citado = ""
+        self._ultima_citacao_ok = False
+        self._log(
+            "WARNING",
+            f"Citação NÃO comprovada ({tipo}): a barra estava armada, mas há outra "
+            "mensagem com o mesmo texto na tela e não dá para provar qual delas "
+            "seria citada. "
+            + ("Desarmei e respondo sem citação." if desarmou else
+               "NÃO consegui desarmar a barra; vou limpar a tela antes de responder."))
+        if not desarmou:
+            self._limpar_preview()
+        return ""
+
+    def _citar(self, message_id: str, tipo: str) -> str:
         """Cita a mensagem e REGISTRA quando nao consegue.
 
         A citacao e' o que liga a resposta ao pedido dentro de um grupo com
@@ -2471,30 +2598,43 @@ class WhatsAppService(ThreadActor):
         ninguem fica sabendo.
         """
         self._ultima_citacao_ok = False
+        self._alvo_citado = ""
         if not (self.reply_quote and message_id):
-            return False
-        if self._try_quote(message_id):
+            return ""
+        tentativa = self._try_quote(message_id)
+        if tentativa == QuoteStatus.UNVERIFIED:
+            return self._desarmar_citacao_nao_provada(tipo)
+        if tentativa:
             self._fechar_encaminhamento()
             # Clicar em "Responder" nao prova que a citacao pegou. Confirmar
             # a barra no rodape e' o que separa "achei o menu" de "a resposta
             # vai sair ancorada".
-            if self._citacao_confirmada(message_id):
+            situacao = self._conferir_citacao(message_id)
+            if situacao == QuoteStatus.OK:
+                # O ALVO fica registrado: e' ele que a conferencia de
+                # integridade compara com a origem gravada, e sem ele ninguem
+                # audita nada depois.
+                self._alvo_citado = message_id
                 self._ultima_citacao_ok = True
-                return True
+                return situacao
+            if situacao == QuoteStatus.UNVERIFIED:
+                # A tela mudou entre o PASSO 5 e aqui (mensagem nova igual a'
+                # do alvo, por exemplo). Mesma regra, mesma saida.
+                return self._desarmar_citacao_nao_provada(tipo)
             self._log(
                 "WARNING",
                 f"Cliquei em Responder ({tipo}) mas a barra de citação não "
                 "apareceu. Enviando sem a citação.",
             )
             self._limpar_preview()
-            return False
+            return ""
         self._log(
             "WARNING",
             f"Não consegui citar a mensagem original ao responder ({tipo}); "
             "enviando sem a citação. Se isto se repetir, o menu 'Responder' "
             "do WhatsApp Web provavelmente mudou.",
         )
-        return False
+        return ""
 
     # Itens "Responder"/"Reply" do menu de contexto da mensagem.
     _ITEM_RESPONDER = (
@@ -2544,6 +2684,21 @@ class WhatsAppService(ThreadActor):
         except (PlaywrightTimeout, PlaywrightError):
             return False
 
+    # ==================================================================
+    #  CITACAO — os seis passos do caminho manual
+    # ==================================================================
+
+    #: Quanto esperar a setinha aparecer depois do hover. Ela e' montada no
+    #: `mouseenter`; procurar no mesmo instante encontra a bolha sem botao.
+    _ESPERA_DA_SETINHA = 2.5
+    #: Quanto esperar o menu abrir depois do clique.
+    _ESPERA_DO_MENU = 2.5
+    #: Quanto esperar a barra de citacao aparecer no rodape (PASSO 5).
+    _ESPERA_DA_BARRA = 2.0
+
+    #: Textos aceitos para o item de resposta. Igualdade exata, em pt e en.
+    _TEXTO_RESPONDER = ("responder", "reply")
+
     def _marcas_da_mensagem(self, message_id: str) -> dict:
         """Autor e corpo da mensagem original, para reconhecer a barra.
 
@@ -2561,14 +2716,30 @@ class WhatsAppService(ThreadActor):
             return {}
 
     def _citacao_confirmada(self, message_id: str, espera: float = 2.0) -> bool:
-        """A barra de citacao esta' no rodape, e e' a DAQUELA mensagem?
+        """A barra de citacao esta' armada com a mensagem certa? (booleano)
 
-        Confere o conteudo, nao so' a presenca: uma citacao armada na mensagem
-        errada e' pior que nenhuma -- o consultor leria o resultado de outro
-        cliente como se fosse o dele.
+        Mantida para quem so' precisa de sim/nao. Quem grava evidencia usa
+        ``_conferir_citacao``, que separa "provei" de "nao consigo provar".
+        """
+        return self._conferir_citacao(message_id, espera) == QuoteStatus.OK
+
+    def _conferir_citacao(self, message_id: str, espera: float = 2.0) -> str:
+        """O que da' para PROVAR sobre a barra de citacao no rodape.
+
+        * ``ok``         -- a barra esta' armada e o texto so' pode ser o
+          desta mensagem (nenhuma outra igual na tela);
+        * ``unverified`` -- a barra esta' armada e bate, mas ha' outra
+          mensagem com o MESMO texto visivel: a prova textual nao distingue
+          as duas. A resposta sai citada (o WhatsApp citou alguma), e o
+          sistema nao afirma qual;
+        * ``""``         -- nao ha' barra, ou ela e' de outra mensagem.
+
+        O caso do meio nao e' teorico: no grupo deste bot o mesmo cliente se
+        repete o tempo todo -- sete pares de solicitacoes num dia. Chamar
+        aquilo de ``ok`` era afirmar sem prova.
         """
         if self._page is None:
-            return False
+            return ""
         marcas = self._marcas_da_citacao or self._marcas_da_mensagem(message_id)
         if marcas.get("achou"):
             self._marcas_da_citacao = marcas
@@ -2578,9 +2749,15 @@ class WhatsAppService(ThreadActor):
             try:
                 ultimo = self._page.evaluate(CITACAO_ATIVA_JS, marcas) or {}
             except (PlaywrightTimeout, PlaywrightError):
-                return False
+                return ""
             if ultimo.get("ativa"):
-                return True
+                if self._alvo_ambiguo:
+                    self._log("WARNING",
+                              "A citação foi armada, mas há outra mensagem com o "
+                              "MESMO texto na tela: não dá para provar qual delas o "
+                              "WhatsApp citou. Registrando como não confirmada.")
+                    return QuoteStatus.UNVERIFIED
+                return QuoteStatus.OK
             self._page.wait_for_timeout(150)
         if ultimo:
             # O PORQUE, e nao so' o fato. "Rodape sem a citacao esperada"
@@ -2594,38 +2771,7 @@ class WhatsAppService(ThreadActor):
                 f"prévia={ultimo.get('previa')!r} "
                 f"esperado={(marcas.get('corpo') or '')[:40]!r} "
                 f"({ultimo.get('porque')})")
-        return False
-
-    def _texto_da_mensagem(self, message_id: str) -> str:
-        """Corpo da mensagem original, para reconhecer a citacao certa.
-
-        O CORPO, nao a linha: a barra de citacao mostra so' o texto, sem o
-        nome do autor e sem o horario. Comparar com a linha inteira falhava
-        nas mensagens curtas -- em "Ryan AMEN JESUS 00:47" o horario cabe
-        dentro do trecho comparado, e o bot descartava uma citacao que tinha
-        funcionado.
-        """
-        if self._page is None:
-            return ""
-        try:
-            return (self._page.evaluate(TEXTO_DA_MENSAGEM_JS, message_id) or "").strip()
-        except (PlaywrightTimeout, PlaywrightError):
-            return ""
-
-    # ==================================================================
-    #  CITACAO — os seis passos do caminho manual
-    # ==================================================================
-
-    #: Quanto esperar a setinha aparecer depois do hover. Ela e' montada no
-    #: `mouseenter`; procurar no mesmo instante encontra a bolha sem botao.
-    _ESPERA_DA_SETINHA = 2.5
-    #: Quanto esperar o menu abrir depois do clique.
-    _ESPERA_DO_MENU = 2.5
-    #: Quanto esperar a barra de citacao aparecer no rodape (PASSO 5).
-    _ESPERA_DA_BARRA = 2.0
-
-    #: Textos aceitos para o item de resposta. Igualdade exata, em pt e en.
-    _TEXTO_RESPONDER = ("responder", "reply")
+        return ""
 
     def _try_quote(self, message_id: str) -> bool:
         """Cita a mensagem imitando o que uma pessoa faz na mao.
@@ -2646,7 +2792,14 @@ class WhatsAppService(ThreadActor):
 
         self._estado_da_citacao = None
         self._marcas_da_citacao = {}
+        #: O alvo tinha irmao identico na tela? Decide entre `ok` e
+        #: `unverified` -- ver `_conferir_citacao`.
+        self._alvo_ambiguo = False
+        #: O id que a citacao mirou nesta tentativa. Vai para a evidencia.
+        self._alvo_citado = ""
         try:
+            # Pode devolver True, False ou `unverified` -- este ultimo diz
+            # "armei, nao provei", e quem trata e' `_citar`.
             return self._passos_da_citacao(message_id)
         except (PlaywrightTimeout, PlaywrightError) as exc:
             self._diagnosticar_citacao_uma_vez(
@@ -2656,17 +2809,17 @@ class WhatsAppService(ThreadActor):
     def _passos_da_citacao(self, message_id: str) -> bool:
         pagina = self._page
 
-        # PASSO 0 — comecar de uma tela limpa.
+        # PASSO 1 VEM PRIMEIRO -- e essa ordem e' parte da correcao.
         #
-        # Uma citacao pendurada de um envio anterior faria esta resposta sair
-        # grudada na mensagem ERRADA. E enquanto ela estiver la', a
-        # verificacao do PASSO 5 acha que citamos sem termos citado.
-        self._cancelar_citacao_pendente()
-
+        # A conferencia de uma citacao ja' armada (o antigo PASSO 0) depende de
+        # saber se ha' OUTRA mensagem igual na tela. Perguntando antes de medir
+        # isso, uma citacao ambigua podia passar por "ja' estava certa" com o
+        # marcador de ambiguidade ainda zerado -- um caminho silencioso para
+        # exatamente o que esta regra proibe.
+        #
         # -------------------------------------------------- PASSO 1: a linha
         linha = pagina.evaluate(
-            GEOMETRIA_DA_LINHA_JS,
-            [message_id, self._texto_da_mensagem(message_id)]) or {}
+            GEOMETRIA_DA_LINHA_JS, message_id) or {}
         if not linha.get("achou"):
             self._capturar_estado(message_id, "PASSO 1: achar a linha")
             self._diagnosticar_citacao_uma_vez(
@@ -2676,11 +2829,40 @@ class WhatsAppService(ThreadActor):
         # mouse ir ao lugar certo, e nao a onde a linha estava antes de rolar.
         pagina.wait_for_timeout(250)
         linha = pagina.evaluate(
-            GEOMETRIA_DA_LINHA_JS,
-            [message_id, self._texto_da_mensagem(message_id)]) or {}
+            GEOMETRIA_DA_LINHA_JS, message_id) or {}
         if not linha.get("achou"):
             self._diagnosticar_citacao_uma_vez(message_id, "a linha sumiu ao rolar")
             return False
+
+        # A linha marcada tem de ser a que pedimos -- o JS devolve o id que
+        # ele realmente marcou. Divergiu, nao cita: melhor sem citacao do que
+        # pendurada na mensagem de outro consultor.
+        marcado = str(linha.get("dataId") or "")
+        if marcado and marcado != message_id:
+            self._log("ERROR",
+                      f"QUOTE_ID_MISMATCH na tela: pedi {message_id} e a linha "
+                      f"marcada e' {marcado}. Nao vou citar.")
+            self._limpar_ui()
+            return False
+        # Irmao identico na tela: da' para citar, nao da' para PROVAR qual.
+        self._alvo_ambiguo = int(linha.get("iguais") or 1) > 1
+        if self._alvo_ambiguo:
+            self._log("INFO",
+                      f"Ha' {linha.get('iguais')} mensagens com o mesmo texto na "
+                      "tela; a citacao vai sair, mas sem prova de qual delas.")
+
+        # PASSO 0 (agora depois de medir): a citacao pendurada pode ser
+        # JUSTAMENTE a que queremos -- foi o que aconteceu no REQ000008, em que
+        # a tentativa de imagem armou a citacao certa, a legenda falhou, e o
+        # texto cancelou a barra boa para refaze-la do zero. Aproveitar so'
+        # vale com a prova em pe': com irmao identico na tela, refaz o caminho
+        # inteiro em vez de herdar uma duvida.
+        if not self._alvo_ambiguo and self._citacao_confirmada(message_id, espera=0.5):
+            self._log("INFO", "A citação da mensagem certa já estava armada no "
+                              "compositor; aproveitei em vez de refazer.")
+            self._ultima_via_de_citacao = "reaproveitada"
+            return True
+        self._cancelar_citacao_pendente()
 
         # AQUI, com a linha na mao: guardar autor e corpo para o PASSO 5.
         #
@@ -2730,7 +2912,17 @@ class WhatsAppService(ThreadActor):
 
         # Clicar no ELEMENTO marcado; a coordenada e' o ultimo recurso.
         try:
-            pagina.locator(f"[{MARCA_RESPONDER}]").first.click(timeout=4_000)
+            loc = pagina.locator(f"[{MARCA_RESPONDER}]").first
+            try:
+                loc.focus()
+                loc.press("Enter")
+            except: pass
+            
+            loc.click(timeout=3_000, force=True)
+            try:
+                loc.evaluate('el => { let target = el.closest(\'li, [role="menuitem"], [role="button"]\') || el; target.click(); }')
+            except:
+                pass
         except (PlaywrightTimeout, PlaywrightError):
             pagina.mouse.click(item["x"], item["y"])
 
@@ -2739,9 +2931,18 @@ class WhatsAppService(ThreadActor):
         # Antes de digitar QUALQUER coisa. Uma citacao armada na mensagem
         # errada e' pior que nenhuma: o consultor leria o resultado de outro
         # cliente como se fosse o dele.
-        if self._citacao_confirmada(message_id, espera=self._ESPERA_DA_BARRA):
+        provado = self._conferir_citacao(message_id, espera=self._ESPERA_DA_BARRA)
+        if provado == QuoteStatus.OK:
             self._ultima_via_de_citacao = item.get("via") or "?"
             return True
+
+        if provado == QuoteStatus.UNVERIFIED:
+            # A BARRA ESTA' ARMADA, e nao da' para provar contra qual das
+            # mensagens iguais. Sair assim e' responder "a alguma delas". Quem
+            # desarma e' `_citar`, que conhece o tipo do envio e escreve o
+            # aviso -- aqui a barra fica de pe' de proposito, para ele achar.
+            self._capturar_estado(message_id, "PASSO 5: citação não comprovada")
+            return provado
 
         self._capturar_estado(message_id, "PASSO 5: a barra nao apareceu")
         self._log(
@@ -2871,8 +3072,7 @@ class WhatsAppService(ThreadActor):
         """
         try:
             return self._page.evaluate(
-                GEOMETRIA_DA_LINHA_JS,
-                [message_id, self._texto_da_mensagem(message_id)]) or {}
+                GEOMETRIA_DA_LINHA_JS, message_id) or {}
         except (PlaywrightTimeout, PlaywrightError) as exc:
             return {"achou": False, "motivo": _short(exc)}
 
@@ -3160,10 +3360,13 @@ class WhatsAppService(ThreadActor):
                 raise RuntimeError(
                     "não consegui escrever a legenda; não vou enviar o card mudo")
 
-        entregue = ResultadoEnvio(ok=True, via=self._ultima_via_de_envio or "imagem",
-                                  quoted_ok=citou, tipo_midia="imagem",
-                                  legenda_ok=legenda_ok, provider="dom",
-                                  quote_status=self._situacao_da_citacao(quote_message_id, citou))
+        entregue = ResultadoEnvio(
+            ok=True, via=self._ultima_via_de_envio or "imagem",
+            quoted_ok=citou == QuoteStatus.OK, tipo_midia="imagem",
+            legenda_ok=legenda_ok, provider="dom",
+            quote_status=self._situacao_da_citacao(quote_message_id, citou),
+            # Qual mensagem foi citada -- a prova que faltava na saida.
+            quoted_message_id=self._alvo_citado)
         # DAQUI EM DIANTE a imagem pode ter saido. Qualquer falha que nao
         # PROVE o contrario (a pre-visualizacao aberta prova) vira
         # EnvioSemProva: o manager nao manda o texto por cima.
@@ -3260,8 +3463,22 @@ class WhatsAppService(ThreadActor):
 
         indice = escolha["indice"]
         try:
-            alvo = self._page.locator('[contenteditable="true"]').nth(indice)
-            alvo.click(timeout=8_000)
+            # O clique vem primeiro porque e' o que o WhatsApp espera de uma
+            # pessoa. Espera CURTA: com o foco por JS como reserva, insistir
+            # oito segundos num clique que nao passa so' atrasa a resposta.
+            try:
+                self._page.locator('[contenteditable="true"]').nth(indice).click(
+                    timeout=3_000)
+            except (PlaywrightTimeout, PlaywrightError) as exc:
+                self._log("INFO", f"O clique na legenda não passou ({_short(exc)}); "
+                                  "vou focar o campo direto.")
+            # Focar SEMPRE, e conferir. Sem esta prova, `insert_text` escreveria
+            # no que estivesse com foco -- inclusive no compositor da conversa,
+            # que mandaria a legenda solta para o grupo.
+            if not self._page.evaluate(FOCAR_CAMPO_JS, indice):
+                self._log("ERROR", "Não consegui pôr o foco no campo da legenda; "
+                                   "não vou digitar às cegas.")
+                return False
             self._page.keyboard.insert_text(caption)
             self._page.wait_for_timeout(250)
         except (PlaywrightTimeout, PlaywrightError) as exc:

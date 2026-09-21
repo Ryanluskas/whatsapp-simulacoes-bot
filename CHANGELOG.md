@@ -13,6 +13,87 @@ PR que a introduz.
 
 ## [Não lançado]
 
+### Adicionado
+
+- **A Evolution sobe junto com o bot** (Windows + WSL). Ao iniciar, em
+  segundo plano -- o painel abre na hora --, o bot: liga o WSL se a Evolution
+  estiver fora do ar e espera ela responder; **reaponta o webhook se o IP do
+  WSL mudou** (acontece quando o Windows reinicia), se estiver desligado, sem
+  algum evento, com `byEvents` ligado ou com outro token; e avisa no log, com
+  o comando pronto, se o repasse da porta 8001 para o bot sumiu. Nunca derruba
+  a partida, nunca envia mensagem, nunca escreve a chave ou o token no log.
+  Novas opções no `.env`: `EVOLUTION_AUTOSTART` (padrão `true`),
+  `EVOLUTION_WSL_DISTRO` (`Ubuntu`), `EVOLUTION_WEBHOOK_PORTA` (`8001`) e
+  `EVOLUTION_WEBHOOK_URL` (vazia = calcula pelo IP do WSL).
+
+### Mudado
+
+- **`evolution` é o modo padrão do sistema** no `.env.example`, depois do
+  teste real de 21/09/2026: 13 de 13 pedidos citados, com prova. Valor vazio
+  ou com erro de digitação continua caindo em `dom`, e o **instalador de
+  outros PCs continua gravando `dom`** -- lá não há WSL nem Evolution, e o bot
+  se recusaria a subir.
+
+### Corrigido
+
+- **Evolution v2.3.7: o ACK real volta a ser lido.** A v2.3.7 manda o
+  `messages.update` com `data` plano (`keyId`, `remoteJid`, `status`); o bot
+  só entendia o formato antigo (`key` + `update`) e descartava todo ACK real
+  como "payload sem key". Os dois formatos são aceitos agora.
+- **Entrega incerta + ACK reconcilia em qualquer ordem.** Quando o POST volta
+  sem prova mas com o id da mensagem (2xx com `status: ERROR`), o id passa a
+  ser guardado, e um ACK de entrega (`DELIVERY_ACK`, `READ`, `PLAYED`) desse
+  id, na mesma conversa, promove a entrega a `delivered` -- chegue ele antes
+  do registro, depois dele, ou antes de uma queda do processo (varredura no
+  boot e a cada volta do laço de reenvio). Nada é reenviado. O código antigo
+  dessa reconciliação nunca rodava e quebraria se rodasse (`job.chat_id`,
+  `Entrega` imutável). Timeout e 500 continuam sem id e esperando uma pessoa.
+- O log da promoção por ACK era gravado dentro da transação e se perdia.
+- `python -m app.evolution_diagnostico` confere também a versão da
+  Evolution, o `groupsIgnore` (ligado, os pedidos do grupo não chegam) e os
+  eventos do webhook (`byEvents` ligado ou evento faltando recusa o "pronto").
+- O `webhook/set` do `ROTEIRO-TESTE-REAL.md` e do `MIGRACAO-EVOLUTION.md` não
+  assinava `MESSAGES_UPDATE` (nenhum ACK chegaria) e usava `webhookByEvents`,
+  nome que a v2.3.7 ignora (`byEvents`).
+- A Evolution falsa do E2E e dos testes responde no formato real da v2.3.7
+  (texto em `message.conversation`, `contextInfo` no topo).
+
+- **A resposta só sai citando a mensagem que originou o pedido.** No grupo,
+  algumas respostas saíam presas ao pedido certo e outras soltas, sem
+  diferença aparente. O banco explicou: das 25 mensagens de saída gravadas,
+  **nenhuma** registrava qual mensagem tinha sido citada — e a conferência do
+  modo DOM comparava **texto**, enquanto sete pares de solicitações do mesmo
+  dia tinham o mesmo cliente. Agora:
+  - uma regra central (`app/citacao.py`) decide, e é a mesma para as duas
+    camadas: a resposta não sai se a citação apontar outra mensagem
+    (`QUOTE_ID_MISMATCH`) ou se for para outra conversa (`QUOTE_CHAT_MISMATCH`);
+  - a origem vem da **linha gravada**, não da mensagem que o processo carregou
+    na memória — o que sobrevive a reinício, reenvio e job antigo;
+  - a saída passa a registrar `quoted_message_id`: dá para auditar depois qual
+    mensagem foi citada;
+  - no DOM, sem o id na tela **não se cita** (a busca por texto saiu); com
+    duas mensagens de texto idêntico visíveis, a citação sai mas é registrada
+    como `unverified` — nunca `ok`;
+  - na Evolution, um `stanzaId` diferente do pedido grava o id que voltou e
+    marca `not_applied`, com os dois ids no log.
+  - **citação não comprovada não sai citada**: com duas mensagens de texto
+    idêntico visíveis, a barra é **desarmada** antes de digitar e a resposta
+    sai sem citação, com o nome do consultor. `unverified` deixou de poder
+    acompanhar uma resposta apresentada como citada;
+  - o modo DOM se recusa a abrir a conversa quando **duas conversas têm o
+    mesmo nome** na lista — ele identifica o grupo pelo nome, e escolher "a
+    primeira" mandaria dado de cliente para o grupo errado.
+
+### Risco conhecido
+
+- **O modo DOM identifica a conversa pelo NOME do grupo, não pelo JID.** O
+  `chat_id` gravado nas solicitações desse modo é o nome (o JID não aparece na
+  tela do WhatsApp Web). A comparação de conversa funciona, mas é um
+  identificador fraco: dois grupos homônimos são hoje tratados como recusa
+  explícita (o bot não abre e avisa) em vez de risco silencioso. Migrar o modo
+  DOM para um identificador estável fica como dívida técnica.
+
+
 ## [1.0.4] - 2026-09-19
 
 ### Corrigido

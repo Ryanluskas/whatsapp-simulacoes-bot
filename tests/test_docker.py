@@ -241,7 +241,7 @@ class TestGuardaDeExposicao:
         for nome in ("WEB_HOST", "DASHBOARD_PASSWORD", "SIMULATOR_MODE",
                      "SESSION_SECRET", "AGENT_TOKEN"):
             monkeypatch.delenv(nome, raising=False)
-        monkeypatch.setattr(entrada.uvicorn, "run", lambda *a, **k: None)
+        monkeypatch.setattr(entrada, "servir", lambda *a, **k: 0)
         env = self._env(tmp_path, WEB_HOST="127.0.0.1", DASHBOARD_PASSWORD="admin",
                         SESSION_SECRET="", AGENT_TOKEN="x")
         assert entrada.main(["--env", env]) == 0
@@ -254,13 +254,14 @@ class TestGuardaDeExposicao:
                       "SESSION_SECRET", "AGENT_TOKEN"):
             monkeypatch.delenv(chave, raising=False)
 
-        # Corta em uvicorn.run: interessa saber que a guarda deixou passar.
+        # Corta em servir(): interessa saber que a guarda deixou passar.
         chamou = {"sim": False}
 
         def falso_run(*_a, **_k):
             chamou["sim"] = True
+            return 0
 
-        monkeypatch.setattr(entrada.uvicorn, "run", falso_run)
+        monkeypatch.setattr(entrada, "servir", falso_run)
         codigo = entrada.main(
             ["--env", self._env(tmp_path, DASHBOARD_PASSWORD="uma-senha-de-verdade")])
         assert codigo == 0
@@ -366,6 +367,8 @@ class TestChavesNovasDocumentadas:
     @pytest.mark.parametrize("chave", [
         "WHATSAPP_MODE", "EVOLUTION_URL", "EVOLUTION_API_KEY",
         "EVOLUTION_INSTANCE", "EVOLUTION_GROUP_JID", "EVOLUTION_WEBHOOK_TOKEN",
+        "EVOLUTION_AUTOSTART", "EVOLUTION_WSL_DISTRO", "EVOLUTION_WEBHOOK_PORTA",
+        "EVOLUTION_WEBHOOK_URL",
     ])
     def test_esta_no_env_exemplo(self, chave):
         assert f"{chave}=" in self.ENV_EXEMPLO
@@ -376,9 +379,29 @@ class TestChavesNovasDocumentadas:
         linha = next(l for l in self.ENV_EXEMPLO.splitlines() if l.startswith(f"{segredo}="))
         assert linha == f"{segredo}=", f"{segredo} tem valor no .env.example"
 
-    def test_o_padrao_continua_sendo_dom(self):
-        """A camada nova só entra quando pedida, nunca por descuido."""
-        assert "WHATSAPP_MODE=dom" in self.ENV_EXEMPLO
+    def test_o_exemplo_vem_com_evolution(self):
+        """Decisão do operador em 21/09/2026, depois do teste real (13 de 13
+        pedidos citados com prova): a Evolution é o modo do sistema. Antes
+        este teste exigia 'dom' -- "a camada nova só entra quando pedida"; ela
+        foi pedida."""
+        assert "WHATSAPP_MODE=evolution" in self.ENV_EXEMPLO
+        assert "EVOLUTION_AUTOSTART=true" in self.ENV_EXEMPLO
+
+    @pytest.mark.parametrize("valor", ["", "evolutoin", "DOM2"])
+    def test_erro_de_digitacao_cai_em_dom(self, tmp_path, monkeypatch, valor):
+        """O que continua valendo da regra antiga: um erro no .env nunca liga a
+        Evolution por acidente."""
+        from app.config import load_config
+        monkeypatch.delenv("WHATSAPP_MODE", raising=False)
+        env = tmp_path / "t.env"
+        env.write_text(f"WHATSAPP_MODE={valor}\n", encoding="utf-8")
+        assert load_config(env).whatsapp_mode == "dom"
+
+    def test_o_instalador_de_outros_pcs_continua_dom(self):
+        """Outro PC não tem WSL nem Evolution: com 'evolution' o bot se recusaria
+        a subir. Muda quando a instalação levar a Evolution junto."""
+        instalador = (RAIZ / "instalador" / "instalar.ps1").read_text(encoding="utf-8")
+        assert '"WHATSAPP_MODE=dom"' in instalador
 
     def test_o_env_esta_no_gitignore(self):
         assert ".env" in (RAIZ / ".gitignore").read_text(encoding="utf-8")

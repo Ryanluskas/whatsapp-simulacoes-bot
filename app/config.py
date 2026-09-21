@@ -118,6 +118,18 @@ class Config:
     #: Onde ficam os PNGs enviados. None = ``<projeto>/comprovantes``.
     comprovantes_dir: Path | None = None
 
+    # --- Evolution: sobe junto com o bot (Windows + WSL) ---
+    #: Liga o WSL, espera a Evolution e reaponta o webhook ao subir (ver
+    #: ``app/evolution_inicio.py``). ``False`` aqui de proposito: um Config
+    #: montado a mao -- como nos testes -- nunca mexe na infraestrutura real.
+    #: O ``load_config`` liga por padrao.
+    evolution_autostart: bool = False
+    evolution_wsl_distro: str = "Ubuntu"
+    #: Porta que o Windows repassa do WSL para o bot (``netsh portproxy``).
+    evolution_webhook_porta: int = 8001
+    #: URL fixa do webhook. Vazia = calcula pelo IP do Windows visto pelo WSL.
+    evolution_webhook_url: str = ""
+
     tz: ZoneInfo = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -224,6 +236,12 @@ def load_config(env_file: str | Path | None = None) -> Config:
         evolution_instance=os.getenv("EVOLUTION_INSTANCE", "allana").strip(),
         evolution_group_jid=os.getenv("EVOLUTION_GROUP_JID", "").strip(),
         evolution_webhook_token=os.getenv("EVOLUTION_WEBHOOK_TOKEN", "").strip(),
+        # A Evolution sobe junto com o bot: liga o WSL se ela estiver fora do
+        # ar e reaponta o webhook se o IP do WSL mudou (reinicio do Windows).
+        evolution_autostart=_flag("EVOLUTION_AUTOSTART", "true"),
+        evolution_wsl_distro=os.getenv("EVOLUTION_WSL_DISTRO", "Ubuntu").strip(),
+        evolution_webhook_porta=_int("EVOLUTION_WEBHOOK_PORTA", 8001, minimum=1, maximum=65535),
+        evolution_webhook_url=os.getenv("EVOLUTION_WEBHOOK_URL", "").strip(),
         # Nome e CPF do cliente sem mascara NA IMAGEM enviada ao grupo.
         # E' uma chave separada de MASK_CPF_IN_UI de proposito: o painel e a
         # imagem sao publicos diferentes, e a decisao aqui e' do operador.

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.models import ResultadoEnvio
+from app.models import QuoteStatus, ResultadoEnvio
 from app.state_store import StateStore
 from app.whatsapp import WhatsAppService
 
@@ -58,7 +58,10 @@ class TestCitacaoExigeProva:
         monkeypatch.setattr(servico, "_log",
                             lambda n, m: registros.append((n, m)))
         monkeypatch.setattr(servico, "_try_quote", lambda _id: clique_ok)
-        monkeypatch.setattr(servico, "_citacao_confirmada",
+        # `_citar` deixou de devolver booleano: devolve o QUE FOI PROVADO
+        # (`ok`, `unverified` ou vazio). Quem responde por essa prova agora e'
+        # `_conferir_citacao` -- o dublê acompanha a troca.
+        monkeypatch.setattr(servico, "_conferir_citacao",
                             lambda _id, espera=2.0: barra_ok)
         monkeypatch.setattr(servico, "_fechar_encaminhamento", lambda: False)
         monkeypatch.setattr(servico, "_limpar_preview", lambda: None)
@@ -68,26 +71,61 @@ class TestCitacaoExigeProva:
         return registros
 
     def test_clique_e_barra_ok_e_citacao_valida(self, servico, monkeypatch):
-        registros = self._preparar(servico, monkeypatch, True, True)
-        assert servico._citar("2A_MSG", "texto") is True
+        registros = self._preparar(servico, monkeypatch, True, QuoteStatus.OK)
+        assert servico._citar("2A_MSG", "texto") == QuoteStatus.OK
         assert servico._ultima_citacao_ok is True
+        assert servico._alvo_citado == "2A_MSG", (
+            "sem guardar o alvo, ninguém consegue auditar qual mensagem foi citada")
         assert registros == [], f"log poluído: {registros}"
+
+    def test_barra_armada_sem_como_provar_e_DESARMADA(self, servico, monkeypatch):
+        """Duas mensagens com o mesmo texto na tela: a barra bate com as duas.
+
+        No grupo deste bot isso é rotina — sete pares de solicitações com o
+        mesmo cliente num dia. Antes virava `ok`; depois virou `unverified`
+        **e a resposta saía citada assim mesmo**. Nenhum dos dois serve: sem
+        prova de QUAL mensagem seria citada, enviar é aceitar responder ao
+        pedido de outro cliente. A barra é desarmada e a resposta sai sem
+        citação, com o nome do consultor.
+        """
+        registros = self._preparar(servico, monkeypatch, True, QuoteStatus.UNVERIFIED)
+        desarmou: list[bool] = []
+        monkeypatch.setattr(servico, "_cancelar_citacao_pendente",
+                            lambda: desarmou.append(True) or True)
+
+        assert servico._citar("2A_MSG", "texto") == "", (
+            "citação não comprovada continuou valendo como citação")
+        assert desarmou == [True], "a barra ficou armada: a resposta sairia citada"
+        assert servico._ultima_citacao_ok is False
+        assert servico._alvo_citado == "", (
+            "guardou um alvo que não foi comprovado; o log diria que citou")
+        assert any("NÃO comprovada" in m for _n, m in registros), registros
+
+    def test_se_nao_conseguir_desarmar_limpa_a_tela(self, servico, monkeypatch):
+        """Desarmar pode falhar. Aí a tela é limpa antes de responder."""
+        self._preparar(servico, monkeypatch, True, QuoteStatus.UNVERIFIED)
+        monkeypatch.setattr(servico, "_cancelar_citacao_pendente", lambda: False)
+        limpou: list[bool] = []
+        monkeypatch.setattr(servico, "_limpar_preview", lambda: limpou.append(True))
+
+        assert servico._citar("2A_MSG", "texto") == ""
+        assert limpou == [True], "deixou a barra pendurada na tela"
 
     def test_clicou_mas_a_barra_nao_apareceu(self, servico, monkeypatch):
         """O caso silencioso: o menu respondeu, a citação não pegou."""
-        registros = self._preparar(servico, monkeypatch, True, False)
-        assert servico._citar("2A_MSG", "texto") is False
+        registros = self._preparar(servico, monkeypatch, True, "")
+        assert servico._citar("2A_MSG", "texto") == ""
         assert servico._ultima_citacao_ok is False
         assert any("barra de citação não" in m for _n, m in registros), registros
 
     def test_nem_o_menu_respondeu(self, servico, monkeypatch):
-        registros = self._preparar(servico, monkeypatch, False, False)
-        assert servico._citar("2A_MSG", "texto") is False
+        registros = self._preparar(servico, monkeypatch, False, "")
+        assert servico._citar("2A_MSG", "texto") == ""
         assert any("Não consegui citar" in m for _n, m in registros), registros
 
     def test_sem_id_nao_tenta_nem_avisa(self, servico, monkeypatch):
-        registros = self._preparar(servico, monkeypatch, True, True)
-        assert servico._citar("", "texto") is False
+        registros = self._preparar(servico, monkeypatch, True, QuoteStatus.OK)
+        assert servico._citar("", "texto") == ""
         assert registros == []
 
     def test_falha_na_citacao_nao_impede_a_resposta(self, servico):

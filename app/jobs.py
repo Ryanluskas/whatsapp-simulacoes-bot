@@ -41,6 +41,14 @@ from .simulator import SimulatorService
 
 RETRY_BACKOFF_SECONDS = 8.0
 
+#: Falha de ambiente (o navegador do simulador não abriu) não gasta tentativa
+#: do consultor, mas também não pode virar laço eterno. Depois disto, a
+#: solicitação segue o caminho normal de falha e alguém é avisado.
+MAX_FALHAS_DE_AMBIENTE = 5
+#: Espera maior que a das tentativas normais: o operador precisa de tempo para
+#: fechar o navegador (ou o que mais esteja segurando o perfil).
+ESPERA_DE_AMBIENTE_SEGUNDOS = 30.0
+
 #: Primeira espera antes de reenviar uma resposta que nao saiu.
 PRIMEIRO_REENVIO_SEGUNDOS = 30.0
 
@@ -671,6 +679,17 @@ class QueueService:
 
         elapsed = round(time.monotonic() - started_monotonic, 1)
 
+        # AMBIENTE antes de tentativa: o navegador que não abre não é defeito
+        # do pedido. Gastar as duas tentativas do consultor nisso fazia a
+        # solicitação dele morrer por um problema que não era dele -- e sem
+        # ninguém ser avisado do que resolver.
+        if (not result.ok and getattr(result, "ambiental", False)
+                and job.ambientais < MAX_FALHAS_DE_AMBIENTE):
+            with self._lock:
+                self._active.pop(job.request_id, None)
+            self._reenfileirar_por_ambiente(job, result)
+            return
+
         if not result.ok and result.retryable and job.attempt < self.max_attempts:
             with self._lock:
                 self._active.pop(job.request_id, None)
@@ -696,6 +715,57 @@ class QueueService:
             {"id": job.simulation_id},
         )
         self._emit_stage(job, stage)
+
+    def _reenfileirar_por_ambiente(self, job: SimulationJob,
+                                   result: SimulationResult) -> None:
+        """Devolve a solicitação à fila SEM gastar tentativa.
+
+        A `attempt` continua a mesma: ela conta o que foi tentado no portal.
+        O que falhou aqui foi a máquina -- navegador que não abre, perfil em
+        uso, Playwright que não sobe. O consultor não tem nada a ver com isso,
+        e o pedido dele não pode morrer por causa disso.
+        """
+        vez = job.ambientais + 1
+        self.db.update(
+            "simulations",
+            {"status": Status.QUEUED, "stage": Stage.QUEUED,
+             "error_message": result.error, "updated_at": now_iso()},
+            {"id": job.simulation_id},
+        )
+        self._log(
+            "WARNING",
+            f"{job.request_id}: {result.error}. A solicitação volta para a fila SEM "
+            f"gastar tentativa ({vez} de {MAX_FALHAS_DE_AMBIENTE}); a tentativa "
+            f"{job.attempt} continua valendo. Se o navegador do simulador estiver "
+            "aberto em outro lugar com o mesmo perfil, feche-o.",
+            request_id=job.request_id, consultant=job.request.consultant_name,
+        )
+        self.hub.publish(
+            "job_ambiente",
+            {"request_id": job.request_id, "simulation_id": job.simulation_id,
+             "attempt": job.attempt, "ambientais": vez, "error": result.error},
+            stage=Stage.QUEUED, level="warning",
+            title="Simulador indisponível — na fila",
+            detail=f"{result.error} ({vez}/{MAX_FALHAS_DE_AMBIENTE})",
+            request_id=job.request_id, simulation_id=job.simulation_id,
+            consultant_name=job.request.consultant_name,
+        )
+        de_novo = SimulationJob(
+            request=job.request, message=job.message, request_id=job.request_id,
+            simulation_id=job.simulation_id, consultant_id=job.consultant_id,
+            attempt=job.attempt, ambientais=vez,
+        )
+
+        def reenfileirar() -> None:
+            with self._lock:
+                self._timers.discard(atraso)
+            self._pending.put(de_novo)
+
+        atraso = threading.Timer(ESPERA_DE_AMBIENTE_SEGUNDOS, reenfileirar)
+        atraso.daemon = True
+        with self._lock:
+            self._timers.add(atraso)
+        atraso.start()
 
     def _retry(self, job: SimulationJob, result: SimulationResult, elapsed: float) -> None:
         self.db.update(
@@ -739,6 +809,10 @@ class QueueService:
             simulation_id=job.simulation_id,
             consultant_id=job.consultant_id,
             attempt=job.attempt + 1,
+            # As falhas de ambiente ja' contadas vao junto: zera-las aqui
+            # daria ao laco um teto novo a cada tentativa, e a solicitacao
+            # ficaria repetindo enquanto o navegador nao abrisse.
+            ambientais=job.ambientais,
         )
         # A espera acontece num timer, NÃO nesta thread. Antes era um
         # time.sleep() no despachante: com um worker, a fila inteira congelava

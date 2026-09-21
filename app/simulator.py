@@ -244,6 +244,37 @@ class SimulatorService(ThreadActor):
             return base
         return ROOT / f".simulator-profile-{self.index + 1}"
 
+    #: Quanto esperar o navegador do simulador abrir. O padrão do Playwright
+    #: (180 s) transforma "o perfil está em uso" em três minutos de silêncio,
+    #: e nesse tempo a fila inteira para. Um Brave frio abre em segundos; se
+    #: passar de um minuto, o motivo é outro e quem está esperando precisa
+    #: saber agora.
+    _ESPERA_DO_NAVEGADOR_MS = 60_000
+
+    def _avisar_se_perfil_pessoal(self, profile) -> None:
+        """Diz, UMA vez, que este perfil é o do navegador do dia a dia.
+
+        Funciona -- as senhas salvas vêm junto --, mas cobra caro: o Chromium
+        aceita um processo por perfil, então abrir o Brave trava a simulação;
+        e a limpeza de navegador órfão se recusa a agir num perfil pessoal (ela
+        fecharia as abas do operador). O resultado é uma fila parada sem
+        ninguém entender por quê -- foi o que aconteceu em 20/09.
+        """
+        if getattr(self, "_avisou_perfil_pessoal", False):
+            return
+        from .navegador_zumbi import perfil_pessoal
+
+        if not perfil_pessoal(profile):
+            return
+        self._avisou_perfil_pessoal = True
+        self._log(
+            "WARNING",
+            f"O simulador está usando o perfil REAL do navegador ({profile}). "
+            "Com o Brave aberto, a simulação não roda -- e eu não posso fechar "
+            "o seu navegador para resolver. Para ter as senhas salvas sem esse "
+            "risco: sincronizar_perfis.ps1 -Somente simulador.",
+        )
+
     def _ensure_browser(self) -> bool:
         if self._context is not None and self._page is not None:
             return True
@@ -252,6 +283,7 @@ class SimulatorService(ThreadActor):
 
         profile = self._profile_dir()
         profile.mkdir(parents=True, exist_ok=True)
+        self._avisar_se_perfil_pessoal(profile)
 
         self._playwright = sync_playwright().start()
         launch_kwargs: dict[str, Any] = dict(
@@ -271,7 +303,8 @@ class SimulatorService(ThreadActor):
             launch_kwargs["executable_path"] = executable
 
         try:
-            self._context = self._playwright.chromium.launch_persistent_context(**launch_kwargs)
+            self._context = self._playwright.chromium.launch_persistent_context(
+                timeout=self._ESPERA_DO_NAVEGADOR_MS, **launch_kwargs)
         except Exception as exc:
             if not _perfil_ocupado(str(exc)):
                 self._close_browser()
@@ -287,7 +320,7 @@ class SimulatorService(ThreadActor):
                 raise
             try:
                 self._context = self._playwright.chromium.launch_persistent_context(
-                    **launch_kwargs)
+                    timeout=self._ESPERA_DO_NAVEGADOR_MS, **launch_kwargs)
             except Exception:
                 # Sem isto o Playwright desta thread ficava iniciado, e o
                 # proximo `sync_playwright().start()` na mesma thread falha
@@ -447,10 +480,12 @@ class SimulatorService(ThreadActor):
             try:
                 self._ensure_browser()
             except Exception as exc:
+                # AMBIENTAL: o pedido do consultor não tem defeito nenhum. Ele
+                # volta para a fila sem gastar tentativa (ver QueueService).
                 return SimulationResult(
                     job=job, ok=False, status="Erro",
                     error=f"falha ao abrir o navegador do simulador: {_short(exc)}",
-                    retryable=True,
+                    retryable=True, ambiental=True,
                 )
 
             request = job.request
