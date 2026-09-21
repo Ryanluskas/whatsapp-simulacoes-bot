@@ -34,7 +34,7 @@ def _setinha(pagina, data_id: str) -> tuple[int, list[str]]:
     """(quantas achou, rótulos). Zero ou uma: agora é UM botão nomeado."""
     from app.whatsapp import BOTAO_DE_OPCOES_JS, GEOMETRIA_DA_LINHA_JS
 
-    pagina.evaluate(GEOMETRIA_DA_LINHA_JS, [data_id, ""])
+    pagina.evaluate(GEOMETRIA_DA_LINHA_JS, data_id)
     achado = pagina.evaluate(BOTAO_DE_OPCOES_JS) or {}
     if not achado.get("achou"):
         return 0, []
@@ -563,7 +563,7 @@ class TestNuncaEncaminhar:
                 <div role="row" data-id="false_g@g.us_A_x@c.us">
                   <div role="button" aria-haspopup="true" aria-label="Encaminhar">x</div>
                 </div></div></body></html>""")
-            pagina.evaluate(GEOMETRIA_DA_LINHA_JS, ["false_g@g.us_A_x@c.us", ""])
+            pagina.evaluate(GEOMETRIA_DA_LINHA_JS, "false_g@g.us_A_x@c.us")
             achado = pagina.evaluate(BOTAO_DE_OPCOES_JS)
             assert not achado["achou"], "o botão de encaminhar virou a setinha"
         finally:

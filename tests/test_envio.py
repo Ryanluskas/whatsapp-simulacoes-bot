@@ -78,16 +78,38 @@ class TestCitacaoExigeProva:
             "sem guardar o alvo, ninguém consegue auditar qual mensagem foi citada")
         assert registros == [], f"log poluído: {registros}"
 
-    def test_barra_armada_sem_como_provar_nao_vira_ok(self, servico, monkeypatch):
+    def test_barra_armada_sem_como_provar_e_DESARMADA(self, servico, monkeypatch):
         """Duas mensagens com o mesmo texto na tela: a barra bate com as duas.
 
         No grupo deste bot isso é rotina — sete pares de solicitações com o
-        mesmo cliente num dia. Chamar de `ok` era afirmar sem prova.
+        mesmo cliente num dia. Antes virava `ok`; depois virou `unverified`
+        **e a resposta saía citada assim mesmo**. Nenhum dos dois serve: sem
+        prova de QUAL mensagem seria citada, enviar é aceitar responder ao
+        pedido de outro cliente. A barra é desarmada e a resposta sai sem
+        citação, com o nome do consultor.
         """
+        registros = self._preparar(servico, monkeypatch, True, QuoteStatus.UNVERIFIED)
+        desarmou: list[bool] = []
+        monkeypatch.setattr(servico, "_cancelar_citacao_pendente",
+                            lambda: desarmou.append(True) or True)
+
+        assert servico._citar("2A_MSG", "texto") == "", (
+            "citação não comprovada continuou valendo como citação")
+        assert desarmou == [True], "a barra ficou armada: a resposta sairia citada"
+        assert servico._ultima_citacao_ok is False
+        assert servico._alvo_citado == "", (
+            "guardou um alvo que não foi comprovado; o log diria que citou")
+        assert any("NÃO comprovada" in m for _n, m in registros), registros
+
+    def test_se_nao_conseguir_desarmar_limpa_a_tela(self, servico, monkeypatch):
+        """Desarmar pode falhar. Aí a tela é limpa antes de responder."""
         self._preparar(servico, monkeypatch, True, QuoteStatus.UNVERIFIED)
-        assert servico._citar("2A_MSG", "texto") == QuoteStatus.UNVERIFIED
-        assert servico._ultima_citacao_ok is False, "unverified virou afirmação"
-        assert servico._alvo_citado == "2A_MSG", "o alvo se perde na dúvida"
+        monkeypatch.setattr(servico, "_cancelar_citacao_pendente", lambda: False)
+        limpou: list[bool] = []
+        monkeypatch.setattr(servico, "_limpar_preview", lambda: limpou.append(True))
+
+        assert servico._citar("2A_MSG", "texto") == ""
+        assert limpou == [True], "deixou a barra pendurada na tela"
 
     def test_clicou_mas_a_barra_nao_apareceu(self, servico, monkeypatch):
         """O caso silencioso: o menu respondeu, a citação não pegou."""

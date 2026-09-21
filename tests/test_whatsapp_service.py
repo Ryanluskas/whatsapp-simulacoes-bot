@@ -505,7 +505,6 @@ class TestRecuperarOCampoDeDigitacao:
             browser_executable="", bot_self_name="Bot")
         servico._page = PaginaFalsa()
         servico._limpar_ui = lambda: limpezas.append("limpou")
-        servico._texto_da_mensagem = lambda _id: "Maria Tabaré"
         servico._diagnosticar_citacao_uma_vez = lambda *a, **k: None
 
         assert servico._passos_da_citacao("2A1") is False
