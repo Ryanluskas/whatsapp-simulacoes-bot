@@ -153,18 +153,36 @@ def interpretar_todos(payload: dict, group_jid: str, group_name: str = "") -> li
 
 
 def _interpretar_um_update(data: Any) -> Leitura:
+    """Um ACK (``messages.update``) vira ``{message_id, chat_id, status}``.
+
+    Dois formatos, e os dois continuam aceitos:
+
+    * **Evolution v2.3.7, o real** -- ``data`` PLANO, montado em
+      ``whatsapp.baileys.service.ts`` antes do ``sendDataWebhook``:
+      ``{keyId, remoteJid, fromMe, participant, status, instanceId}``, com o
+      ``status`` ja' em nome (``SERVER_ACK``, ``DELIVERY_ACK``, ``READ``...).
+    * **legado** -- o evento cru do Baileys, ``{key: {id, remoteJid},
+      update: {status}}``. Era o unico lido antes; fica aceito porque os
+      testes e quem mais ainda o mande dependem dele.
+
+    So' o legado era lido, e todo ACK real virava "payload sem key": o
+    webhook respondia 200, nada era gravado, e ninguem ficava sabendo.
+    """
     if not isinstance(data, dict):
         return Leitura(motivo="payload sem data")
 
     key = data.get("key")
-    if not isinstance(key, dict):
+    if isinstance(key, dict):
+        update = data.get("update")
+        if not isinstance(update, dict):
+            return Leitura(motivo="payload sem update")
+        bruto_id, chat, status = key.get("id"), key.get("remoteJid"), update.get("status")
+    elif "keyId" in data:
+        bruto_id, chat, status = data.get("keyId"), data.get("remoteJid"), data.get("status")
+    else:
         return Leitura(motivo="payload sem key")
 
-    update = data.get("update")
-    if not isinstance(update, dict):
-        return Leitura(motivo="payload sem update")
-
-    message_id = (key.get("id") or "").strip()
+    message_id = str(bruto_id or "").strip()
     if not message_id:
         return Leitura(motivo="mensagem sem key.id")
 
@@ -172,8 +190,8 @@ def _interpretar_um_update(data: Any) -> Leitura:
         motivo="messages.update",
         atualizacao={
             "message_id": message_id,
-            "chat_id": (key.get("remoteJid") or "").strip(),
-            "status": str(update.get("status") or "").upper()
+            "chat_id": str(chat or "").strip(),
+            "status": str(status or "").upper()
         }
     )
 
