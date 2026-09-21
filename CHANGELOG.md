@@ -15,6 +15,28 @@ PR que a introduz.
 
 ### Corrigido
 
+- **Evolution v2.3.7: o ACK real volta a ser lido.** A v2.3.7 manda o
+  `messages.update` com `data` plano (`keyId`, `remoteJid`, `status`); o bot
+  só entendia o formato antigo (`key` + `update`) e descartava todo ACK real
+  como "payload sem key". Os dois formatos são aceitos agora.
+- **Entrega incerta + ACK reconcilia em qualquer ordem.** Quando o POST volta
+  sem prova mas com o id da mensagem (2xx com `status: ERROR`), o id passa a
+  ser guardado, e um ACK de entrega (`DELIVERY_ACK`, `READ`, `PLAYED`) desse
+  id, na mesma conversa, promove a entrega a `delivered` -- chegue ele antes
+  do registro, depois dele, ou antes de uma queda do processo (varredura no
+  boot e a cada volta do laço de reenvio). Nada é reenviado. O código antigo
+  dessa reconciliação nunca rodava e quebraria se rodasse (`job.chat_id`,
+  `Entrega` imutável). Timeout e 500 continuam sem id e esperando uma pessoa.
+- O log da promoção por ACK era gravado dentro da transação e se perdia.
+- `python -m app.evolution_diagnostico` confere também a versão da
+  Evolution, o `groupsIgnore` (ligado, os pedidos do grupo não chegam) e os
+  eventos do webhook (`byEvents` ligado ou evento faltando recusa o "pronto").
+- O `webhook/set` do `ROTEIRO-TESTE-REAL.md` e do `MIGRACAO-EVOLUTION.md` não
+  assinava `MESSAGES_UPDATE` (nenhum ACK chegaria) e usava `webhookByEvents`,
+  nome que a v2.3.7 ignora (`byEvents`).
+- A Evolution falsa do E2E e dos testes responde no formato real da v2.3.7
+  (texto em `message.conversation`, `contextInfo` no topo).
+
 - **A resposta só sai citando a mensagem que originou o pedido.** No grupo,
   algumas respostas saíam presas ao pedido certo e outras soltas, sem
   diferença aparente. O banco explicou: das 25 mensagens de saída gravadas,
