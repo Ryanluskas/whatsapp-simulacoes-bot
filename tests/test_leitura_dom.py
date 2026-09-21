@@ -186,15 +186,40 @@ class TestAcharConversaNaLista:
     """
 
     def _achar(self, navegador, html: str, nome: str):
+        """(achou, marcados). O JS passou a devolver TAMBÉM quantas conversas
+        têm aquele nome -- com mais de uma, ele se recusa a escolher."""
         from app.whatsapp import ACHAR_CONVERSA_JS, MARCA_ALVO
         pagina = navegador.new_page()
         try:
             pagina.set_content(html)
-            achou = pagina.evaluate(ACHAR_CONVERSA_JS, nome)
+            resposta = pagina.evaluate(ACHAR_CONVERSA_JS, nome)
             marcados = pagina.locator(f"[{MARCA_ALVO}]").count()
-            return achou, marcados
+            return bool(resposta["achou"]), marcados
         finally:
             pagina.close()
+
+    def _quantos(self, navegador, html: str, nome: str) -> int:
+        from app.whatsapp import ACHAR_CONVERSA_JS
+        pagina = navegador.new_page()
+        try:
+            pagina.set_content(html)
+            return int(pagina.evaluate(ACHAR_CONVERSA_JS, nome)["quantos"])
+        finally:
+            pagina.close()
+
+    def test_dois_grupos_com_o_mesmo_nome_nao_sao_adivinhados(self, navegador):
+        """RISCO CONHECIDO do modo dom: a conversa é identificada pelo NOME.
+
+        O JID não aparece na lista lateral. Com dois grupos homônimos — uma
+        cópia, um grupo antigo, um homônimo de outra empresa — abrir "o
+        primeiro" mandaria dado de cliente para o grupo errado. Escolher é de
+        uma pessoa, não do bot.
+        """
+        html = _barra_lateral(["Joselia Teste", GRUPO_NOME, GRUPO_NOME])
+        assert self._achar(navegador, html, GRUPO_NOME) == (False, 0), (
+            "escolheu um entre dois grupos de mesmo nome")
+        assert self._quantos(navegador, html, GRUPO_NOME) == 2, (
+            "sem a contagem, o log não explica por que não abriu")
 
     def test_acha_pelo_nome_exato(self, navegador):
         html = _barra_lateral(["Joselia Teste", GRUPO_NOME, "Tobias Testão"])

@@ -151,13 +151,23 @@ ACHAR_CONVERSA_JS = """
              || document.querySelector('#side')
              || document;
 
-  for (const el of Array.from(lista.querySelectorAll('span[title]'))) {
-    if (norm(el.getAttribute('title')) !== alvo) continue;
-    const clicavel = el.closest('[role="listitem"], [role="row"], div[tabindex]') || el;
-    clicavel.setAttribute('data-allana-alvo', '1');
-    return true;
+  // TODAS as conversas com esse nome, nao a primeira.
+  //
+  // O modo dom identifica a conversa pelo NOME (o JID nao aparece na tela).
+  // Dois grupos com o mesmo nome -- "Santander Capital Simulacoes" e uma
+  // copia, um grupo antigo, um homonimo -- fariam o bot abrir o primeiro da
+  // lista e mandar dados de cliente para o grupo errado. Com mais de um, nao
+  // se escolhe: quem decide e' uma pessoa.
+  const iguais = Array.from(lista.querySelectorAll('span[title]'))
+    .filter((el) => norm(el.getAttribute('title')) === alvo);
+
+  if (iguais.length !== 1) {
+    return { achou: false, quantos: iguais.length };
   }
-  return false;
+  const el = iguais[0];
+  const clicavel = el.closest('[role="listitem"], [role="row"], div[tabindex]') || el;
+  clicavel.setAttribute('data-allana-alvo', '1');
+  return { achou: true, quantos: 1 };
 }
 """
 
@@ -2018,7 +2028,18 @@ class WhatsAppService(ThreadActor):
         trabalho fica no topo da lista porque e' o mais ativo.
         """
         try:
-            if not self._page.evaluate(ACHAR_CONVERSA_JS, chat_name):
+            achado = self._page.evaluate(ACHAR_CONVERSA_JS, chat_name) or {}
+            if isinstance(achado, dict) and int(achado.get("quantos") or 0) > 1:
+                # RISCO CONHECIDO do modo dom: a conversa e' identificada pelo
+                # NOME, nao pelo JID. Com dois grupos homonimos na lista, abrir
+                # "o primeiro" poderia mandar dado de cliente para o grupo
+                # errado. Na duvida, nao abre.
+                self._log("ERROR",
+                          f"Ha' {achado['quantos']} conversas com o nome "
+                          f"'{_curto_titulo(chat_name)}' na lista. Não vou adivinhar "
+                          "qual é a certa: renomeie ou arquive a outra.")
+                return False
+            if not (achado.get("achou") if isinstance(achado, dict) else achado):
                 return False
             alvo = self._page.locator(f"[{MARCA_ALVO}]").first
             alvo.click(timeout=5_000)
