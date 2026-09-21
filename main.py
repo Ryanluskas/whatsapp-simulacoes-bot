@@ -26,6 +26,7 @@ from app.instancia import InstanciaEmUso, TravaDeInstancia, explicar
 from app.manager import BotManager
 from app.security import esta_exposto, problemas_de_seguranca
 from app.web import create_app
+from app import evolution_inicio
 
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
@@ -204,6 +205,15 @@ def main(argv: list[str] | None = None) -> int:
             signal.signal(sig, lambda *_: shutdown())
         except (ValueError, OSError):
             pass
+
+    # A Evolution sobe junto com o bot, em segundo plano: o painel abre na
+    # hora e ela entra quando estiver pronta. `deve_ligar` recusa dentro de
+    # teste -- esta maquina pode ter uma Evolution real escutando, e um teste
+    # nao pode religar o WSL nem reapontar o webhook de producao.
+    if evolution_inicio.deve_ligar(config):
+        threading.Thread(
+            target=evolution_inicio.preparar_evolution, name="evolution-inicio", daemon=True,
+            args=(config, lambda nivel, msg: manager.log(nivel, "whatsapp", msg))).start()
 
     manager.start()
     

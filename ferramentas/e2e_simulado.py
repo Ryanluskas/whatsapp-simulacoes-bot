@@ -292,6 +292,9 @@ class Bot:
         self.log = pasta / "bot.log"
         self.env.write_text("\n".join([
             "WHATSAPP_MODE=evolution",
+            # A Evolution daqui e' a FALSA: nada de ligar o WSL nem reapontar
+            # o webhook da Evolution real que pode estar escutando nesta maquina.
+            "EVOLUTION_AUTOSTART=false",
             f"EVOLUTION_URL=http://127.0.0.1:{porta_evolution}",
             f"EVOLUTION_API_KEY={API_KEY}",
             f"EVOLUTION_INSTANCE={INSTANCIA}",
