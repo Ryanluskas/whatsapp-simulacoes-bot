@@ -136,6 +136,11 @@ _PRE_PLAIN = re.compile(r"^\[(?P<time>[^\]]+)\]\s*(?P<name>.*?):\s*$")
 # composta (c). Sao strings diferentes byte a byte e o seletor nunca casaria,
 # sem nenhum sintoma alem de "nao achei". Normalizar resolve isso e de quebra
 # tolera espaco duplo e diferenca de maiuscula.
+#
+# TODO (divida tecnica, ver docs/DIVIDA-TECNICA.md secao 1): o NOME nao e' um
+# identificador estavel -- e' ele que acaba gravado em `simulations.chat_id`.
+# Dois grupos homonimos hoje sao recusados (abaixo), mas o certo e' gravar o
+# JID, que ja' esta' na tela dentro do `data-id` das mensagens.
 MARCA_ALVO = "data-allana-alvo"
 
 ACHAR_CONVERSA_JS = """
