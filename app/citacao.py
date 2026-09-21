@@ -34,6 +34,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .models import QuoteStatus
+
 #: Motivos de recusa. São o que aparece no log e no teste -- texto livre aqui
 #: viraria cinco grafias diferentes do mesmo problema.
 QUOTE_SEM_REQUEST_ID = "QUOTE_SEM_REQUEST_ID"
@@ -42,6 +44,31 @@ QUOTE_SEM_CHAT_ID = "QUOTE_SEM_CHAT_ID"
 QUOTE_ALVO_AUSENTE = "QUOTE_ALVO_AUSENTE"
 QUOTE_ID_MISMATCH = "QUOTE_ID_MISMATCH"
 QUOTE_CHAT_MISMATCH = "QUOTE_CHAT_MISMATCH"
+
+
+#: Os TRÊS estados, e o que cada um autoriza. Não há um quarto.
+#:
+#: * ``VERIFICADA``  -- há evidência de que a resposta saiu citando a origem.
+#:   É o ÚNICO estado em que o sistema afirma "esta resposta cita o pedido".
+#: * ``SEM_CITACAO`` -- a resposta sai (ou saiu) SEM citação, de propósito e
+#:   registrado. É o fallback seguro: o nome do consultor vai no texto.
+#: * ``NAO_PROVADA`` -- não dá para provar contra QUAL mensagem a citação
+#:   caiu. **Não pode acompanhar uma resposta citada**: quem chega aqui
+#:   desarma a citação e cai para o fallback seguro.
+VERIFICADA = QuoteStatus.OK
+SEM_CITACAO = (QuoteStatus.FALLBACK, QuoteStatus.NOT_APPLIED, QuoteStatus.NONE)
+NAO_PROVADA = QuoteStatus.UNVERIFIED
+
+
+def pode_enviar_citado(quote_status: str) -> bool:
+    """A resposta pode sair APRESENTADA como citação deste pedido?
+
+    Só com prova. ``unverified`` significa "não sei contra qual mensagem isto
+    caiu" -- enviar assim é aceitar responder à mensagem errada, que é o
+    defeito que todo este módulo existe para impedir. Quem recebe ``False``
+    desarma a citação e responde sem ela, com o nome do consultor.
+    """
+    return quote_status == VERIFICADA
 
 
 @dataclass(frozen=True)
