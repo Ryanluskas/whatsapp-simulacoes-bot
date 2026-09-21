@@ -15,6 +15,7 @@ mensagem desta solicitação?* Nada de "a maioria acertou".
 
 from __future__ import annotations
 
+import pathlib
 import threading
 import time
 
@@ -356,3 +357,134 @@ class TestEvolutionCitaOQueFoiPedido:
         r = self._resultado(None, "2AORIGEM0001")
         assert r.quote_status == QuoteStatus.UNVERIFIED
         assert r.quoted_ok is False
+
+
+# ============================== o caso ANGELINA: duas mensagens idênticas
+class TestDuasMensagensIdenticasNaTela:
+    """A e B com o MESMO texto. O sistema diz A→A e B→B, ou não cita.
+
+    É o caso do grupo real: REQ000014 e REQ000015 eram o mesmo cliente, e a
+    conferência da barra de citação compara texto. Se o DOM não distingue as
+    duas, a resposta NÃO pode sair citada -- citar "alguma das duas" é aceitar
+    responder ao pedido do outro.
+    """
+
+    def _servico(self, tmp_path, iguais: int):
+        from types import SimpleNamespace
+
+        from app.state_store import StateStore
+        from app.whatsapp import (CITACAO_ATIVA_JS, GEOMETRIA_DA_LINHA_JS,
+                                  MARCAS_DA_MENSAGEM_JS, WhatsAppService)
+
+        s = WhatsAppService(profile_dir=tmp_path / "perfil", group_name="Grupo Teste",
+                            state=StateStore(tmp_path / "state.json"), headless=True)
+        s.avisos: list[str] = []
+        s._log = lambda nivel, msg, *a, **k: s.avisos.append(f"{nivel}: {msg}")
+        s.desarmou = []
+        s._cancelar_citacao_pendente = lambda: (s.desarmou.append(True) or True)
+        s._fechar_encaminhamento = lambda: False
+        s._limpar_preview = lambda: None
+        s._limpar_ui = lambda: None
+        s._diagnosticar_citacao_uma_vez = lambda *a, **k: None
+        s._capturar_estado = lambda *a, **k: None
+        # O menu abre e o item "Responder" é clicado com sucesso.
+        s._abrir_menu_pela_setinha = lambda mid, linha: {"achou": True, "x": 1, "y": 1,
+                                                         "rotulo": "responder", "via": "setinha"}
+        s._marcas_da_mensagem = lambda mid: {"achou": True, "autor": "Ryan",
+                                             "corpo": "cliente teste 52998224725"}
+
+        def evaluate(script, *args):
+            if script is GEOMETRIA_DA_LINHA_JS:
+                # A linha CERTA foi achada pelo id -- e há `iguais` com o mesmo texto.
+                return {"achou": True, "via": "data-id", "x": 10, "y": 20,
+                        "dataId": "2AORIGEM0002", "iguais": iguais,
+                        "texto": "Cliente Teste 52998224725"}
+            if script is CITACAO_ATIVA_JS:
+                # A barra está armada e o texto bate (com as duas, justamente).
+                return {"ativa": True, "temBarra": True, "previa": "cliente teste"}
+            if script is MARCAS_DA_MENSAGEM_JS:
+                return {"achou": True, "autor": "Ryan", "corpo": "cliente teste 52998224725"}
+            return None
+
+        s._page = SimpleNamespace(
+            evaluate=evaluate,
+            mouse=SimpleNamespace(move=lambda *a: None, click=lambda *a: None),
+            wait_for_timeout=lambda *a: None,
+            locator=lambda *a, **k: SimpleNamespace(
+                first=SimpleNamespace(click=lambda **k: None)),
+            url="https://web.whatsapp.com/")
+        s._garantir_composer = lambda *a: True
+        return s
+
+    def test_mensagem_unica_e_citada_com_prova(self, tmp_path):
+        s = self._servico(tmp_path, iguais=1)
+        assert s._citar("2AORIGEM0002", "texto") == QuoteStatus.OK
+        assert s._alvo_citado == "2AORIGEM0002"
+        assert s.desarmou == [], "desarmou uma citação que estava provada"
+
+    def test_duas_identicas_nao_saem_citadas(self, tmp_path):
+        """O coração do pedido: sem como distinguir A de B, não se cita."""
+        s = self._servico(tmp_path, iguais=2)
+        resultado = s._citar("2AORIGEM0002", "texto")
+
+        assert resultado == "", (
+            f"saiu citada sem prova (status {resultado!r}) -- pode ser a mensagem do "
+            "outro pedido")
+        # Duas chamadas: a limpeza de PASSO 0 e o desarme depois da tentativa.
+        # O que importa é a ÚLTIMA: a barra não fica de pé ao voltar.
+        assert s.desarmou and s.desarmou[-1] is True, (
+            "a barra ficou armada: a resposta sairia citada")
+        assert s._alvo_citado == "", "registrou um alvo que não foi provado"
+        assert any("NÃO comprovada" in a for a in s.avisos), s.avisos
+
+    def test_a_ambiguidade_vem_da_tela_e_nao_do_palpite(self, tmp_path):
+        """`iguais` é contado no DOM, não inferido do texto do pedido."""
+        s = self._servico(tmp_path, iguais=3)
+        s._citar("2AORIGEM0002", "texto")
+        assert s._alvo_ambiguo is True
+        s2 = self._servico(tmp_path, iguais=1)
+        s2._citar("2AORIGEM0002", "texto")
+        assert s2._alvo_ambiguo is False
+
+
+class TestOsDoisCaminhosUsamAMesmaRegra:
+    """`send` e `send_image` não podem ter regras diferentes de citação."""
+
+    def test_ambos_leem_a_origem_do_banco(self):
+        import inspect
+
+        from app.manager import BotManager
+
+        texto = inspect.getsource(BotManager._send_reply)
+        imagem = inspect.getsource(BotManager._send_result_image)
+        for nome, fonte in (("_send_reply", texto), ("_send_result_image", imagem)):
+            assert "_origem_gravada" in fonte, (
+                f"{nome} monta a origem sem consultar o banco")
+            assert "conferir_integridade" in fonte, (
+                f"{nome} envia sem passar pelo portão")
+
+    def test_a_imagem_bloqueia_quando_a_memoria_discorda(self, tmp_path):
+        wa = WhatsAppQueRegistraOAlvo()
+        manager, db = _sistema(tmp_path, wa)
+        _linha(db, 1, _mensagem(1))
+        # O job carrega outra origem, em outro grupo.
+        intrusa = IncomingMessage(
+            message_id="2AORIGEM9999", chat_id="120363000000000999@g.us",
+            chat_name="Outro grupo", sender_id="5567988887777@c.us",
+            sender_name="Consultor", text="Cliente Teste 52998224725")
+        resultado = _resultado(1, intrusa)
+
+        enviou = manager._send_result_image(resultado, {}, 1)
+        assert enviou is False
+        assert wa.enviados == [], "a imagem saiu contra a origem gravada"
+
+    def test_nenhum_caminho_marca_quoted_ok_sem_prova(self):
+        """`quoted_ok` só pode nascer de `quote_status == ok`."""
+        import re
+
+        for nome in ("app/whatsapp.py", "app/evolution.py"):
+            fonte = (pathlib.Path(__file__).resolve().parent.parent / nome).read_text(
+                encoding="utf-8")
+            for linha in re.findall(r"quoted_ok=[^,\n)]+", fonte):
+                assert "QuoteStatus.OK" in linha or "quoted_ok=False" in linha, (
+                    f"{nome}: {linha} afirma citação sem comparar com OK")

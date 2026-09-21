@@ -26,7 +26,7 @@ from typing import Any, NamedTuple
 from . import analytics, mensagens
 from .cards import build_result_html
 from .citacao import (QUOTE_CHAT_MISMATCH, QUOTE_ID_MISMATCH, Origem,
-                      conferir_integridade, linha_de_log)
+                      conferir_integridade, linha_de_log, pode_enviar_citado)
 from .clock import iso_atras, now_iso, parse_iso, utc_now
 from .config import ROOT, Config
 from .consultants import ConsultantRepository
@@ -1390,6 +1390,30 @@ class BotManager:
         `not_applied` e' exatamente isso: saiu citando outra coisa.
         """
         citado = str(evid.get("quoted_message_id") or "")
+        situacao = str(evid.get("quote_status") or "")
+
+        # NAO PROVADA nunca passa por sucesso. No modo dom isto nao chega aqui
+        # -- a citacao e' desarmada antes de enviar. Na Evolution a requisicao
+        # ja' saiu (o id do alvo foi NA requisicao, entao o alvo e' o certo por
+        # construcao), e o que falta e' o eco: a resposta veio sem `stanzaId`.
+        # O sistema registra isso como nao confirmada e diz no log; nunca como
+        # citacao verificada.
+        if situacao == QuoteStatus.UNVERIFIED and not pode_enviar_citado(situacao):
+            self.log(
+                "WARNING", "whatsapp",
+                linha_de_log(origem, alvo=citado or origem.message_id,
+                             chat_id=origem.chat_id,
+                             estrategia=str(evid.get("provider") or "-"),
+                             quote_status=QuoteStatus.UNVERIFIED)
+                + " — a API não devolveu o stanzaId: não afirmo que a resposta "
+                  "saiu citando o pedido. Confira no celular.",
+                request_id=request_id, consultant=consultor)
+            nao_provada = dict(evid)
+            nao_provada["quote_error"] = (
+                evid.get("quote_error")
+                or "citação não confirmada: a resposta da API não trouxe o stanzaId")
+            return nao_provada
+
         if not citado or citado == origem.message_id:
             return evid
         self.log(
@@ -1953,10 +1977,12 @@ class BotManager:
 
         # O MESMO portao do texto. A origem do job vem do banco (o `recover`
         # remonta o job a partir da linha), entao vale depois de reinicio.
-        origem = Origem(request_id=job.request_id,
-                        message_id=job.message.message_id,
-                        chat_id=job.message.chat_id,
-                        participant=job.message.participant)
+        # A origem vem do BANCO, como no caminho do texto. O `job` pode ser
+        # um objeto em memoria de antes de um reinicio ou de um retry; a linha
+        # gravada e' quem diz a quem esta resposta pertence.
+        origem = self._origem_gravada(job.simulation_id) or Origem(
+            request_id=job.request_id, message_id=job.message.message_id,
+            chat_id=job.message.chat_id, participant=job.message.participant)
         portao = conferir_integridade(
             origem, alvo=job.message.message_id, chat_id=job.message.chat_id,
             com_citacao=bool(self.config.reply_quote and job.message.message_id))
