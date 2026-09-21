@@ -181,19 +181,31 @@ class TestCitacao:
         assert r.quote_status == QuoteStatus.UNVERIFIED and r.quoted_ok is False
 
     def test_quoted_ok_so_com_stanza_igual_ao_pedido(self, cliente, espiao):
-        """O único caminho para `quoted_ok=True`: a API devolve o stanzaId pedido."""
+        """O único caminho para `quoted_ok=True`: a API devolve o stanzaId pedido.
+
+        A resposta tem o formato da Evolution v2.3.7 (``prepareMessage``): no
+        texto o ``extendedTextMessage`` vira ``message.conversation`` e o
+        ``contextInfo`` sobe para o topo. Antes este teste punha o ``stanzaId``
+        dentro de ``message.extendedTextMessage`` -- formato que a v2.3.7 não
+        devolve para texto. O que o teste afirma não mudou.
+        """
         espiao.resposta = httpx.Response(201, json={
             "key": {"id": "3EB0RESPOSTA", "remoteJid": GRUPO, "fromMe": True},
-            "message": {"extendedTextMessage": {
-                "text": "resposta", "contextInfo": {"stanzaId": ID_ORIGINAL}}}})
+            "status": "PENDING", "message": {"conversation": "resposta"},
+            "messageType": "conversation",
+            "contextInfo": {"stanzaId": ID_ORIGINAL,
+                            "quotedMessage": {"conversation": "pedido"}}})
         r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL)
         assert r.quote_status == QuoteStatus.OK and r.quoted_ok is True
 
     def test_stanza_de_outra_mensagem_nao_e_quoted_ok(self, cliente, espiao):
+        # Formato da v2.3.7, como no teste acima: ``contextInfo`` no topo.
         espiao.resposta = httpx.Response(201, json={
             "key": {"id": "3EB0RESPOSTA", "remoteJid": GRUPO, "fromMe": True},
-            "message": {"extendedTextMessage": {
-                "text": "resposta", "contextInfo": {"stanzaId": "3EB0OUTRA"}}}})
+            "status": "PENDING", "message": {"conversation": "resposta"},
+            "messageType": "conversation",
+            "contextInfo": {"stanzaId": "3EB0OUTRA",
+                            "quotedMessage": {"conversation": "outro pedido"}}})
         r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL)
         assert r.ok and r.quote_status == QuoteStatus.NOT_APPLIED and r.quoted_ok is False
 

@@ -75,6 +75,52 @@ def agora() -> str:
 
 
 # ============================================================ Evolution falsa
+def resposta_v237(payload: dict, key_id: str, *, imagem: bool, png_sha: str = "") -> dict:
+    """A resposta de ``sendText``/``sendMedia`` como a Evolution v2.3.7 devolve.
+
+    Tirada do codigo-fonte da tag 2.3.7, nao de documentacao: o controller
+    devolve o ``prepareMessage(messageSent)`` de ``whatsapp.baileys.service.ts``.
+    O que importa para o bot:
+
+    * o ``contextInfo`` sobe para o TOPO do objeto;
+    * no texto, o ``extendedTextMessage`` e' APAGADO e vira
+      ``message.conversation`` -- entao ali nao ha' ``stanzaId`` nenhum;
+    * na imagem, o ``contextInfo`` fica no topo E dentro de ``imageMessage``;
+    * sem citacao, ``contextInfo`` nao aparece;
+    * ``stanzaId`` e ``participant`` vem do ``quoted`` pedido (Baileys,
+      ``generateWAMessageFromContent``).
+
+    A versao anterior desta Evolution falsa punha o ``stanzaId`` dentro de
+    ``message.extendedTextMessage`` -- formato que a v2.3.7 nunca devolve
+    para texto. A leitura do bot procura em qualquer nivel e passava; o E2E so'
+    nao provava isso contra o formato real.
+    """
+    contexto = None
+    citado = payload.get("quoted")
+    if isinstance(citado, dict):
+        chave = citado.get("key") or {}
+        contexto = {"stanzaId": chave.get("id"),
+                    "participant": chave.get("participant") or chave.get("remoteJid"),
+                    "quotedMessage": citado.get("message")}
+    if imagem:
+        conteudo = {"caption": payload.get("caption"), "mimetype": "image/png",
+                    "fileSha256": png_sha}
+        if contexto:
+            conteudo["contextInfo"] = contexto
+        mensagem, tipo = {"imageMessage": conteudo}, "imageMessage"
+    else:
+        mensagem, tipo = {"conversation": payload.get("text")}, "conversation"
+    corpo = {"key": {"remoteJid": payload.get("number"), "fromMe": True, "id": key_id},
+             "pushName": "Você", "status": "PENDING", "message": mensagem,
+             "messageType": tipo, "messageTimestamp": int(time.time()),
+             "instanceId": "00000000-0000-4000-8000-00000000e2e0",
+             # getDevice(key.id) do Baileys; este id falso nao casa com nenhum padrao.
+             "source": "unknown"}
+    if contexto:
+        corpo["contextInfo"] = contexto
+    return corpo
+
+
 class EvolutionFalsa:
     """Servidor HTTP no formato da Evolution v2, com falhas programáveis."""
 
@@ -163,19 +209,10 @@ class EvolutionFalsa:
                                      "response": {"message": [regra.get("motivo", "falha simulada")]}}
 
         key_id = f"BAE5E2E{seq:06d}"
-        imagem = "sendMedia" in rota
-        tipo = "imageMessage" if imagem else "extendedTextMessage"
-        conteudo = ({"caption": payload.get("caption"), "mimetype": "image/png",
-                     "fileSha256": registro.get("png_sha", "")}
-                    if imagem else {"text": payload.get("text")})
-        if "quoted" in payload:
-            conteudo["contextInfo"] = {"stanzaId": payload["quoted"]["key"]["id"],
-                                       "participant": payload["quoted"]["key"].get("participant"),
-                                       "quotedMessage": payload["quoted"].get("message")}
         registro["status"] = 201
         registro["key_id"] = key_id
-        return 201, {"key": {"remoteJid": payload.get("number"), "fromMe": True, "id": key_id},
-                     "status": "PENDING", "message": {tipo: conteudo}, "messageType": tipo}
+        return 201, resposta_v237(payload, key_id, imagem="sendMedia" in rota,
+                                  png_sha=registro.get("png_sha", ""))
 
     def envios(self, marca: str = "") -> list[dict]:
         with self._lock:
