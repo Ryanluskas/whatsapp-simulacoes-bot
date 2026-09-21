@@ -42,8 +42,10 @@ telefone: pode ser colado no registro abaixo.
 Webhook (troque os três valores; não salve o comando com eles):
 
 ```bash
-curl -X POST http://localhost:8080/webhook/set/allana -H "apikey: SUA_CHAVE" -H "Content-Type: application/json" -d "{\"webhook\":{\"enabled\":true,\"url\":\"http://ENDERECO_DO_BOT:8000/webhook/whatsapp\",\"webhookByEvents\":false,\"headers\":{\"X-Webhook-Token\":\"SEU_TOKEN\"},\"events\":[\"MESSAGES_UPSERT\",\"CONNECTION_UPDATE\"]}}"
+curl -X POST http://localhost:8080/webhook/set/allana -H "apikey: SUA_CHAVE" -H "Content-Type: application/json" -d "{\"webhook\":{\"enabled\":true,\"url\":\"http://ENDERECO_DO_BOT:8000/webhook/whatsapp\",\"byEvents\":false,\"headers\":{\"X-Webhook-Token\":\"SEU_TOKEN\"},\"events\":[\"MESSAGES_UPSERT\",\"MESSAGES_UPDATE\",\"CONNECTION_UPDATE\"]}}"
 ```
+
+Os três eventos são obrigatórios: a Evolution v2.3.7 só entrega o que está em `events`. Sem `MESSAGES_UPDATE`, nenhum ACK chega ao bot. O campo é `byEvents` (é o nome que o schema da v2.3.7 lê; `webhookByEvents` é ignorado em silêncio) e fica `false`: ligado, a Evolution acrescenta o nome do evento ao fim da URL e a rota do bot não recebe nada. Confira tudo com `python -m app.evolution_diagnostico` (campos `webhook_events` e `avisos`).
 
 A Evolution precisa **alcançar** esse endereço. Se ela roda em Docker/WSL e o
 bot no Windows, `127.0.0.1` não serve, e o firewall do Windows costuma
