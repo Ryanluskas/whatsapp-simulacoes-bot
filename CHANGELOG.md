@@ -33,6 +33,22 @@ PR que a introduz.
     como `unverified` — nunca `ok`;
   - na Evolution, um `stanzaId` diferente do pedido grava o id que voltou e
     marca `not_applied`, com os dois ids no log.
+  - **citação não comprovada não sai citada**: com duas mensagens de texto
+    idêntico visíveis, a barra é **desarmada** antes de digitar e a resposta
+    sai sem citação, com o nome do consultor. `unverified` deixou de poder
+    acompanhar uma resposta apresentada como citada;
+  - o modo DOM se recusa a abrir a conversa quando **duas conversas têm o
+    mesmo nome** na lista — ele identifica o grupo pelo nome, e escolher "a
+    primeira" mandaria dado de cliente para o grupo errado.
+
+### Risco conhecido
+
+- **O modo DOM identifica a conversa pelo NOME do grupo, não pelo JID.** O
+  `chat_id` gravado nas solicitações desse modo é o nome (o JID não aparece na
+  tela do WhatsApp Web). A comparação de conversa funciona, mas é um
+  identificador fraco: dois grupos homônimos são hoje tratados como recusa
+  explícita (o bot não abre e avisa) em vez de risco silencioso. Migrar o modo
+  DOM para um identificador estável fica como dívida técnica.
 
 
 ## [1.0.4] - 2026-09-19
