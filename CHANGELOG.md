@@ -13,6 +13,27 @@ PR que a introduz.
 
 ## [Não lançado]
 
+### Adicionado
+
+- **A Evolution sobe junto com o bot** (Windows + WSL). Ao iniciar, em
+  segundo plano -- o painel abre na hora --, o bot: liga o WSL se a Evolution
+  estiver fora do ar e espera ela responder; **reaponta o webhook se o IP do
+  WSL mudou** (acontece quando o Windows reinicia), se estiver desligado, sem
+  algum evento, com `byEvents` ligado ou com outro token; e avisa no log, com
+  o comando pronto, se o repasse da porta 8001 para o bot sumiu. Nunca derruba
+  a partida, nunca envia mensagem, nunca escreve a chave ou o token no log.
+  Novas opções no `.env`: `EVOLUTION_AUTOSTART` (padrão `true`),
+  `EVOLUTION_WSL_DISTRO` (`Ubuntu`), `EVOLUTION_WEBHOOK_PORTA` (`8001`) e
+  `EVOLUTION_WEBHOOK_URL` (vazia = calcula pelo IP do WSL).
+
+### Mudado
+
+- **`evolution` é o modo padrão do sistema** no `.env.example`, depois do
+  teste real de 21/09/2026: 13 de 13 pedidos citados, com prova. Valor vazio
+  ou com erro de digitação continua caindo em `dom`, e o **instalador de
+  outros PCs continua gravando `dom`** -- lá não há WSL nem Evolution, e o bot
+  se recusaria a subir.
+
 ### Corrigido
 
 - **Evolution v2.3.7: o ACK real volta a ser lido.** A v2.3.7 manda o
