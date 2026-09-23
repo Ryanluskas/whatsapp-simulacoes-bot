@@ -219,6 +219,16 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
     async def monitor(limit: int = Query(150, ge=1, le=500), _: str = Auth):
         return {"items": hub.recent(limit=limit)}
 
+    @api.post("/api/worker/pause")
+    async def worker_pause(_: str = Auth):
+        manager.queue.pause()
+        return manager.system_status_payload()
+
+    @api.post("/api/worker/resume")
+    async def worker_resume(_: str = Auth):
+        manager.queue.resume()
+        return manager.system_status_payload()
+
     @api.get("/api/queue")
     async def queue(_: str = Auth):
         return manager.queue_snapshot()

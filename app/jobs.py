@@ -93,6 +93,7 @@ class QueueService:
         self._pending: "queue.Queue[SimulationJob | None]" = queue.Queue()
         self._threads: list[threading.Thread] = []
         self._stop = threading.Event()
+        self._pause_event = threading.Event()
         self._lock = threading.RLock()
         self._active: dict[str, dict] = {}
         self._timers: set[threading.Timer] = set()
@@ -253,6 +254,7 @@ class QueueService:
 
     def stop(self, timeout: float = 10.0) -> None:
         self._stop.set()
+        self._pause_event.set()
         # Cancela as reenfileiragens agendadas: sem isso um timer pendente
         # acordaria depois do desligamento e empurraria trabalho numa fila morta.
         with self._lock:
@@ -612,11 +614,43 @@ class QueueService:
         )
 
     # ----------------------------------------------------------------- despacho
+
+    def is_paused(self) -> bool:
+        return not self._pause_event.is_set()
+        
+    def pause(self) -> None:
+        self._pause_event.clear()
+        self.db.execute("INSERT INTO meta (key, value) VALUES ('bot_paused', '1') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        self.hub.publish("queue_paused", {"paused": True})
+
+    def resume(self) -> None:
+        self._pause_event.set()
+        self.db.execute("INSERT INTO meta (key, value) VALUES ('bot_paused', '0') ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        self.hub.publish("queue_resumed", {"paused": False})
+
     def _dispatch_loop(self, simulator: SimulatorService) -> None:
         while not self._stop.is_set():
-            job = self._pending.get()
+            # Aguarda se estiver pausado (timeout curto para poder reagir ao stop)
+            self._pause_event.wait(timeout=1.0)
+            if self._stop.is_set():
+                break
+                
+            if not self._pause_event.is_set():
+                continue
+
+            try:
+                job = self._pending.get(timeout=1.0)
+            except queue.Empty:
+                continue
+                
             if job is None:
                 return
+                
+            # Se pausaram logo depois de pegarmos o job
+            if not self._pause_event.is_set():
+                self._pending.put(job)
+                continue
+                
             try:
                 self._process(job, simulator)
             except Exception as exc:  # nunca deixar a thread morrer

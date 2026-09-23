@@ -154,6 +154,10 @@ function wireStream() {
     if (type === "metrics") { store.set("metrics", event.payload); return; }
     if (type === "queue_update") { store.set("queue", event.payload); return; }
     if (type === "whatsapp_status") { store.set("whatsapp", event.payload); return; }
+    if (type === "queue_paused" || type === "queue_resumed") { 
+      api.get("/api/system").then(res => store.set("system", res));
+      return; 
+    }
     if (type === "log") return; // a tela de logs cuida disso sozinha
 
     // Conexão/desconexão contam as duas coisas: viram linha no feed e mudam o estado

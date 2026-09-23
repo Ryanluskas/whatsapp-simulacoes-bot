@@ -2293,12 +2293,19 @@ class BotManager:
             pass
 
     def system_status_payload(self) -> dict:
+        is_paused = self.queue.is_paused()
+        active = self.queue.active
+        if is_paused:
+            pause_state = "pausando" if active else "pausado_manual"
+        else:
+            pause_state = "operando"
+
         return {
             "started_at": self._started_at,
             "whatsapp": self.whatsapp_status_payload(),
             "simulators": [s.status() for s in self.simulators],
             "queue_depth": self.queue.depth(),
-            "active_jobs": self.queue.active,
+            "active_jobs": active,
             "worker_count": self.config.worker_count,
             "group_name": self.config.whatsapp_group_name,
             "supported_banks": sorted(b.title() for b in self.config.supported_banks),
@@ -2306,6 +2313,8 @@ class BotManager:
             "simulator_mode": self.config.simulator_mode,
             "timezone": self.config.timezone,
             "mask_cpf": self.config.mask_cpf_in_ui,
+            "pause_state": pause_state,
+            "queue_paused": is_paused,
         }
 
     def reconnect_whatsapp(self) -> None:

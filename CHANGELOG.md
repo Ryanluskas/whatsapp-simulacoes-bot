@@ -21,6 +21,9 @@ PR que a introduz.
 
 ### Adicionado
 
+- **Diagnóstico Exato de Recusa:** O bot agora explica textualmente (tanto na legenda do WhatsApp quanto no fallback textual) por que não liberou refinanciamento. Quando houver recusa por restrição, ele exibe as linhas literais do portal (ex: "RATING RISCOS = 2"). Quando não houver margem mas houver contratos, ele exibe os dados dos contratos em formato de lista textual para a avaliação manual do consultor.
+- **Modo Pausa Seguro:** O botão de pausar no painel agora executa uma interrupção *real* e segura no backend. Ao clicar, a simulação atual (se houver) é finalizada e a fila de processamento fica congelada de modo seguro e persistente no banco de dados. Isso previne qualquer processamento paralelo enquanto o operador usa o portal manualmente.
+
 - **A Evolution sobe junto com o bot** (Windows + WSL). Ao iniciar, em
   segundo plano -- o painel abre na hora --, o bot: liga o WSL se a Evolution
   estiver fora do ar e espera ela responder; **reaponta o webhook se o IP do
@@ -108,6 +111,9 @@ PR que a introduz.
 - O atalho do Desktop agora é criado corretamente mesmo em computadores que usam OneDrive para sincronizar a Área de Trabalho.
 
 ### Adicionado
+
+- **Diagnóstico Exato de Recusa:** O bot agora explica textualmente (tanto na legenda do WhatsApp quanto no fallback textual) por que não liberou refinanciamento. Quando houver recusa por restrição, ele exibe as linhas literais do portal (ex: "RATING RISCOS = 2"). Quando não houver margem mas houver contratos, ele exibe os dados dos contratos em formato de lista textual para a avaliação manual do consultor.
+- **Modo Pausa Seguro:** O botão de pausar no painel agora executa uma interrupção *real* e segura no backend. Ao clicar, a simulação atual (se houver) é finalizada e a fila de processamento fica congelada de modo seguro e persistente no banco de dados. Isso previne qualquer processamento paralelo enquanto o operador usa o portal manualmente.
 - **Integração Webhook Evolution:** 
   - `connection.update`: Reflete instantaneamente quedas de conexão ou retornos de QR code direto na interface.
   - `messages.update`: Identifica ACKs de leitura. Corrige falsos negativos onde o envio dá timeout, mas a resposta de ACK do servidor prova que a mensagem foi entregue (impedindo que a solicitação trave em "Não confirmada").
@@ -246,6 +252,9 @@ código revisado e testado com dublês, não um teste em produção.
 Primeira versão marcada: o bot em produção no modo `dom` (WhatsApp Web).
 
 ### Adicionado
+
+- **Diagnóstico Exato de Recusa:** O bot agora explica textualmente (tanto na legenda do WhatsApp quanto no fallback textual) por que não liberou refinanciamento. Quando houver recusa por restrição, ele exibe as linhas literais do portal (ex: "RATING RISCOS = 2"). Quando não houver margem mas houver contratos, ele exibe os dados dos contratos em formato de lista textual para a avaliação manual do consultor.
+- **Modo Pausa Seguro:** O botão de pausar no painel agora executa uma interrupção *real* e segura no backend. Ao clicar, a simulação atual (se houver) é finalizada e a fila de processamento fica congelada de modo seguro e persistente no banco de dados. Isso previne qualquer processamento paralelo enquanto o operador usa o portal manualmente.
 
 - Leitura dos pedidos no grupo, simulação no portal do Santander e resposta
   com card de resultado.
