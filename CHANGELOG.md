@@ -13,6 +13,12 @@ PR que a introduz.
 
 ## [Não lançado]
 
+### Corrigido
+
+- CPFs com 10 dígitos (faltando o 0 inicial ou final) passam a ser corrigidos e aceitos automaticamente pelo analisador.
+- CPFs enviados de forma espaçada ou com pontuação junto a outros dados passam a ser lidos corretamente sem falsos positivos.
+- O bot passa a ignorar silenciosamente mensagens sem CPF, Nome e Convênio, e encaminhamentos de resultados antigos (com palavras-chave de retorno), sem gerar loop ou respostas indevidas no grupo.
+
 ### Adicionado
 
 - **A Evolution sobe junto com o bot** (Windows + WSL). Ao iniciar, em

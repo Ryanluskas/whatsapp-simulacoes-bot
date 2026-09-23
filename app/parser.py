@@ -94,12 +94,24 @@ def has_trigger(text: str) -> bool:
     return bool(TRIGGER_RE.search(text or ""))
 
 
+def fix_cpf(digitos: str) -> str:
+    if len(digitos) == 11 and is_valid_cpf(digitos):
+        return digitos
+    if len(digitos) == 10:
+        if is_valid_cpf(digitos + "0"):
+            return digitos + "0"
+        if is_valid_cpf("0" + digitos):
+            return "0" + digitos
+    return ""
+
+
 def find_cpf(text: str) -> str:
     """Primeiro CPF *válido* do texto. É o que identifica um pedido."""
     for bruto in CPF_SOLTO_RE.findall(text or ""):
         digitos = only_digits(bruto)
-        if len(digitos) == 11 and is_valid_cpf(digitos):
-            return digitos
+        arrumado = fix_cpf(digitos)
+        if arrumado:
+            return arrumado
     return ""
 
 
@@ -141,14 +153,17 @@ def parse_request(
             livres.append(linha)
 
     # ------------------------------------------------------------------ CPF
-    cpf = only_digits(campos.get("cpf", "")) or find_cpf(text)
+    cpf_explicito = only_digits(campos.get("cpf", ""))
+    cpf = fix_cpf(cpf_explicito) if cpf_explicito else find_cpf(text)
 
     if not cpf:
         # Sem CPF não há pedido. Mas convém separar dois casos bem diferentes:
         # o consultor mandou um número que PARECE CPF e está errado (avisar
         # que os dígitos não conferem), ou foi conversa comum (ignorar calado).
         candidatos = [only_digits(b) for b in CPF_SOLTO_RE.findall(text)]
-        if any(len(d) == 11 for d in candidatos):
+        if cpf_explicito:
+            candidatos.append(cpf_explicito)
+        if any(len(d) >= 10 for d in candidatos):
             return None, ["CPF válido (dígitos verificadores não conferem)"]
         if has_trigger(text) or any(len(d) >= 9 for d in candidatos):
             return None, ["CPF"]
@@ -180,6 +195,14 @@ def parse_request(
     if nome_cliente.lower() in estados and orgao.lower() not in estados and orgao != "":
         nome_cliente, orgao = orgao, nome_cliente
 
+    # Ignora silenciosamente se parecer um resultado encaminhado do próprio bot ou faltar nome/convênio
+    texto_lower = text.lower()
+    if any(kw in texto_lower for kw in ["saldo devedor", "valor da parcela", "matricula siape", "decisao manual", "renegociacao", "parcelas pagas", "possui produto"]):
+        return None, []
+
+    if not nome_cliente or not orgao:
+        return None, []
+
     consultor = (campos.get("consultor") or fallback_consultant or "Consultor").strip()
 
     return (
@@ -191,7 +214,7 @@ def parse_request(
             bank=(campos.get("banco") or default_bank).strip(),
             contract=re.sub(r"\s+", "", campos.get("contrato", "")),
             simulation_type=(campos.get("tipo") or "consignado").strip().lower(),
-            customer_name=nome_cliente or "Lead",
+            customer_name=nome_cliente,
             origin=orgao,
             phone=only_digits(campos.get("telefone") or campos.get("celular") or ""),
         ),
