@@ -43,6 +43,7 @@ FIELD_RE = re.compile(r"^\s*([\w\s/.çãáàâéêíóôõú-]{2,30}?)\s*[:=]\s*
 # 11 dígitos, aceitando os separadores que aparecem no grupo:
 # 31611176034 · 182.841.754.87 · 529.982.247-25 · 118 902 594 97
 CPF_SOLTO_RE = re.compile(r"(?<!\d)(\d[\d.\-\s]{9,17}\d)(?!\d)")
+MATRICULA_SOLTA_RE = re.compile(r"(?<!\d)(\d{6,10})(?!\d)")
 
 _ACCENTS = str.maketrans("çãáàâäéêëíïóôõöúüñ", "caaaaaeeeiioooouun")
 
@@ -94,13 +95,51 @@ def has_trigger(text: str) -> bool:
     return bool(TRIGGER_RE.search(text or ""))
 
 
+def fix_cpf(digitos: str) -> str:
+    if len(digitos) == 11 and is_valid_cpf(digitos):
+        return digitos
+    if len(digitos) == 10:
+        if is_valid_cpf(digitos + "0"):
+            return digitos + "0"
+        if is_valid_cpf("0" + digitos):
+            return "0" + digitos
+    return ""
+
+
 def find_cpf(text: str) -> str:
     """Primeiro CPF *válido* do texto. É o que identifica um pedido."""
     for bruto in CPF_SOLTO_RE.findall(text or ""):
         digitos = only_digits(bruto)
-        if len(digitos) == 11 and is_valid_cpf(digitos):
-            return digitos
+        arrumado = fix_cpf(digitos)
+        if arrumado:
+            return arrumado
     return ""
+
+
+
+def find_all_cpfs(text: str) -> list[str]:
+    """Todos os CPFs *válidos* do texto."""
+    cpfs = []
+    for bruto in CPF_SOLTO_RE.findall(text or ""):
+        digitos = only_digits(bruto)
+        arrumado = fix_cpf(digitos)
+        if arrumado and arrumado not in cpfs:
+            cpfs.append(arrumado)
+    return cpfs
+
+def find_all_matriculas(text: str) -> list[str]:
+    """Todas as matrículas no texto (6 a 10 dígitos) caso a palavra 'matricula' esteja presente."""
+    import unicodedata
+    text_lower = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode("utf-8").lower()
+    if "matricula" not in text_lower:
+        return []
+    
+    matriculas = []
+    for bruto in MATRICULA_SOLTA_RE.findall(text or ""):
+        if len(bruto) >= 6 and len(bruto) <= 10:
+            if bruto not in matriculas:
+                matriculas.append(bruto)
+    return matriculas
 
 
 def _e_ruido(linha: str) -> bool:
@@ -125,7 +164,7 @@ def parse_request(
     if require_trigger and not has_trigger(text):
         return None, []
 
-    linhas_brutas = [ln.strip() for ln in text.replace("\r", "\n").split("\n")]
+    linhas_brutas = [ln.strip() for ln in text.splitlines()]
     linhas_brutas = [ln for ln in linhas_brutas if ln]
 
     campos: dict[str, str] = {}
@@ -141,14 +180,26 @@ def parse_request(
             livres.append(linha)
 
     # ------------------------------------------------------------------ CPF
-    cpf = only_digits(campos.get("cpf", "")) or find_cpf(text)
+    cpf_explicito = only_digits(campos.get("cpf", ""))
+    cpfs_encontrados = find_all_cpfs(text)
+    matriculas_encontradas = find_all_matriculas(text)
+    
+    cpf = fix_cpf(cpf_explicito) if cpf_explicito else (cpfs_encontrados[0] if cpfs_encontrados else (matriculas_encontradas[0] if matriculas_encontradas else ""))
+    
+    # Combinamos CPFs e Matrículas para a fila
+    todos_para_simular = cpfs_encontrados + matriculas_encontradas
+    # Remover duplicatas mantendo ordem
+    todos_para_simular = list(dict.fromkeys(todos_para_simular))
+    multiplos_cpfs = len(todos_para_simular) > 1
 
     if not cpf:
         # Sem CPF não há pedido. Mas convém separar dois casos bem diferentes:
         # o consultor mandou um número que PARECE CPF e está errado (avisar
         # que os dígitos não conferem), ou foi conversa comum (ignorar calado).
         candidatos = [only_digits(b) for b in CPF_SOLTO_RE.findall(text)]
-        if any(len(d) == 11 for d in candidatos):
+        if cpf_explicito:
+            candidatos.append(cpf_explicito)
+        if any(len(d) >= 10 for d in candidatos):
             return None, ["CPF válido (dígitos verificadores não conferem)"]
         if has_trigger(text) or any(len(d) >= 9 for d in candidatos):
             return None, ["CPF"]
@@ -180,18 +231,27 @@ def parse_request(
     if nome_cliente.lower() in estados and orgao.lower() not in estados and orgao != "":
         nome_cliente, orgao = orgao, nome_cliente
 
+    # Ignora silenciosamente se parecer um resultado encaminhado do próprio bot ou faltar nome/convênio
+    texto_lower = text.lower()
+    if any(kw in texto_lower for kw in ["saldo devedor", "valor da parcela", "matricula siape", "decisao manual", "renegociacao", "parcelas pagas", "possui produto"]):
+        return None, []
+
+    if not nome_cliente or not orgao:
+        return None, []
+
     consultor = (campos.get("consultor") or fallback_consultant or "Consultor").strip()
 
     return (
         ParsedRequest(
             consultant_name=consultor,
             cpf=cpf,
+            all_cpfs=todos_para_simular,
             # Banco e contrato são opcionais: o grupo não os informa, e o
             # contrato só existe depois que a simulação roda.
             bank=(campos.get("banco") or default_bank).strip(),
             contract=re.sub(r"\s+", "", campos.get("contrato", "")),
             simulation_type=(campos.get("tipo") or "consignado").strip().lower(),
-            customer_name=nome_cliente or "Lead",
+            customer_name=nome_cliente,
             origin=orgao,
             phone=only_digits(campos.get("telefone") or campos.get("celular") or ""),
         ),

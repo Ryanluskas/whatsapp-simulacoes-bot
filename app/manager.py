@@ -155,6 +155,7 @@ class BotManager:
             on_log=self._queue_log,
             alerta_fila=config.alerta_fila,
             alerta_espera_s=config.alerta_espera_minutos * 60,
+            start_paused=config.queue_paused_at_startup,
         )
 
         self._stop = threading.Event()
@@ -284,6 +285,8 @@ class BotManager:
         if self.config.simulator_enabled and self.config.simulator_mode == "local":
             self._spawn(self._warm_simulators, "warmup")
         self.whatsapp.start()
+        
+        self._sincronizar_historico_evolution()
 
         self._spawn(self._inbox_loop, "inbox")
         self._spawn(self._metrics_loop, "metrics")
@@ -927,7 +930,25 @@ class BotManager:
             "created_at": now_iso(),
         })
 
-    def _abrir_entrada(self, message: IncomingMessage) -> int | None:
+    def _spawn_jobs(self, message: IncomingMessage, consultor: "Consultor", parsed: ParsedRequest, entrada_id: int, request_id: str) -> None:
+        effective_name = parsed.customer_name or consultor.nome
+        cpfs_to_simulate = getattr(parsed, "all_cpfs", []) or [parsed.cpf]
+        
+        if len(cpfs_to_simulate) > 1:
+            self.log("INFO", "whatsapp", f"Processando {len(cpfs_to_simulate)} CPFs na mesma mensagem", request_id=request_id)
+        
+        from dataclasses import replace
+        for i, cpf in enumerate(cpfs_to_simulate):
+            sub_parsed = replace(parsed, cpf=cpf)
+            sub_req_id = request_id if len(cpfs_to_simulate) == 1 else f"{request_id}-{i+1}"
+            criada = self._gravar_solicitacao(
+                message, consultor, sub_parsed, effective_name, 
+                entrada_id if i == 0 else None, sub_req_id)
+            if criada:
+                _, simulation_id = criada
+                self._enfileirar(message, consultor, sub_parsed, effective_name, sub_req_id, simulation_id)
+
+    def _abrir_entrada(self, message: IncomingMessage) -> tuple[int, str] | None:
         """Grava a mensagem e devolve o id da linha -- ou None se ja' foi tratada.
 
         A gravacao e' a trava: se esta mensagem ja' foi tratada (reentrega,
@@ -957,7 +978,8 @@ class BotManager:
                      f"{existente['request_id']}; não crio outra.",
                      request_id=existente["request_id"])
             return None
-        return entrada["id"]
+        request_id = entrada.get('request_id') or ''
+        return entrada["id"], request_id
 
     def _marcar_entrada(self, entrada_id: int | None, status: str, **extra) -> None:
         if entrada_id:
@@ -1001,8 +1023,115 @@ class BotManager:
                      "para a leitura.")
         return retomadas
 
+    def _sincronizar_historico_evolution(self) -> None:
+        if not self.config.evolution_catchup_enabled or self.config.whatsapp_mode != "evolution":
+            return
+
+        self.log("INFO", "evolution", "Iniciando sincronização de mensagens perdidas...")
+        
+        # 1. Obter checkpoint (timestamp do ultimo sync)
+        checkpoint_str = self.db.get_meta("last_evolution_sync", "")
+        last_sync_ts = int(checkpoint_str) if checkpoint_str.isdigit() else 0
+        
+        # 2. O default para oldest_allowed é utc_now() - max_age_hours
+        max_age = self.config.evolution_catchup_max_age_hours
+        limite = int((utc_now() - timedelta(hours=max_age)).timestamp())
+        
+        alvo_ts = max(last_sync_ts, limite)
+        
+        page = 1
+        novas = 0
+        conhecidas = 0
+        ignoradas_idade = 0
+        ignoradas_grupo = 0
+        
+        todas_encontradas = []
+        maior_ts_visto = last_sync_ts
+        falhou_paginacao = False
+        
+        from app.evolution_webhook import _interpretar_uma
+        
+        while True:
+            try:
+                res = self.whatsapp.find_messages(limit=50, page=page)
+            except AttributeError:
+                break # Nao tem find_messages (ex: whatsapp_mode=dom mas algo forcou a config)
+            except Exception as exc:
+                self.log("ERROR", "evolution", f"Erro na sincronização: {_curto(exc)}")
+                falhou_paginacao = True
+                break
+                
+            records = res.get("messages", {}).get("records") or []
+            if not records:
+                break
+                
+            chegou_no_fundo = False
+            
+            for record in records:
+                ts = int(record.get("messageTimestamp") or 0)
+                if ts > maior_ts_visto:
+                    maior_ts_visto = ts
+                    
+                if ts <= alvo_ts:
+                    chegou_no_fundo = True
+                    break
+                    
+                todas_encontradas.append((ts, record))
+                
+            if chegou_no_fundo or len(records) < 50:
+                break
+            page += 1
+            if page > 10: # seguranca
+                break
+                
+        todas_encontradas.sort(key=lambda x: x[0])
+        
+        for ts, record in todas_encontradas:
+            leitura = _interpretar_uma(
+                record, 
+                self.config.evolution_group_jid, 
+                self.config.whatsapp_group_name
+            )
+            
+            if leitura.motivo != "ok":
+                if leitura.motivo.startswith("outra conversa"):
+                    ignoradas_grupo += 1
+                continue
+                
+            if ts < limite:
+                ignoradas_idade += 1
+                self.log("WARNING", "evolution", 
+                         f"Mensagem {leitura.mensagem.message_id} velha demais para ser respondida ({ts}).")
+                continue
+                
+            try:
+                # receber_mensagem levanta erro se falhar, senao retorna ditado
+                resultado = self.receber_mensagem(leitura.mensagem)
+                if resultado.get("aceita") is False and resultado.get("motivo") == "duplicada":
+                    conhecidas += 1
+                else:
+                    novas += 1
+            except Exception as exc:
+                self.log("ERROR", "evolution", f"Falha ao processar catch-up de {leitura.mensagem.message_id}: {_curto(exc)}")
+                
+        if not falhou_paginacao and maior_ts_visto > 0:
+            self.db.set_meta("last_evolution_sync", str(maior_ts_visto))
+        
+        self.log("INFO", "evolution", 
+                 f"Sincronização concluída. Histórico lido: {len(todas_encontradas)} | "
+                 f"Novas: {novas} | Já conhecidas: {conhecidas} | "
+                 f"Ignoradas (grupo): {ignoradas_grupo} | Ignoradas (idade): {ignoradas_idade}")
+
     def _inbox_loop(self) -> None:
+        import time
+        last_retomada = time.monotonic()
         while not self._stop.is_set():
+            if time.monotonic() - last_retomada > 60:
+                try:
+                    self._retomar_entradas()
+                except Exception as exc:
+                    self.log("ERROR", "bot", f"Falha ao retomar entradas: {exc}")
+                last_retomada = time.monotonic()
             try:
                 message = self.whatsapp.inbox.get(timeout=0.5)
             except Exception:
@@ -1132,7 +1261,7 @@ class BotManager:
 
     def _gravar_solicitacao(self, message: IncomingMessage, consultor: "Consultor",
                             parsed: ParsedRequest, effective_name: str,
-                            entrada_id: int | None = None) -> tuple[str, int] | None:
+                            entrada_id: int | None = None, request_id: str = "") -> tuple[str, int] | None:
         """Grava a solicitacao e devolve (request_id, simulation_id) -- ou None.
 
         O ``request_id`` nasce aqui e acompanha a solicitacao ate' a resposta:
@@ -1148,7 +1277,7 @@ class BotManager:
         (retomada + reentrega) nao criam duas simulacoes. O REQ reservado
         antes fica sem uso -- um numero pulado, nunca um pedido duplicado.
         """
-        request_id = self._next_request_id()
+        request_id = request_id  # Ja gerado antes
         dados = self._linha_da_solicitacao(request_id, message, consultor,
                                            parsed, effective_name)
         with self.db.write() as conn:
@@ -1191,8 +1320,8 @@ class BotManager:
         """
         existente = conn.execute(
             "SELECT id, request_id FROM simulations "
-            " WHERE source_message_id=? AND COALESCE(chat_id,'')=? LIMIT 1",
-            (message.message_id, message.chat_id or ""),
+            " WHERE source_message_id=? AND COALESCE(chat_id,'')=? AND cpf=? LIMIT 1",
+            (message.message_id, message.chat_id or "", dados.get("cpf", "")),
         ).fetchone() if message.message_id else None
         if existente is not None:
             if entrada_id:
@@ -1228,10 +1357,13 @@ class BotManager:
         a quem responder. Nada disso e' redescoberto depois.
         """
         stamp = now_iso()
+        import time
         return {
+            "queue_position": time.time(),
             "request_id": request_id,
             "consultant_id": consultor.id,
-            "consultant_name": effective_name,
+            "consultant_name": consultor.nome,
+            "customer_name": effective_name,
             "chat_id": message.chat_id,
             "chat_name": message.chat_name,
             "sender_id": message.sender_id,
@@ -1243,7 +1375,6 @@ class BotManager:
             "bank": parsed.bank,
             "contract": parsed.contract,
             "phone": parsed.phone,
-            "customer_name": parsed.customer_name,
             "origin": parsed.origin,
             "simulation_type": parsed.simulation_type,
             "status": Status.QUEUED,
@@ -1259,6 +1390,8 @@ class BotManager:
                     parsed: ParsedRequest, effective_name: str,
                     request_id: str, simulation_id: int) -> None:
         """Poe na fila e avisa o consultor SO' se ele for esperar."""
+        row = self.db.fetchone("SELECT queue_position FROM simulations WHERE id=?", (simulation_id,))
+        queue_position = float(row["queue_position"] or 0.0) if row else 0.0
         job = SimulationJob(
             request=parsed,
             message=message,
@@ -1266,6 +1399,7 @@ class BotManager:
             simulation_id=simulation_id,
             consultant_id=consultor.id,
             attempt=1,
+            queue_position=queue_position,
         )
         position = self.queue.submit(job)
         self.log(
@@ -1294,59 +1428,50 @@ class BotManager:
             )
             return
 
-        entrada_id = self._abrir_entrada(message)
-        if entrada_id is None:
-            return  # ja' tratada: UMA mensagem, UMA solicitacao
+        abertura = self._abrir_entrada(message)
+        if abertura is None:
+            return  # ja' tratada
+        entrada_id, request_id = abertura
 
-        consultor = self._identificar_e_registrar(message, entrada_id)
+        try:
+            consultor = self._identificar_e_registrar(message, entrada_id)
 
-        parsed, missing = parse_request(
-            message.text,
-            fallback_consultant=consultor.nome,
-            require_trigger=self.config.require_trigger,
-            default_bank=self.config.default_bank,
-        )
+            parsed, missing = parse_request(
+                message.text,
+                fallback_consultant=consultor.nome,
+                require_trigger=self.config.require_trigger,
+                default_bank=self.config.default_bank,
+            )
 
-        if parsed is None and not missing:
-            self._marcar_entrada(entrada_id, ENTRADA_IGNORADA)
-            return  # conversa normal do grupo, nao e' um pedido
+            if parsed is None and not missing:
+                self._marcar_entrada(entrada_id, ENTRADA_IGNORADA)
+                self.log("INFO", "whatsapp", f"Mensagem ignorada (não é simulação).", request_id=request_id)
+                return  # conversa normal do grupo
 
-        if missing:
-            self._marcar_entrada(entrada_id, ENTRADA_RECUSADA)
-            self._recusar(message, consultor, mensagens.faltando(missing, consultor.nome),
-                          etiqueta="missing", motivo="dados incompletos",
-                          titulo="Dados incompletos",
-                          detalhe=f"{consultor.nome} · faltou: {', '.join(missing)}",
-                          extra={"missing": missing})
-            return
+            if missing:
+                self._marcar_entrada(entrada_id, ENTRADA_RECUSADA)
+                self.log("INFO", "whatsapp", f"Mensagem recusada: {', '.join(missing)}", request_id=request_id)
+                self._recusar(message, consultor, mensagens.faltando(missing, consultor.nome),
+                              etiqueta="missing", motivo="dados incompletos",
+                              titulo="Dados incompletos",
+                              detalhe=f"{consultor.nome}  faltou: {', '.join(missing)}",
+                              extra={"missing": missing})
+                return
 
-        # O nome do consultor e' o do cadastro/WhatsApp. A linha solta da
-        # mensagem so' vale se ainda nao houver um consultor conhecido.
-        effective_name = consultor.nome if consultor.conhecido else parsed.consultant_name
-        # `replace` em vez de reconstruir campo a campo: um campo novo em
-        # ParsedRequest passaria batido e seria silenciosamente perdido aqui
-        # (foi o que quase aconteceu com `origin`).
-        parsed = replace(parsed, consultant_name=effective_name)
+            if not self.config.bank_supported(parsed.bank):
+                self._marcar_entrada(entrada_id, ENTRADA_RECUSADA)
+                self.log("INFO", "whatsapp", f"Banco não suportado: {parsed.bank}", request_id=request_id)
+                self._recusar(message, consultor, mensagens.banco_nao_atendido(consultor.nome, parsed.bank, self.config.supported_banks),
+                              etiqueta="unsupported_bank", motivo=f"banco {parsed.bank} nao configurado",
+                              titulo="Banco no configurado",
+                              detalhe=f"{consultor.nome}  {parsed.bank}",
+                              extra={"bank": parsed.bank})
+                return
 
-        if not self.config.bank_supported(parsed.bank):
-            self._marcar_entrada(entrada_id, ENTRADA_RECUSADA)
-            self._recusar(
-                message, consultor._replace(nome=effective_name),
-                mensagens.banco_nao_atendido(
-                    effective_name, parsed.bank, self.config.supported_banks),
-                etiqueta="unsupported", motivo="banco não suportado",
-                titulo="Banco não suportado",
-                detalhe=f"{effective_name} · {parsed.bank}",
-                extra={"bank": parsed.bank})
-            return
-
-        criada = self._gravar_solicitacao(
-            message, consultor, parsed, effective_name, entrada_id)
-        if criada:
-            self._enfileirar(message, consultor, parsed, effective_name, *criada)
-
-    def _next_request_id(self) -> str:
-        return f"REQ{self.db.bump_meta('request_seq', 1):06d}"
+            self._spawn_jobs(message, consultor, parsed, entrada_id, request_id)
+        except Exception as exc:
+            self.log("ERROR", "bot", f"Falha ao tratar a mensagem: {exc}", request_id=request_id)
+            self._marcar_entrada(entrada_id, "error", error=str(exc))
 
     # -------------------------------------------------------------- saida
     def _anotar_citacao(self, resultado, request_id: str, consultor: str) -> None:
@@ -1752,10 +1877,25 @@ class BotManager:
           request_id.
         """
         job = result.job
+        
+        # Multi-CPF: Verifica se existem outras simulações da mesma mensagem pendentes
+        irmas = self.db.fetchall(
+            "SELECT * FROM simulations WHERE source_message_id = ?",
+            (job.message.message_id,)
+        ) if job.message.message_id else []
+        
+        pendentes = [r for r in irmas if r["status"] not in ("completed", "failed") and r["id"] != job.simulation_id]
+        if pendentes:
+            self.log("INFO", "whatsapp", f"Aguardando {len(pendentes)} simulações irmãs para enviar a resposta conjunta.", request_id=job.request_id)
+            return Entrega.OK
+            
+        # Se for Multi-CPF, mandamos apenas texto consolidado
+        is_multi = len(irmas) > 1
+        
         registro_img: dict = {}
         media_status = "disabled"
         enviado_imagem = False
-        if self.config.send_result_image:
+        if self.config.send_result_image and not is_multi:
             enviado_imagem = self._send_result_image(result, registro=registro_img)
             media_status = registro_img.get("media_status") or (
                 "ok" if enviado_imagem else "send_failed")
@@ -1767,10 +1907,37 @@ class BotManager:
             if media_status in ("render_failed", "invalid"):
                 # A imagem nem chegou a subir: a etapa ainda diz "gerando imagem".
                 self._etapa(job, Stage.REPLYING)
-            com_citacao, sem_citacao = mensagens.duas_versoes(
-                mensagens.texto, result, job.request_id,
-                self.config.mask_cpf_in_ui,
-                consultor=job.request.consultant_name)
+            
+            if is_multi:
+                # Usa os dados da última (atual) e as do BD para compor o blocão
+                todas_linhas = []
+                for irma in irmas:
+                    irma_dict = dict(irma)
+                    if irma_dict["id"] == job.simulation_id:
+                        irma_dict["status"] = "completed" if result.ok else "error"
+                        irma_dict["error_message"] = (result.error or result.status) if not result.ok else ""
+                        irma_dict["reduction_value"] = result.reduction_value
+                        irma_dict["has_refin"] = result.has_refin
+                        import json
+                        irma_dict["motivos_portal"] = json.dumps(list(result.motivos or ()))
+                    
+                    txt = mensagens.resultado_reenviado(irma_dict, mascarar=True, consultor="", citou=False)
+                    # Remover o rodape do reenviado
+                    txt = re.sub(r"\(reenviado do sistema\)", "", txt).strip()
+                    todas_linhas.append(txt)
+                
+                texto_base = "\n\n---\n\n".join(todas_linhas)
+                req_base = job.request_id.split("-")[0]
+                rodape_citou = f"\n\n_{req_base}_"
+                rodape_sem = f"\n\nŸ {job.request.consultant_name}\n_{req_base}_"
+                
+                com_citacao = texto_base + rodape_citou
+                sem_citacao = texto_base + rodape_sem
+            else:
+                com_citacao, sem_citacao = mensagens.duas_versoes(
+                    mensagens.texto, result, job.request_id,
+                    self.config.mask_cpf_in_ui,
+                    consultor=job.request.consultant_name)
             registro_txt: dict = {}
             enviado = self._send_reply(
                 job.message,
@@ -2293,12 +2460,19 @@ class BotManager:
             pass
 
     def system_status_payload(self) -> dict:
+        is_paused = self.queue.is_paused()
+        active = self.queue.active
+        if is_paused:
+            pause_state = "pausando" if active else "pausado_manual"
+        else:
+            pause_state = "operando"
+
         return {
             "started_at": self._started_at,
             "whatsapp": self.whatsapp_status_payload(),
             "simulators": [s.status() for s in self.simulators],
             "queue_depth": self.queue.depth(),
-            "active_jobs": self.queue.active,
+            "active_jobs": active,
             "worker_count": self.config.worker_count,
             "group_name": self.config.whatsapp_group_name,
             "supported_banks": sorted(b.title() for b in self.config.supported_banks),
@@ -2306,6 +2480,8 @@ class BotManager:
             "simulator_mode": self.config.simulator_mode,
             "timezone": self.config.timezone,
             "mask_cpf": self.config.mask_cpf_in_ui,
+            "pause_state": pause_state,
+            "queue_paused": is_paused,
         }
 
     def reconnect_whatsapp(self) -> None:
@@ -2351,3 +2527,56 @@ class BotManager:
 
     def stage_labels(self) -> dict[str, str]:
         return dict(STAGE_LABELS)
+
+    def reorder_queue(self, sim_id: int, action: str) -> None:
+        """Move um item na fila ajustando o queue_position."""
+        with self.db.write() as conn:
+            row = conn.execute("SELECT id, queue_position, status FROM simulations WHERE id=?", (sim_id,)).fetchone()
+            if not row or row["status"] != "queued":
+                return
+                
+            current_pos = float(row["queue_position"] or 0.0)
+            
+            if action == "top":
+                first = conn.execute("SELECT MIN(queue_position) FROM simulations WHERE status='queued'").fetchone()[0]
+                new_pos = float(first) - 1.0 if first is not None else current_pos
+            elif action == "bottom":
+                last = conn.execute("SELECT MAX(queue_position) FROM simulations WHERE status='queued'").fetchone()[0]
+                new_pos = float(last) + 1.0 if last is not None else current_pos
+            elif action == "up":
+                above = conn.execute("SELECT queue_position FROM simulations WHERE status='queued' AND queue_position < ? ORDER BY queue_position DESC LIMIT 2", (current_pos,)).fetchall()
+                if not above:
+                    new_pos = current_pos
+                elif len(above) == 1:
+                    new_pos = float(above[0][0]) - 1.0
+                else:
+                    new_pos = (float(above[0][0]) + float(above[1][0])) / 2.0
+            elif action == "down":
+                below = conn.execute("SELECT queue_position FROM simulations WHERE status='queued' AND queue_position > ? ORDER BY queue_position ASC LIMIT 2", (current_pos,)).fetchall()
+                if not below:
+                    new_pos = current_pos
+                elif len(below) == 1:
+                    new_pos = float(below[0][0]) + 1.0
+                else:
+                    new_pos = (float(below[0][0]) + float(below[1][0])) / 2.0
+            else:
+                return
+
+            if new_pos != current_pos:
+                conn.execute("UPDATE simulations SET queue_position=? WHERE id=?", (new_pos, sim_id))
+                
+        # Re-injetar na PriorityQueue. O item antigo ser ignorado pelo check do BD.
+        # Mas para criar um SimulationJob completo, precisamos da request etc.
+        # Faremos o QueueService submeter de novo:
+        self.queue.reinject_job(sim_id)
+        
+    def remove_from_queue(self, sim_id: int) -> None:
+        """Remove da fila."""
+        with self.db.write() as conn:
+            row = conn.execute("SELECT status, request_id FROM simulations WHERE id=?", (sim_id,)).fetchone()
+            if not row or row["status"] != "queued":
+                return
+            conn.execute("UPDATE simulations SET status='removed', stage='removed', updated_at=? WHERE id=?", (now_iso(), sim_id))
+            
+        self.hub.publish("queue_update", self.queue_snapshot(), persist=False)
+        self.log("INFO", "sistema", "Simulação removida da fila manualmente", request_id=row["request_id"])

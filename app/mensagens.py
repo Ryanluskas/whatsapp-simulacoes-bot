@@ -163,29 +163,7 @@ def _rodape(request_id: str, consultor: str = "", citou: bool = True) -> list[st
     return linhas
 
 
-def legenda(result, request_id: str, consultor: str = "", citou: bool = True) -> str:
-    """Legenda da imagem. Curta: o card carrega o detalhe.
 
-    Nao leva CPF nem contagem de contratos de proposito -- os dois estao
-    impressos no card, logo acima.
-    """
-    pedido = result.job.request
-    cliente = _cliente_do(pedido)
-
-    if not result.ok:
-        # O motivo ENTRA na legenda, ao contrario dos outros casos.
-        #
-        # A regra geral e' nao repetir o que o card ja' mostra. Num erro ela
-        # nao se aplica: o motivo e' a unica informacao util da resposta, e
-        # deixa-lo so' dentro da imagem obriga o consultor a abrir e ler o
-        # card para descobrir se o problema foi dele, do CPF ou do banco.
-        motivo = (result.error or result.status or "").strip()
-        cabeca = f"{EMOJI_ERRO} *Não consegui simular*"
-        cliente = _cliente_do(pedido)
-        linhas = [cabeca + (f" · {cliente}" if cliente else "")]
-        if motivo:
-            linhas.append(motivo)
-        return "\n".join([*linhas, *_rodape(request_id, consultor, citou)])
     libera = float(result.reduction_value or 0)
     liberou = bool(result.has_refin and libera > 0)
     cabeca = (f"{EMOJI_LIBERA} *{_brl(libera)}*" if liberou
@@ -205,29 +183,7 @@ def legenda(result, request_id: str, consultor: str = "", citou: bool = True) ->
     return "\n".join([cabeca, *_rodape(request_id, consultor, citou)])
 
 
-def texto(result, request_id: str, mascarar: bool = True,
-          consultor: str = "", citou: bool = True) -> str:
-    """Resposta em texto, usada quando a imagem nao sai.
 
-    Precisa se sustentar sozinha. O nome do cliente vai em CAIXA ALTA e
-    negrito: num grupo com dezenas de respostas, e' o que o consultor varre
-    procurando a dele.
-    """
-    pedido = result.job.request
-    cliente = _cliente_do(pedido)
-    titulo = cliente.upper() if cliente else ""
-
-    if not result.ok:
-        linhas = [f"{EMOJI_ERRO} *{titulo}*" if titulo
-                  else f"{EMOJI_ERRO} *Não consegui simular*"]
-        motivo = (result.error or result.status or "não consegui concluir").strip()
-        if titulo:
-            linhas.append(f"Não consegui simular: {motivo}")
-        else:
-            linhas.append(motivo)
-        if result.retryable:
-            linhas.append("Tentando de novo")
-        return "\n".join([*linhas, *_rodape(request_id, consultor, citou)])
 
     libera = float(result.reduction_value or 0)
     liberou = bool(result.has_refin and libera > 0)
@@ -257,27 +213,10 @@ def texto(result, request_id: str, mascarar: bool = True,
     return "\n".join([*linhas, *_rodape(request_id, consultor, citou)])
 
 
-def _por_que_nao(result) -> list[str]:
-    """As linhas que explicam a recusa — o texto do portal, literal.
-
-    Uma frase por linha, na ORDEM em que o portal mostrou: a ordem é
-    informação, o impedimento principal costuma vir primeiro. Em caixa alta
-    como vieram, sem emoji no meio e sem comentário do bot explicando — o
-    consultor conhece essas frases melhor que nós.
-
-    "Nenhum contrato encontrado no banco" passou a valer só quando ela é
-    VERDADE: o portal não disse nada e não trouxe resultado. Antes era a
-    resposta de toda recusa, e um cliente com "CLIENTE EM ATRASO EM PRODUTOS
-    DO BANCO" — que TEM contrato — recebia essa frase. O consultor lia "sem
-    contrato", oferecia produto novo, e perdia a venda que existia.
-    """
-    return _so_os_textos(getattr(result, "motivos", None))
 
 
-def _so_os_textos(motivos) -> list[str]:
-    """Os textos literais, ou a frase genérica quando não houve motivo."""
-    textos = [str((m or {}).get("texto") or "").strip() for m in (motivos or [])]
-    return [t for t in textos if t] or ["Nenhum contrato encontrado no banco"]
+
+
 
 
 def _motivos_guardados(linha: dict) -> list[str]:
@@ -323,6 +262,7 @@ def resultado_reenviado(linha: dict, mascarar: bool = True,
     "↩ consultor" -- senao ele cai solto no grupo sem dizer de quem e'.
     """
     cpf_bruto = linha.get("cpf") or ""
+    rotulo = "CPF" if len(cpf_bruto.replace(".", "").replace("-", "")) == 11 else "Matrícula"
     cpf = mask_cpf(cpf_bruto) if mascarar else cpf_bruto
     cliente = (linha.get("customer_name") or "").strip()
     titulo = cliente.upper() if cliente and cliente.lower() != "lead" else ""
@@ -343,14 +283,14 @@ def resultado_reenviado(linha: dict, mascarar: bool = True,
         if libera > 0:
             linhas = [f"{EMOJI_LIBERA} *{titulo}*" if titulo
                       else f"{EMOJI_LIBERA} *Libera*",
-                      f"Libera *{_brl(libera)}*", f"CPF {cpf}"]
+                      f"Libera *{_brl(libera)}*", f"{rotulo} {cpf}"]
         else:
             # O reenvio repete o MOTIVO, não a frase genérica: uma segunda
             # mensagem dizendo "nenhum contrato" sobre um cliente que tem
             # contrato erra duas vezes em vez de uma.
             linhas = [f"{EMOJI_NAO_LIBERA} *{titulo}*" if titulo
                       else f"{EMOJI_NAO_LIBERA} *Não libera*",
-                      f"CPF {cpf}", *_motivos_guardados(linha)]
+                      f"{rotulo} {cpf}", *_motivos_guardados(linha)]
 
     linhas.append("_reenvio — a primeira não saiu_")
     if request_id:
@@ -417,3 +357,156 @@ ASSINATURAS = (
     "não foi possível concluir",
     "🆔 REQ",
 )
+
+
+def _so_os_textos(motivos) -> list[str]:
+    textos = [str((m or {}).get("texto") or "").strip() for m in (motivos or [])]
+    return [t for t in textos if t] or ["Nenhum contrato encontrado no banco"]
+
+def _formatar_matriculas(matriculas) -> list[str]:
+    if not matriculas:
+        return []
+    if len(matriculas) == 1:
+        return [f"Simulei da matrícula: {matriculas[0]}", ""]
+    return [f"Simulei das matrículas: {', '.join(matriculas)}", ""]
+
+def _detalhar_recusa(result) -> list[str]:
+    """As linhas que explicam a recusa detalhadamente (texto do WhatsApp)."""
+    motivos = [str((m or {}).get("texto") or "").strip() for m in (getattr(result, "motivos", None) or [])]
+    motivos = [m for m in motivos if m]
+    
+    linhas = []
+    
+    if motivos:
+        linhas.append("Motivos encontrados:")
+        linhas.extend(f"- {m}" for m in motivos)
+        return linhas
+        
+    contratos = list(getattr(result, "contracts", None) or [])
+    if contratos:
+        linhas.append("Contratos encontrados:")
+        for c in contratos:
+            rotulo = str(c.get("contrato") or "Desconhecido")
+            try:
+                parcela = float(c.get("valor_parcela") or 0)
+            except (TypeError, ValueError):
+                parcela = 0.0
+            
+            try:
+                saldo = float(c.get("saldo_devedor") or 0)
+            except (TypeError, ValueError):
+                saldo = 0.0
+                
+            linha = f"- {rotulo}"
+            if parcela:
+                linha += f" (parcela: {_brl(parcela)}"
+                if saldo:
+                    linha += f", saldo: {_brl(saldo)}"
+                linha += ")"
+            elif saldo:
+                linha += f" (saldo: {_brl(saldo)})"
+                
+            linhas.append(linha)
+            
+        return linhas
+        
+    return ["Nenhum contrato encontrado no banco"]
+
+
+def legenda(result, request_id: str, consultor: str = "", citou: bool = True) -> str:
+    """Legenda da imagem. Curta: o card carrega o detalhe."""
+    pedido = result.job.request
+    cliente = _cliente_do(pedido)
+
+    if not result.ok:
+        motivo = (result.error or result.status or "").strip()
+        cabeca = f"{EMOJI_ERRO} *Não consegui simular*"
+        cliente = _cliente_do(pedido)
+        linhas = [cabeca + (f" — {cliente}" if cliente else "")]
+        if motivo:
+            linhas.append(motivo)
+        return "\n".join([*linhas, *_rodape(request_id, consultor, citou)])
+
+    libera = float(result.reduction_value or 0)
+    liberou = bool(result.has_refin and libera > 0)
+    
+    if liberou:
+        cabeca = f"{EMOJI_LIBERA} *{_brl(libera)}*"
+    elif getattr(result, "motivos", None):
+        cabeca = f"{EMOJI_NAO_LIBERA} *Não liberou por restrição.*"
+    elif getattr(result, "contracts", None):
+        cabeca = f"{EMOJI_NAO_LIBERA} *Não liberou no cálculo.*"
+    else:
+        cabeca = f"{EMOJI_NAO_LIBERA} *Não liberou.*"
+
+    if cliente:
+        cabeca += f" — {cliente}"
+
+    linhas = [cabeca, ""]
+    matriculas = getattr(result, "matriculas", None) or []
+    if matriculas:
+        linhas.extend(_formatar_matriculas(matriculas))
+
+    if not liberou:
+        linhas.extend(_detalhar_recusa(result))
+
+    return "\n".join([*linhas, *_rodape(request_id, consultor, citou)])
+
+
+def texto(result, request_id: str, mascarar: bool = True,
+          consultor: str = "", citou: bool = True) -> str:
+    """Resposta em texto, usada quando a imagem nao sai."""
+    pedido = result.job.request
+    cliente = _cliente_do(pedido)
+    titulo = cliente.upper() if cliente else ""
+
+    if not result.ok:
+        linhas = [f"{EMOJI_ERRO} *{titulo}*" if titulo
+                  else f"{EMOJI_ERRO} *Não consegui simular*"]
+        motivo = (result.error or result.status or "não consegui concluir").strip()
+        if titulo:
+            linhas.append(f"Não consegui simular: {motivo}")
+        else:
+            linhas.append(motivo)
+        if result.retryable:
+            linhas.append("Tentando de novo")
+        return "\n".join([*linhas, *_rodape(request_id, consultor, citou)])
+
+    libera = float(result.reduction_value or 0)
+    liberou = bool(result.has_refin and libera > 0)
+
+    emoji = EMOJI_LIBERA if liberou else EMOJI_NAO_LIBERA
+    
+    if liberou:
+        cabeca = f"{emoji} *{titulo}*" if titulo else f"{emoji} *Libera*"
+    elif getattr(result, "motivos", None):
+        cabeca = f"{emoji} *Não liberou por restrição.*"
+    elif getattr(result, "contracts", None):
+        cabeca = f"{emoji} *Não liberou no cálculo.*"
+    else:
+        cabeca = f"{emoji} *Não liberou.*"
+        
+    linhas = [cabeca, ""]
+    matriculas = getattr(result, "matriculas", None) or []
+    if matriculas:
+        linhas.extend(_formatar_matriculas(matriculas))
+
+    identidade = f"CPF {mask_cpf(pedido.cpf) if mascarar else pedido.cpf}"
+    origem = (pedido.origin or "").strip()
+    if origem:
+        identidade += f" — {origem}"
+    linhas.append(identidade)
+    linhas.append("")
+
+    if liberou:
+        linhas.append(f"Libera *{_brl(libera)}*")
+        quantos = len(result.contracts)
+        if quantos:
+            contratos = f"{quantos} contrato{'s' if quantos != 1 else ''}"
+            if result.installment_sum:
+                contratos += f" — parcela {_brl(result.installment_sum)}"
+            linhas.append(contratos)
+    else:
+        linhas.extend(_detalhar_recusa(result))
+
+    return "\n".join([*linhas, *_rodape(request_id, consultor, citou)])

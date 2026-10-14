@@ -15,6 +15,26 @@ PR que a introduz.
 
 ### Adicionado
 
+- **Recuperação de Histórico Evolution (Catch-up):** Sincronização retroativa segura ao iniciar o bot, buscando mensagens pendentes no grupo via `findMessages`, com controle transacional por checkpoint persistente (`last_evolution_sync`), proteção contra duplicações e filtro por tempo configurável (`EVOLUTION_CATCHUP_MAX_AGE_HOURS`).
+- **Fila Pausada na Inicialização:** Nova opção `QUEUE_PAUSED_AT_STARTUP=true` para permitir que o operador autentique com calma no portal antes de liberar o despacho das simulações da fila.
+- **Gerenciamento Manual da Fila no Painel:** Botões operacionais na dashboard para mover para o topo, mover para cima/baixo e excluir solicitações da fila em tempo real com atualização via SSE.
+- O bot agora lê a nova estrutura de erros do portal do Santander (`dss-alert-banner`) para entregar os motivos exatos de recusa sem perder contexto.
+- O card da simulação e o texto de resposta agora exibem as matrículas (benefícios) encontradas, ajudando o consultor a localizar o cliente mais rapidamente.
+
+### Corrigido
+
+- O analisador de pedidos (`parse_request`) agora fatiar corretamente quebras de linha com caracteres especiais (`\u2028`), comuns ao copiar de blocos de notas de celulares e planilhas, evitando que mensagens com múltiplos campos em linhas visuais sejam ignoradas como linha única.
+- Resolvido um bug interno de travamento em simulações (Pausa Segura) que paralisava o sistema após reinícios.
+
+- CPFs com 10 dígitos (faltando o 0 inicial ou final) passam a ser corrigidos e aceitos automaticamente pelo analisador.
+- CPFs enviados de forma espaçada ou com pontuação junto a outros dados passam a ser lidos corretamente sem falsos positivos.
+- O bot passa a ignorar silenciosamente mensagens sem CPF, Nome e Convênio, e encaminhamentos de resultados antigos (com palavras-chave de retorno), sem gerar loop ou respostas indevidas no grupo.
+
+### Adicionado
+
+- **Diagnóstico Exato de Recusa:** O bot agora explica textualmente (tanto na legenda do WhatsApp quanto no fallback textual) por que não liberou refinanciamento. Quando houver recusa por restrição, ele exibe as linhas literais do portal (ex: "RATING RISCOS = 2"). Quando não houver margem mas houver contratos, ele exibe os dados dos contratos em formato de lista textual para a avaliação manual do consultor.
+- **Modo Pausa Seguro:** O botão de pausar no painel agora executa uma interrupção *real* e segura no backend. Ao clicar, a simulação atual (se houver) é finalizada e a fila de processamento fica congelada de modo seguro e persistente no banco de dados. Isso previne qualquer processamento paralelo enquanto o operador usa o portal manualmente.
+
 - **A Evolution sobe junto com o bot** (Windows + WSL). Ao iniciar, em
   segundo plano -- o painel abre na hora --, o bot: liga o WSL se a Evolution
   estiver fora do ar e espera ela responder; **reaponta o webhook se o IP do
@@ -102,6 +122,9 @@ PR que a introduz.
 - O atalho do Desktop agora é criado corretamente mesmo em computadores que usam OneDrive para sincronizar a Área de Trabalho.
 
 ### Adicionado
+
+- **Diagnóstico Exato de Recusa:** O bot agora explica textualmente (tanto na legenda do WhatsApp quanto no fallback textual) por que não liberou refinanciamento. Quando houver recusa por restrição, ele exibe as linhas literais do portal (ex: "RATING RISCOS = 2"). Quando não houver margem mas houver contratos, ele exibe os dados dos contratos em formato de lista textual para a avaliação manual do consultor.
+- **Modo Pausa Seguro:** O botão de pausar no painel agora executa uma interrupção *real* e segura no backend. Ao clicar, a simulação atual (se houver) é finalizada e a fila de processamento fica congelada de modo seguro e persistente no banco de dados. Isso previne qualquer processamento paralelo enquanto o operador usa o portal manualmente.
 - **Integração Webhook Evolution:** 
   - `connection.update`: Reflete instantaneamente quedas de conexão ou retornos de QR code direto na interface.
   - `messages.update`: Identifica ACKs de leitura. Corrige falsos negativos onde o envio dá timeout, mas a resposta de ACK do servidor prova que a mensagem foi entregue (impedindo que a solicitação trave em "Não confirmada").
@@ -240,6 +263,9 @@ código revisado e testado com dublês, não um teste em produção.
 Primeira versão marcada: o bot em produção no modo `dom` (WhatsApp Web).
 
 ### Adicionado
+
+- **Diagnóstico Exato de Recusa:** O bot agora explica textualmente (tanto na legenda do WhatsApp quanto no fallback textual) por que não liberou refinanciamento. Quando houver recusa por restrição, ele exibe as linhas literais do portal (ex: "RATING RISCOS = 2"). Quando não houver margem mas houver contratos, ele exibe os dados dos contratos em formato de lista textual para a avaliação manual do consultor.
+- **Modo Pausa Seguro:** O botão de pausar no painel agora executa uma interrupção *real* e segura no backend. Ao clicar, a simulação atual (se houver) é finalizada e a fila de processamento fica congelada de modo seguro e persistente no banco de dados. Isso previne qualquer processamento paralelo enquanto o operador usa o portal manualmente.
 
 - Leitura dos pedidos no grupo, simulação no portal do Santander e resposta
   com card de resultado.

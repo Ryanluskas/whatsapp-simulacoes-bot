@@ -219,6 +219,16 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
     async def monitor(limit: int = Query(150, ge=1, le=500), _: str = Auth):
         return {"items": hub.recent(limit=limit)}
 
+    @api.post("/api/worker/pause")
+    async def worker_pause(_: str = Auth):
+        manager.queue.pause()
+        return manager.system_status_payload()
+
+    @api.post("/api/worker/resume")
+    async def worker_resume(_: str = Auth):
+        manager.queue.resume()
+        return manager.system_status_payload()
+
     @api.get("/api/queue")
     async def queue(_: str = Auth):
         return manager.queue_snapshot()
@@ -634,6 +644,19 @@ def create_app(config: Config, db: Database, hub: EventHub, manager) -> FastAPI:
     if STATIC_DIR.exists():
         api.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="dashboard")
 
+
+    @api.post("/api/queue/{sim_id}/reorder")
+    async def queue_reorder(sim_id: int, request: Request, _: str = Auth):
+        body = await request.json()
+        action = body.get("action")
+        manager.reorder_queue(sim_id, action)
+        return {"ok": True}
+
+    @api.delete("/api/queue/{sim_id}")
+    async def queue_remove(sim_id: int, _: str = Auth):
+        manager.remove_from_queue(sim_id)
+        return {"ok": True}
+
     return api
 
 
@@ -832,3 +855,5 @@ def _remove_file(path: str) -> None:
         os.unlink(path)
     except OSError:
         pass
+
+

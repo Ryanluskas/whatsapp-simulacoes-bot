@@ -390,7 +390,7 @@ class TestTimerDeRetentativaNaoAcumula:
         resultado = _resultado()
         q._retry(resultado.job, SimulationResult(job=resultado.job, ok=False, error="x",
                                                  retryable=True), 0.1)
-        assert q._pending.get(timeout=2).attempt == 2
+        assert q._pending.get(timeout=2)[2].attempt == 2
         time.sleep(0.05)
         assert not q._timers, "o Timer disparado ficou guardado (vazamento por retentativa)"
 

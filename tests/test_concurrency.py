@@ -191,7 +191,7 @@ def _config(tmp_path, workers=1, max_attempts=2, timeout=30.0,
             send_image=False, simulator_mode="local", agent_token="",
             require_trigger=False, whatsapp_mode="dom",
             evolution_group_jid="120363000000000000@g.us",
-            evolution_webhook_token="", alerta_fila=10,
+            evolution_webhook_token="", evolution_catchup_enabled=True, evolution_catchup_max_age_hours=24, queue_paused_at_startup=False, alerta_fila=10,
             alerta_espera_minutos=5.0,
             imagem_da_resposta="portal") -> Config:
     return Config(
@@ -220,7 +220,7 @@ def _config(tmp_path, workers=1, max_attempts=2, timeout=30.0,
         evolution_api_key="chave-de-teste",
         evolution_instance="allana",
         evolution_group_jid=evolution_group_jid,
-        evolution_webhook_token=evolution_webhook_token,
+        evolution_webhook_token=evolution_webhook_token, evolution_catchup_enabled=True, evolution_catchup_max_age_hours=24, queue_paused_at_startup=False,
         alerta_fila=alerta_fila,
         alerta_espera_minutos=alerta_espera_minutos,
         supported_banks={"santander"},
@@ -273,6 +273,7 @@ def _mensagem(indice: int, texto: str | None = None) -> IncomingMessage:
         text=texto
         or (
             f"{consultor}\n"
+            f"Governo SP\n"
             f"CPF: {CPFS[indice]}\n"
             "Banco: Santander\n"
             f"Contrato: {900000 + indice}\n"
@@ -382,7 +383,7 @@ class TestIsolamentoEntreSolicitacoes:
         manager, whatsapp, _sim, db, _hub = sistema
         for contrato in ("111111", "222222", "333333"):
             mensagem = _mensagem(0, texto=(
-                f"Ryan\nCPF: {CPFS[0]}\nBanco: Santander\n"
+                f"Ryan\nGoverno SP\nCPF: {CPFS[0]}\nBanco: Santander\n"
                 f"Contrato: {contrato}\nFazer simulação"
             ))
             # message_id unico por pedido
@@ -583,7 +584,7 @@ class TestValidacaoDeEntrada:
     def test_banco_nao_suportado_e_recusado(self, sistema):
         manager, whatsapp, _sim, db, _hub = sistema
         manager._handle_message(_mensagem(0, texto=(
-            f"Fazer simulação\nCPF: {CPFS[0]}\nBanco: Bradesco\nContrato: 123"
+            f"Maria Silva\nGoverno SP\nFazer simulação\nCPF: {CPFS[0]}\nBanco: Bradesco\nContrato: 123"
         )))
         time.sleep(0.3)
         assert db.scalar("SELECT COUNT(*) FROM simulations") == 0

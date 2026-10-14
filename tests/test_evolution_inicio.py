@@ -37,7 +37,7 @@ NETSH_COM_REPASSE = ("\r\nEscuta em ipv4:             Conectar-se a ipv4:\r\n\r\
 
 def _cfg(**mudancas):
     base = replace(_config(Path(tempfile.gettempdir()) / "evolution-inicio-teste"), whatsapp_mode="evolution",
-                   evolution_api_key=CHAVE, evolution_webhook_token=TOKEN,
+                   evolution_api_key=CHAVE, evolution_webhook_token=TOKEN, evolution_catchup_enabled=True, evolution_catchup_max_age_hours=24, queue_paused_at_startup=False,
                    evolution_autostart=True, evolution_url="http://evolution:8080",
                    # O bot de producao escuta na 8000; e' para ela que o repasse aponta.
                    web_port=8000)

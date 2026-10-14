@@ -1,11 +1,4 @@
-/**
- * Monitor operacional — o bot trabalhando em tempo real.
- *
- * Nada aqui é animação simulada: cada linha é um evento que o backend gravou.
- * Ao abrir a tela o histórico recente vem do banco (por isso sobrevive a um
- * F5) e a partir daí o fluxo chega pelo SSE.
- */
-
+import { api } from "../core/api.js";
 import { h, mount, replaceKeepingScroll } from "../core/dom.js";
 import * as fmt from "../core/format.js";
 import { icon } from "../core/icons.js";
@@ -23,12 +16,11 @@ const FILTERS = [
 
 export function render(root) {
   let filter = "all";
-  let pausado = false;
 
   const body = h("div.console-body", { tabindex: "0", role: "log", "aria-label": "Fluxo de eventos ao vivo" });
   const livePill = h("span.live-pill");
   const pauseBtn = h("button.btn.sm.ghost", { type: "button", onclick: alternarPausa },
-    icon("pause", 14), "Pausar");
+    icon("pause", 14), "Pausar Santander");
 
   const segButtons = FILTERS.map((f) =>
     h("button", {
@@ -60,12 +52,36 @@ export function render(root) {
     ),
   );
 
-  function alternarPausa() {
-    pausado = !pausado;
-    mount(pauseBtn, icon(pausado ? "send" : "pause", 14), pausado ? "Retomar" : "Pausar");
+  async function alternarPausa() {
+    const s = store.get("system");
+    const wasPaused = s && s.queue_paused;
+    pauseBtn.disabled = true;
+    try {
+      const res = await api.post(wasPaused ? "/api/worker/resume" : "/api/worker/pause");
+      store.set("system", res);
+    } finally {
+      pauseBtn.disabled = false;
+    }
+  }
+
+  function desenharPausa(system) {
+    if (!system) return;
+    const pausado = system.queue_paused;
+    mount(pauseBtn, icon(pausado ? "send" : "pause", 14), pausado ? "Retomar Santander" : "Pausar Santander");
     pauseBtn.classList.toggle("primary", pausado);
     pauseBtn.classList.toggle("ghost", !pausado);
-    if (!pausado) desenharFeed(store.get("feed"));
+    
+    // Atualiza hint do "Em execução" para refletir estado de pausa real
+    if (pausado) {
+      if (system.pause_state === "pausando") {
+        execucao.setHint(`PAUSANDO — terminando ${system.active_jobs} em andamento`);
+      } else {
+        execucao.setHint(`PAUSADO — Santander em uso manual`);
+      }
+    } else {
+      const q = store.get("queue") || {};
+      execucao.setHint(`${q.depth || 0} na fila`);
+    }
   }
 
   function combina(event) {
@@ -77,7 +93,6 @@ export function render(root) {
   }
 
   function desenharFeed(items) {
-    if (pausado) return;
     const visiveis = items.filter(combina);
     if (!visiveis.length) {
       mount(body, empty({
@@ -117,7 +132,10 @@ export function render(root) {
 
   function desenharExecucao(queue) {
     const rodando = (queue.items || []).filter((i) => i.status === "processing");
-    execucao.setHint(`${queue.depth || 0} na fila`);
+    const sys = store.get("system") || {};
+    if (!sys.queue_paused) {
+      execucao.setHint(`${queue.depth || 0} na fila`);
+    }
     execucao.set(rodando.length
       ? h("div.stack", rodando.map((item) =>
         h("div",
@@ -128,8 +146,8 @@ export function render(root) {
           h("div", item.consultant_name || "—"),
           h("div.cell-sub",
             `contrato ${item.contract || "—"}`,
-            item.elapsed_seconds ? ` · ${fmt.duration(item.elapsed_seconds)}` : "",
-            item.attempts > 1 ? ` · tentativa ${item.attempts}` : ""),
+            item.elapsed_seconds ? ` • ${fmt.duration(item.elapsed_seconds)}` : "",
+            item.attempts > 1 ? ` • tentativa ${item.attempts}` : ""),
         )))
       : empty({ compact: true, mark: "clock", title: "Ocioso", desc: "Nenhuma simulação em execução." }));
   }
@@ -143,7 +161,7 @@ export function render(root) {
         chip("Erros", fmt.int(k.errors)),
         chip("Tempo médio", fmt.duration(k.avg_seconds)),
       )
-      : h("p.muted", "Carregando…"));
+      : h("p.muted", "Carregando..."));
   }
 
   function desenharAoVivo(s) {
@@ -159,6 +177,7 @@ export function render(root) {
   desenharExecucao(store.get("queue"));
   desenharNumeros(store.get("metrics"));
   desenharAoVivo(store.get("stream"));
+  desenharPausa(store.get("system"));
 
   const off = [
     store.subscribe("feed", desenharFeed),
@@ -166,6 +185,7 @@ export function render(root) {
     store.subscribe("queue", desenharExecucao),
     store.subscribe("metrics", desenharNumeros),
     store.subscribe("stream", desenharAoVivo),
+    store.subscribe("system", desenharPausa),
   ];
   return () => off.forEach((fn) => fn());
 }

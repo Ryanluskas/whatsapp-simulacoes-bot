@@ -48,7 +48,7 @@ def _esperar(condicao, timeout=30.0):
     raise AssertionError("não aconteceu dentro do tempo")
 
 
-def _payload(texto: str = "Ivone Teste\n42888832453\nAmapá", *, id_msg="3EB0AAA",
+def _payload(texto: str = "Ivone Teste\nGoverno SP\n42888832453\nAmapá", *, id_msg="3EB0AAA",
              de_mim=False, grupo=GRUPO, participante=CONSULTOR,
              estendida=False, push="Ryan") -> dict:
     if estendida:
@@ -253,7 +253,7 @@ class TestARotaDoWebhook:
         assert not manager.whatsapp.inbox.empty()
         # Verificar o que entrou na fila
         msg = manager.whatsapp.inbox.get(timeout=1.0)
-        assert msg.text == "Ivone Teste\n42888832453\nAmapá"
+        assert msg.text == "Ivone Teste\nGoverno SP\n42888832453\nAmapá"
 
     def test_messages_update_classificacao_de_status(self, sistema):
         client, manager = sistema
@@ -548,7 +548,7 @@ class TestDaMensagemAteAResposta:
         client, manager, enviados = sistema_completo
 
         r = client.post("/webhook/whatsapp",
-                        json=_payload("Ivone Teste\n42888832453\nSantander",
+                        json=_payload("Ivone Teste\nGoverno SP\n42888832453\nSantander",
                                       id_msg="3EB0PEDIDO"),
                         headers=CABECALHO)
         assert r.status_code == 200
@@ -567,7 +567,7 @@ class TestDaMensagemAteAResposta:
     def test_a_simulacao_ficou_registrada(self, sistema_completo):
         client, manager, enviados = sistema_completo
         client.post("/webhook/whatsapp",
-                    json=_payload("Ivone Teste\n42888832453", id_msg="3EB0PEDIDO2"),
+                    json=_payload("Ivone Teste\nGoverno SP\n42888832453", id_msg="3EB0PEDIDO2"),
                     headers=CABECALHO)
         _esperar(lambda: manager.db.fetchall(
             "SELECT id FROM simulations WHERE replied_at IS NOT NULL"))
@@ -579,7 +579,7 @@ class TestDaMensagemAteAResposta:
         """O laço de 53 mensagens, agora impossível: fromMe resolve na entrada."""
         client, manager, enviados = sistema_completo
         client.post("/webhook/whatsapp",
-                    json=_payload("Ivone Teste\n42888832453", id_msg="3EB0PEDIDO3"),
+                    json=_payload("Ivone Teste\nGoverno SP\n42888832453", id_msg="3EB0PEDIDO3"),
                     headers=CABECALHO)
         _esperar(lambda: any(r.startswith("/message/send") for r, _ in enviados))
 

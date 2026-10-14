@@ -227,6 +227,9 @@ def build_result_html(
 
     # ------------------------------------------------------- metadados
     meta = [escape(f"CPF {format_cpf(req.cpf)}")] if show_client_data else []
+    matriculas = getattr(result, "matriculas", None) or []
+    for mat in matriculas:
+        meta.append(escape(f"Matrícula {mat}"))
     if getattr(req, "origin", ""):
         meta.append(escape(req.origin))
     selo = _selo_do_banco(banco)

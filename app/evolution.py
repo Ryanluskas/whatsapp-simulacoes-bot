@@ -463,6 +463,25 @@ class EvolutionClient:
             )
         return self._client
 
+    def find_messages(self, limit: int = 50, page: int = 1) -> dict:
+        """Puxa o historico do endpoint /chat/findMessages."""
+        rota = f"/chat/findMessages/{self.instance}"
+        payload = {
+            "where": {
+                "key.remoteJid": self.group_jid,
+            },
+            "limit": limit,
+            "page": page
+        }
+        try:
+            resposta = self._http().post(rota, json=payload)
+            if resposta.status_code == 200:
+                return resposta.json()
+            return {}
+        except Exception as exc:
+            self._log("ERROR", f"Falha ao consultar historico Evolution: {str(exc)[:200]}")
+            return {}
+
     def _post(self, rota: str, payload: dict) -> dict:
         """POST que ou devolve o corpo com ``key``, ou levanta ``ErroDeEnvio`` classificado."""
         try:

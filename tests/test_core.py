@@ -108,21 +108,22 @@ class TestParser:
         assert pedido.contract == ""        # o contrato é resultado, não entrada
 
     def test_formato_real_sem_orgao(self):
-        pedido, faltando = parse_request("LUIZ FERNANDO TESTE\n\n31611176034", "Camila")
+        pedido, faltando = parse_request("LUIZ FERNANDO TESTE\nGov\n31611176034", "Camila")
         assert faltando == []
         assert pedido.customer_name == "LUIZ FERNANDO TESTE"
-        assert pedido.origin == ""
+        assert pedido.origin == "Gov"
         assert pedido.cpf == "31611176034"
 
     def test_so_o_cpf_ainda_e_um_pedido(self):
-        pedido, faltando = parse_request("11278412972", "Camila")
+        pedido, faltando = parse_request("João\nGov\n11278412972", "Camila")
         assert faltando == []
         assert pedido.cpf == "11278412972"
-        assert pedido.customer_name == "Lead"
+        assert pedido.customer_name == "João"
 
     def test_formato_rotulado_continua_aceito(self):
         texto = (
             "Ryan\n"
+            "Governo\n"
             f"CPF: {CPF_VALIDO}\n"
             "Banco: Santander\n"
             "Contrato: 123456\n"
@@ -164,6 +165,8 @@ class TestParser:
     def test_apelidos_de_campo(self):
         texto = (
             "simular\n"
+            "Ryan\n"
+            "Governo\n"
             f"cpf/cnpj: {CPF_VALIDO}\n"
             "Instituição: Santander\n"
             "Nº do contrato: 77 88 99\n"
@@ -177,26 +180,26 @@ class TestParser:
     def test_gatilho_opcional_nao_atrapalha(self):
         """A palavra continua sendo aceita, só deixou de ser obrigatória."""
         for gatilho in ("Fazer simulação", "fazer simulacao", "SIMULAR", "consultar"):
-            pedido, _ = parse_request(f"Cliente X\n{CPF_VALIDO}\n{gatilho}", "X")
+            pedido, _ = parse_request(f"Cliente X\nGoverno\n{CPF_VALIDO}\n{gatilho}", "X")
             assert pedido is not None and pedido.cpf == CPF_VALIDO, gatilho
 
     def test_require_trigger_ligado_volta_a_exigir_a_palavra(self):
-        pedido, _ = parse_request(f"Cliente X\n{CPF_VALIDO}", "X", require_trigger=True)
+        pedido, _ = parse_request(f"Cliente X\nGoverno\n{CPF_VALIDO}", "X", require_trigger=True)
         assert pedido is None
-        pedido, _ = parse_request(f"Cliente X\n{CPF_VALIDO}\nsimular", "X",
+        pedido, _ = parse_request(f"Cliente X\nGoverno\n{CPF_VALIDO}\nsimular", "X",
                                   require_trigger=True)
         assert pedido is not None
 
     def test_cpf_em_varios_formatos(self):
         """O grupo escreve o CPF de três jeitos diferentes."""
         for escrito in ("31611176034", "182.841.754.87", "529.982.247-25"):
-            pedido, _ = parse_request(f"Cliente\n{escrito}", "X")
+            pedido, _ = parse_request(f"Cliente\nGoverno SP\n{escrito}", "X")
             assert pedido is not None, escrito
             assert len(pedido.cpf) == 11
 
     def test_telefone_nao_e_confundido_com_cpf(self):
         """11 dígitos que não passam nos verificadores não viram pedido."""
-        pedido, faltando = parse_request("Cliente\n67999998888", "X")
+        pedido, faltando = parse_request("Cliente\nGoverno SP\n67999998888", "X")
         assert pedido is None
         assert faltando  # reporta pendência em vez de simular lixo
 

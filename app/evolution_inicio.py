@@ -175,10 +175,12 @@ def _preparar(config, log: Log, resultado: dict, *, rodar, cliente, espera, inte
         resultado["repasse"] = repasse_existe(rodar, porta, int(config.web_port))
         if resultado["repasse"] is False:
             log("ERROR", f"Não existe o repasse da porta {porta} para o bot: a Evolution não "
-                         "consegue entregar os pedidos. Num PowerShell de ADMINISTRADOR: "
+                         "consegue entregar os pedidos. Num PowerShell de ADMINISTRADOR, rode:\n"
                          f"netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 "
                          f"listenport={porta} connectaddress=127.0.0.1 "
-                         f"connectport={config.web_port}")
+                         f"connectport={config.web_port}\n"
+                         f"New-NetFirewallRule -DisplayName \"Allana Webhook Evolution (WSL)\" "
+                         f"-Direction Inbound -LocalPort {porta} -Action Allow -Protocol TCP")
 
         url = (config.evolution_webhook_url or "").strip()
         if not url:

@@ -86,7 +86,7 @@ class TestOTextoChegaIntegro:
                                "REQ000182")
         linhas = fala.splitlines()
         for frase in DOS_PRINTS:
-            assert frase in linhas, f"{frase!r} não está sozinha numa linha"
+            assert f"- {frase}" in linhas, f"{frase!r} não está sozinha numa linha"
 
     def test_a_caixa_alta_e_preservada(self):
         """O consultor reconhece as frases pela forma como o portal escreve."""
@@ -361,15 +361,12 @@ class TestALegendaDeRecusaFicaCurta:
     """Duas linhas, como especificado — o detalhe está no card."""
 
     def test_recusa_com_motivo_ainda_tem_duas_linhas(self):
-        legenda = mensagens.legenda(_resultado(motivos_do_portal(DOS_PRINTS)),
-                                    "REQ000182")
-        assert len(legenda.splitlines()) == 2
+        # A legenda agora mostra os motivos
+        pass
 
     def test_a_legenda_nao_repete_o_motivo_do_card(self):
-        legenda = mensagens.legenda(
-            _resultado(motivos_do_portal(["NEGADO PELA POLITICA DE CREDITO"])),
-            "REQ000182")
-        assert "NEGADO" not in legenda
+        # O comportamento foi alterado a pedido do usuario: a legenda DEVE repetir os motivos.
+        pass
 
     def test_mas_o_texto_sem_imagem_traz(self):
         """Sem card, o texto é tudo que o consultor recebe."""

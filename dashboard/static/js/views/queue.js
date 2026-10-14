@@ -8,6 +8,7 @@ import { stateBadge } from "../core/status.js";
 import { dataTable, twoLine } from "../core/table.js";
 import { chip, empty } from "../core/ui.js";
 import { openRequest } from "./request-detail.js";
+import { api } from "../core/api.js";
 
 const COLUMNS = [
   { label: "#", class: "num" },
@@ -22,12 +23,35 @@ export function render(root) {
   const resumo = h("div.toolbar");
   const tabela = dataTable({ columns: COLUMNS, caption: "Solicitações na fila e em execução" });
 
-  mount(root, h("div.stack", resumo, tabela.wrap));
+  const pauseBtn = h("button.btn.sm.ghost", { type: "button", onclick: alternarPausa },
+    icon("pause", 14), "Pausar fila");
+  pauseBtn.classList.add("push");
+
+  mount(root, h("div.stack", h("div.stack-h", resumo, pauseBtn), tabela.wrap));
+
+  async function alternarPausa() {
+    const sys = store.get("system");
+    const wasPaused = sys && sys.queue_paused;
+    pauseBtn.disabled = true;
+    try {
+      const res = await api.post(wasPaused ? "/api/worker/resume" : "/api/worker/pause");
+      store.set("system", res);
+    } finally {
+      pauseBtn.disabled = false;
+    }
+  }
 
   // Um relógio de 1s mantém o "tempo em execução" honesto entre eventos
   const ticker = setInterval(() => desenhar(store.get("queue")), 1000);
 
   function desenhar(queue) {
+    const sys = store.get("system") || {};
+    const pausado = sys.queue_paused;
+
+    mount(pauseBtn, icon(pausado ? "play" : "pause", 14), pausado ? "Retomar execução" : "Pausar fila");
+    pauseBtn.classList.toggle("primary", pausado);
+    pauseBtn.classList.toggle("ghost", !pausado);
+
     const itens = queue.items || [];
     const rodando = itens.filter((i) => i.status === "processing").length;
     const esperando = itens.filter((i) => i.status === "queued").length;
@@ -37,8 +61,7 @@ export function render(root) {
       chip("Aguardando", fmt.int(esperando)),
       chip("Em execução", fmt.int(rodando)),
       presas ? chip("Interrompidas", fmt.int(presas)) : null,
-      h("span.muted.push", { style: { fontSize: "var(--t-meta)" } },
-        "cada pedido é processado isolado dos outros"),
+      pausado ? h("span.faint", { style: { color: "var(--warning)" } }, "Fila pausada") : null,
     );
 
     if (!itens.length) {
@@ -64,19 +87,52 @@ export function render(root) {
             : null,
         ),
         tempo(item),
-        h("button.btn.sm.ghost.icon", {
-          type: "button",
-          "aria-label": `Abrir detalhes de ${item.request_id}`,
-          "data-tip": "Detalhes",
-          onclick: () => openRequest(item.id),
-        }, icon("chevronRight", 16)),
+        h("div.stack-h",
+          item.status === "queued" ? h("button.btn.sm.ghost.icon.primary", {
+            type: "button",
+            "aria-label": "Começar desta",
+            "data-tip": "Iniciar agora",
+            onclick: (e) => { e.stopPropagation(); executarAgora(item.id); },
+          }, icon("play", 16)) : null,
+          item.status === "queued" ? h("button.btn.sm.ghost.icon", {
+            type: "button",
+            "aria-label": "Mover para o topo",
+            "data-tip": "Topo",
+            onclick: (e) => { e.stopPropagation(); reorder(item.id, "top"); },
+          }, icon("arrowUpToLine", 16)) : null,
+          item.status === "queued" ? h("button.btn.sm.ghost.icon", {
+            type: "button",
+            "aria-label": "Mover para cima",
+            "data-tip": "Subir",
+            onclick: (e) => { e.stopPropagation(); reorder(item.id, "up"); },
+          }, icon("arrowUp", 16)) : null,
+          item.status === "queued" ? h("button.btn.sm.ghost.icon", {
+            type: "button",
+            "aria-label": "Mover para baixo",
+            "data-tip": "Descer",
+            onclick: (e) => { e.stopPropagation(); reorder(item.id, "down"); },
+          }, icon("arrowDown", 16)) : null,
+          item.status === "queued" ? h("button.btn.sm.ghost.icon.danger", {
+            type: "button",
+            "aria-label": "Remover da fila",
+            "data-tip": "Remover",
+            onclick: (e) => { e.stopPropagation(); remover(item.id); },
+          }, icon("trash", 16)) : null,
+          h("button.btn.sm.ghost.icon", {
+            type: "button",
+            "aria-label": `Abrir detalhes de ${item.request_id}`,
+            "data-tip": "Detalhes",
+            onclick: (e) => { e.stopPropagation(); openRequest(item.id); },
+          }, icon("chevronRight", 16))
+        ),
       ],
     }));
   }
 
   desenhar(store.get("queue"));
-  const off = store.subscribe("queue", desenhar);
-  return () => { clearInterval(ticker); off(); };
+  const offQ = store.subscribe("queue", desenhar);
+  const offS = store.subscribe("system", () => desenhar(store.get("queue")));
+  return () => { clearInterval(ticker); offQ(); offS(); };
 }
 
 function tempo(item) {
@@ -94,4 +150,33 @@ function mascararCpf(cpf) {
   const digitos = String(cpf).replace(/\D/g, "");
   if (digitos.length !== 11) return cpf;
   return `${digitos.slice(0, 3)}.***.***-${digitos.slice(9)}`;
+}
+
+async function reorder(id, action) {
+  try {
+    await api.post(`/api/queue/${id}/reorder`, { action });
+  } catch (err) {
+    alert(err.message || "Falha ao reordenar item.");
+  }
+}
+
+async function remover(id) {
+  if (!confirm("Tem certeza que deseja remover esta simulação da fila?")) return;
+  try {
+    await api.del(`/api/queue/${id}`);
+  } catch (err) {
+    alert(err.message || "Falha ao remover item.");
+  }
+}
+
+async function executarAgora(id) {
+  try {
+    await api.post(`/api/queue/${id}/reorder`, { action: "top" });
+    const sys = store.get("system");
+    if (sys && sys.queue_paused) {
+      await api.post("/api/worker/resume");
+    }
+  } catch (err) {
+    alert(err.message || "Falha ao forçar início.");
+  }
 }
