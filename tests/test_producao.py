@@ -178,7 +178,7 @@ class Sistema:
                  atrasos=None, renderizador=None, servidor=None, db_path=None) -> None:
         self.tmp_path = tmp_path
         self.config = _config(tmp_path, whatsapp_mode="evolution", send_image=com_imagem,
-                              evolution_group_jid=GRUPO, evolution_webhook_token=TOKEN,
+                              evolution_group_jid=GRUPO, evolution_webhook_token=TOKEN, evolution_catchup_enabled=True, evolution_catchup_max_age_hours=24, queue_paused_at_startup=False,
                               workers=workers)
         if db_path is not None:
             from dataclasses import replace

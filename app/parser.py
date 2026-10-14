@@ -43,6 +43,7 @@ FIELD_RE = re.compile(r"^\s*([\w\s/.çãáàâéêíóôõú-]{2,30}?)\s*[:=]\s*
 # 11 dígitos, aceitando os separadores que aparecem no grupo:
 # 31611176034 · 182.841.754.87 · 529.982.247-25 · 118 902 594 97
 CPF_SOLTO_RE = re.compile(r"(?<!\d)(\d[\d.\-\s]{9,17}\d)(?!\d)")
+MATRICULA_SOLTA_RE = re.compile(r"(?<!\d)(\d{6,10})(?!\d)")
 
 _ACCENTS = str.maketrans("çãáàâäéêëíïóôõöúüñ", "caaaaaeeeiioooouun")
 
@@ -115,6 +116,32 @@ def find_cpf(text: str) -> str:
     return ""
 
 
+
+def find_all_cpfs(text: str) -> list[str]:
+    """Todos os CPFs *válidos* do texto."""
+    cpfs = []
+    for bruto in CPF_SOLTO_RE.findall(text or ""):
+        digitos = only_digits(bruto)
+        arrumado = fix_cpf(digitos)
+        if arrumado and arrumado not in cpfs:
+            cpfs.append(arrumado)
+    return cpfs
+
+def find_all_matriculas(text: str) -> list[str]:
+    """Todas as matrículas no texto (6 a 10 dígitos) caso a palavra 'matricula' esteja presente."""
+    import unicodedata
+    text_lower = unicodedata.normalize("NFKD", text or "").encode("ascii", "ignore").decode("utf-8").lower()
+    if "matricula" not in text_lower:
+        return []
+    
+    matriculas = []
+    for bruto in MATRICULA_SOLTA_RE.findall(text or ""):
+        if len(bruto) >= 6 and len(bruto) <= 10:
+            if bruto not in matriculas:
+                matriculas.append(bruto)
+    return matriculas
+
+
 def _e_ruido(linha: str) -> bool:
     limpa = unicodedata.normalize("NFC", linha.strip().lower()).translate(_ACCENTS)
     limpa = re.sub(r"[^a-z\s]", "", limpa).strip()
@@ -137,7 +164,7 @@ def parse_request(
     if require_trigger and not has_trigger(text):
         return None, []
 
-    linhas_brutas = [ln.strip() for ln in text.replace("\r", "\n").split("\n")]
+    linhas_brutas = [ln.strip() for ln in text.splitlines()]
     linhas_brutas = [ln for ln in linhas_brutas if ln]
 
     campos: dict[str, str] = {}
@@ -154,7 +181,16 @@ def parse_request(
 
     # ------------------------------------------------------------------ CPF
     cpf_explicito = only_digits(campos.get("cpf", ""))
-    cpf = fix_cpf(cpf_explicito) if cpf_explicito else find_cpf(text)
+    cpfs_encontrados = find_all_cpfs(text)
+    matriculas_encontradas = find_all_matriculas(text)
+    
+    cpf = fix_cpf(cpf_explicito) if cpf_explicito else (cpfs_encontrados[0] if cpfs_encontrados else (matriculas_encontradas[0] if matriculas_encontradas else ""))
+    
+    # Combinamos CPFs e Matrículas para a fila
+    todos_para_simular = cpfs_encontrados + matriculas_encontradas
+    # Remover duplicatas mantendo ordem
+    todos_para_simular = list(dict.fromkeys(todos_para_simular))
+    multiplos_cpfs = len(todos_para_simular) > 1
 
     if not cpf:
         # Sem CPF não há pedido. Mas convém separar dois casos bem diferentes:
@@ -209,6 +245,7 @@ def parse_request(
         ParsedRequest(
             consultant_name=consultor,
             cpf=cpf,
+            all_cpfs=todos_para_simular,
             # Banco e contrato são opcionais: o grupo não os informa, e o
             # contrato só existe depois que a simulação roda.
             bank=(campos.get("banco") or default_bank).strip(),

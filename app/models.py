@@ -214,6 +214,7 @@ class ParsedRequest:
     customer_name: str = "Lead"
     origin: str = ""          # órgão/estado, a 2ª linha da mensagem do grupo
     phone: str = ""
+    all_cpfs: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -228,6 +229,7 @@ class SimulationJob:
     #: que não abre). Conta separado de ``attempt``: uma não gasta a outra.
     ambientais: int = 0
     created_at: datetime = field(default_factory=utc_now)
+    queue_position: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -257,6 +259,8 @@ class SimulationResult:
     #: Vazio quando o recorte nao pode ser feito com seguranca -- e ai'
     #: a resposta sai com o card montado por nos. Ver `tela_do_portal`.
     portal_png: str = ""
+    #: Lista de matrículas do cliente encontradas/processadas na simulação.
+    matriculas: tuple = ()
 
     @property
     def has_refin(self) -> bool:

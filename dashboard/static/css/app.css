@@ -1347,3 +1347,5 @@ table.data td.full { padding: 0; }
   body { background: white; color: black; }
   .card, .table-wrap { border-color: silver; background: white; }
 }
+
+.stack-h { display: flex; gap: 4px; align-items: center; }

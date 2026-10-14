@@ -262,6 +262,7 @@ def resultado_reenviado(linha: dict, mascarar: bool = True,
     "↩ consultor" -- senao ele cai solto no grupo sem dizer de quem e'.
     """
     cpf_bruto = linha.get("cpf") or ""
+    rotulo = "CPF" if len(cpf_bruto.replace(".", "").replace("-", "")) == 11 else "Matrícula"
     cpf = mask_cpf(cpf_bruto) if mascarar else cpf_bruto
     cliente = (linha.get("customer_name") or "").strip()
     titulo = cliente.upper() if cliente and cliente.lower() != "lead" else ""
@@ -282,14 +283,14 @@ def resultado_reenviado(linha: dict, mascarar: bool = True,
         if libera > 0:
             linhas = [f"{EMOJI_LIBERA} *{titulo}*" if titulo
                       else f"{EMOJI_LIBERA} *Libera*",
-                      f"Libera *{_brl(libera)}*", f"CPF {cpf}"]
+                      f"Libera *{_brl(libera)}*", f"{rotulo} {cpf}"]
         else:
             # O reenvio repete o MOTIVO, não a frase genérica: uma segunda
             # mensagem dizendo "nenhum contrato" sobre um cliente que tem
             # contrato erra duas vezes em vez de uma.
             linhas = [f"{EMOJI_NAO_LIBERA} *{titulo}*" if titulo
                       else f"{EMOJI_NAO_LIBERA} *Não libera*",
-                      f"CPF {cpf}", *_motivos_guardados(linha)]
+                      f"{rotulo} {cpf}", *_motivos_guardados(linha)]
 
     linhas.append("_reenvio — a primeira não saiu_")
     if request_id:
@@ -362,31 +363,51 @@ def _so_os_textos(motivos) -> list[str]:
     textos = [str((m or {}).get("texto") or "").strip() for m in (motivos or [])]
     return [t for t in textos if t] or ["Nenhum contrato encontrado no banco"]
 
+def _formatar_matriculas(matriculas) -> list[str]:
+    if not matriculas:
+        return []
+    if len(matriculas) == 1:
+        return [f"Simulei da matrícula: {matriculas[0]}", ""]
+    return [f"Simulei das matrículas: {', '.join(matriculas)}", ""]
+
 def _detalhar_recusa(result) -> list[str]:
     """As linhas que explicam a recusa detalhadamente (texto do WhatsApp)."""
     motivos = [str((m or {}).get("texto") or "").strip() for m in (getattr(result, "motivos", None) or [])]
     motivos = [m for m in motivos if m]
     
+    linhas = []
+    
     if motivos:
-        linhas = ["Motivos encontrados:"]
+        linhas.append("Motivos encontrados:")
         linhas.extend(f"- {m}" for m in motivos)
         return linhas
         
     contratos = list(getattr(result, "contracts", None) or [])
     if contratos:
-        linhas = ["Contratos encontrados:"]
+        linhas.append("Contratos encontrados:")
         for c in contratos:
             rotulo = str(c.get("contrato") or "Desconhecido")
             try:
                 parcela = float(c.get("valor_parcela") or 0)
             except (TypeError, ValueError):
                 parcela = 0.0
-            prazo = str(c.get("parcelas") or "-")
-            linhas.append(f"- Contrato: {rotulo} • Parcela: {_brl(parcela)} • Prazo: {prazo}")
-        
-        margem = getattr(result, "margin", "")
-        if margem:
-            linhas.append(f"Margem: {margem}")
+            
+            try:
+                saldo = float(c.get("saldo_devedor") or 0)
+            except (TypeError, ValueError):
+                saldo = 0.0
+                
+            linha = f"- {rotulo}"
+            if parcela:
+                linha += f" (parcela: {_brl(parcela)}"
+                if saldo:
+                    linha += f", saldo: {_brl(saldo)}"
+                linha += ")"
+            elif saldo:
+                linha += f" (saldo: {_brl(saldo)})"
+                
+            linhas.append(linha)
+            
         return linhas
         
     return ["Nenhum contrato encontrado no banco"]
@@ -401,7 +422,7 @@ def legenda(result, request_id: str, consultor: str = "", citou: bool = True) ->
         motivo = (result.error or result.status or "").strip()
         cabeca = f"{EMOJI_ERRO} *Não consegui simular*"
         cliente = _cliente_do(pedido)
-        linhas = [cabeca + (f" · {cliente}" if cliente else "")]
+        linhas = [cabeca + (f" — {cliente}" if cliente else "")]
         if motivo:
             linhas.append(motivo)
         return "\n".join([*linhas, *_rodape(request_id, consultor, citou)])
@@ -419,9 +440,13 @@ def legenda(result, request_id: str, consultor: str = "", citou: bool = True) ->
         cabeca = f"{EMOJI_NAO_LIBERA} *Não liberou.*"
 
     if cliente:
-        cabeca += f" · {cliente}"
+        cabeca += f" — {cliente}"
 
-    linhas = [cabeca]
+    linhas = [cabeca, ""]
+    matriculas = getattr(result, "matriculas", None) or []
+    if matriculas:
+        linhas.extend(_formatar_matriculas(matriculas))
+
     if not liberou:
         linhas.extend(_detalhar_recusa(result))
 
@@ -461,22 +486,25 @@ def texto(result, request_id: str, mascarar: bool = True,
     else:
         cabeca = f"{emoji} *Não liberou.*"
         
-    linhas = [cabeca]
-    if liberou:
-        linhas.append(f"Libera *{_brl(libera)}*")
+    linhas = [cabeca, ""]
+    matriculas = getattr(result, "matriculas", None) or []
+    if matriculas:
+        linhas.extend(_formatar_matriculas(matriculas))
 
     identidade = f"CPF {mask_cpf(pedido.cpf) if mascarar else pedido.cpf}"
     origem = (pedido.origin or "").strip()
     if origem:
-        identidade += f" · {origem}"
+        identidade += f" — {origem}"
     linhas.append(identidade)
+    linhas.append("")
 
     if liberou:
+        linhas.append(f"Libera *{_brl(libera)}*")
         quantos = len(result.contracts)
         if quantos:
             contratos = f"{quantos} contrato{'s' if quantos != 1 else ''}"
             if result.installment_sum:
-                contratos += f" · parcela {_brl(result.installment_sum)}"
+                contratos += f" — parcela {_brl(result.installment_sum)}"
             linhas.append(contratos)
     else:
         linhas.extend(_detalhar_recusa(result))

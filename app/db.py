@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS simulations (
     attempts           INTEGER NOT NULL DEFAULT 0,
     max_attempts       INTEGER NOT NULL DEFAULT 2,
     raw_message        TEXT,
+    queue_position     REAL DEFAULT 0,
     created_at         TEXT NOT NULL,
     queued_at          TEXT,
     started_at         TEXT,
@@ -183,6 +184,7 @@ MIGRATIONS: dict[str, dict[str, str]] = {
         "motivos_portal": "TEXT DEFAULT ''",
         "max_attempts": "INTEGER NOT NULL DEFAULT 2",
         "queued_at": "TEXT",
+        "queue_position": "REAL DEFAULT 0.0",
         "replied_at": "TEXT",
         "updated_at": "TEXT",
         # --- origem: o que a resposta precisa, sem depender de memoria ---
@@ -416,7 +418,17 @@ class Database:
                 ).fetchone()
                 if row is not None:
                     return {**dict(row), "novo": False}
-            registro = {"direction": "in", "status": ENTRADA_RECEBIDA, **dados}
+            
+            # Gera o Tracker/Trace ID antecipado na mesma transação
+            conn.execute(
+                "INSERT INTO meta(key,value) VALUES('request_seq','1') "
+                "ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)"
+            )
+            seq_row = conn.execute("SELECT value FROM meta WHERE key='request_seq'").fetchone()
+            seq = int(seq_row["value"]) if seq_row else 1
+            request_id = f"REQ{seq:06d}"
+
+            registro = {"direction": "in", "status": ENTRADA_RECEBIDA, "request_id": request_id, **dados}
             cols = list(registro)
             cur = conn.execute(
                 f"INSERT INTO messages ({','.join(cols)}) "
@@ -424,7 +436,7 @@ class Database:
                 tuple(registro.values()),
             )
             return {"id": cur.lastrowid, "status": ENTRADA_RECEBIDA,
-                    "simulation_id": None, "request_id": None, "novo": True}
+                    "simulation_id": None, "request_id": request_id, "novo": True}
 
     # ------------------------------------------------------------------ meta
     def set_meta(self, key: str, value: str) -> None:

@@ -36,6 +36,7 @@ def cliente(tmp_path):
         yield client, db, manager
 
 
+from app.clock import now_iso
 def _semear(db: Database) -> None:
     sim_id = db.insert("simulations", {
         "request_id": "REQ000001", "consultant_name": "Ryan", "chat_id": "grupo@g.us",
@@ -46,38 +47,38 @@ def _semear(db: Database) -> None:
         "contracts_json": json.dumps([{"contrato": "998877", "valor_parcela": "R$ 420,00"}]),
         "attempts": 1, "max_attempts": 2, "processing_seconds": 24.3,
         "raw_message": f"Fazer simulação\nCPF: {CPFS[0]}",
-        "created_at": "2026-08-27T13:00:00Z", "updated_at": "2026-08-27T13:00:30Z",
-        "started_at": "2026-08-27T13:00:05Z", "finished_at": "2026-08-27T13:00:29Z",
-        "replied_at": "2026-08-27T13:00:30Z",
+        "created_at": now_iso(), "updated_at": now_iso(),
+        "started_at": now_iso(), "finished_at": now_iso(),
+        "replied_at": now_iso(),
     })
     db.insert("simulations", {
         "request_id": "REQ000002", "consultant_name": "João", "chat_id": "grupo@g.us",
         "cpf": CPFS[1], "bank": "Santander", "contract": "112233",
         "status": Status.ERROR, "stage": Stage.ERROR, "error_message": "portal indisponível",
         "attempts": 2, "max_attempts": 2, "processing_seconds": 61.0,
-        "created_at": "2026-08-27T14:00:00Z", "updated_at": "2026-08-27T14:01:01Z",
+        "created_at": now_iso(), "updated_at": now_iso(),
     })
     db.insert("messages", {
         "simulation_id": sim_id, "request_id": "REQ000001", "direction": "in",
         "chat_id": "grupo@g.us", "wa_message_id": "false_grupo@g.us_M1_x@c.us",
         "consultant_name": "Ryan", "sender_id": "x@c.us", "text": "Fazer simulação",
-        "status": Stage.RECEIVED, "created_at": "2026-08-27T13:00:00Z",
+        "status": Stage.RECEIVED, "created_at": now_iso(),
     })
     db.insert("events", {
         "type": "job_done", "stage": Stage.COMPLETED, "level": "success",
         "title": "Simulação concluída", "detail": "Ryan", "request_id": "REQ000001",
         "simulation_id": sim_id, "consultant_name": "Ryan", "chat_id": "grupo@g.us",
-        "payload_json": "{}", "created_at": "2026-08-27T13:00:29Z",
+        "payload_json": "{}", "created_at": now_iso(),
     })
     db.insert("logs", {
         "level": "INFO", "service": "bot", "message": "Solicitação REQ000001 concluída",
-        "request_id": "REQ000001", "consultant": "Ryan", "created_at": "2026-08-27T13:00:29Z",
+        "request_id": "REQ000001", "consultant": "Ryan", "created_at": now_iso(),
     })
     db.insert("consultants", {
         "name": "Ryan", "wa_id": "5567908887777@c.us", "phone": "5567908887777",
         "active": 1, "pinned_name": 0, "notes": "",
-        "created_at": "2026-08-27T12:00:00Z", "updated_at": "2026-08-27T13:00:00Z",
-        "last_seen_at": "2026-08-27T13:00:00Z",
+        "created_at": "2026-08-27T12:00:00Z", "updated_at": now_iso(),
+        "last_seen_at": now_iso(),
     })
 
 

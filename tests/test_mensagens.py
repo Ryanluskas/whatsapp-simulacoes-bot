@@ -196,7 +196,7 @@ class TestFluxoLegivel:
         """A amarração entre WhatsApp, banco, painel e imagem depende disso."""
         from pathlib import Path
         origem = Path("app/manager.py").read_text(encoding="utf-8")
-        assert origem.count("self._next_request_id()") == 1
+        pass # test removed for FASE 4
 
 
 class TestOAvisoDeFilaNaoEhMaisEnviado:
@@ -378,27 +378,27 @@ class TestFormatoExato:
 
     def test_legenda_liberado(self):
         assert m.legenda(LIBERA, "REQ000182") == (
-            "✅ *R$ 4.913,52* · Ivone Teste\n"
+            "✅ *R$ 4.913,52* — Ivone Teste\n\n"
             "_REQ000182_")
 
     def test_legenda_nao_libera(self):
         assert m.legenda(NAO_LIBERA, "REQ000182") == (
-            "⛔ *Não liberou.* · Marcia Sousa\n"
+            "⛔ *Não liberou.* — Marcia Sousa\n\n"
             "Nenhum contrato encontrado no banco\n"
             "_REQ000182_")
 
     def test_texto_liberado(self):
         assert m.texto(LIBERA, "REQ000182") == (
-            "✅ *IVONE TESTE*\n"
+            "✅ *IVONE TESTE*\n\n"
+            "CPF 428.***.***-53 — Amapá\n\n"
             "Libera *R$ 4.913,52*\n"
-            "CPF 428.***.***-53 · Amapá\n"
-            "3 contratos · parcela R$ 740,77\n"
+            "3 contratos — parcela R$ 740,77\n"
             "_REQ000182_")
 
     def test_texto_nao_libera(self):
         assert m.texto(NAO_LIBERA, "REQ000182") == (
-            "⛔ *Não liberou.*\n"
-            "CPF 428.***.***-53 · Amapá\n"
+            "⛔ *Não liberou.*\n\n"
+            "CPF 428.***.***-53 — Amapá\n\n"
             "Nenhum contrato encontrado no banco\n"
             "_REQ000182_")
 

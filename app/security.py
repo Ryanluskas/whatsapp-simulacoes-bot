@@ -246,9 +246,13 @@ def digits_only(value: str | None) -> str:
 
 def mask_cpf(cpf: str | None) -> str:
     d = digits_only(cpf)
-    if len(d) != 11:
-        return "***" if d else "-"
-    return f"{d[:3]}.***.***-{d[9:]}"
+    if not d:
+        return "-"
+    if len(d) == 11:
+        return f"{d[:3]}.***.***-{d[9:]}"
+    if len(d) > 4:
+        return f"{d[:2]}***{d[-2:]}"
+    return "***"
 
 
 def format_cpf(cpf: str | None) -> str:

@@ -13,7 +13,18 @@ PR que a introduz.
 
 ## [Não lançado]
 
+### Adicionado
+
+- **Recuperação de Histórico Evolution (Catch-up):** Sincronização retroativa segura ao iniciar o bot, buscando mensagens pendentes no grupo via `findMessages`, com controle transacional por checkpoint persistente (`last_evolution_sync`), proteção contra duplicações e filtro por tempo configurável (`EVOLUTION_CATCHUP_MAX_AGE_HOURS`).
+- **Fila Pausada na Inicialização:** Nova opção `QUEUE_PAUSED_AT_STARTUP=true` para permitir que o operador autentique com calma no portal antes de liberar o despacho das simulações da fila.
+- **Gerenciamento Manual da Fila no Painel:** Botões operacionais na dashboard para mover para o topo, mover para cima/baixo e excluir solicitações da fila em tempo real com atualização via SSE.
+- O bot agora lê a nova estrutura de erros do portal do Santander (`dss-alert-banner`) para entregar os motivos exatos de recusa sem perder contexto.
+- O card da simulação e o texto de resposta agora exibem as matrículas (benefícios) encontradas, ajudando o consultor a localizar o cliente mais rapidamente.
+
 ### Corrigido
+
+- O analisador de pedidos (`parse_request`) agora fatiar corretamente quebras de linha com caracteres especiais (`\u2028`), comuns ao copiar de blocos de notas de celulares e planilhas, evitando que mensagens com múltiplos campos em linhas visuais sejam ignoradas como linha única.
+- Resolvido um bug interno de travamento em simulações (Pausa Segura) que paralisava o sistema após reinícios.
 
 - CPFs com 10 dígitos (faltando o 0 inicial ou final) passam a ser corrigidos e aceitos automaticamente pelo analisador.
 - CPFs enviados de forma espaçada ou com pontuação junto a outros dados passam a ser lidos corretamente sem falsos positivos.

@@ -195,9 +195,32 @@ class SimulatorService(ThreadActor):
             self._last_error = str(exc)
             self._log("ERROR", str(exc))
 
+        import time
+        import random
+        last_keepalive = time.monotonic()
+
         while not self.stopping:
             if not self._drain(0.5):
                 break
+                
+            # Anti-idle (keep-alive)
+            now = time.monotonic()
+            if now - last_keepalive > 60.0:
+                last_keepalive = now
+                if self._page and not self._page.is_closed():
+                    try:
+                        # Pequenos movimentos de mouse
+                        x = random.randint(100, 500)
+                        y = random.randint(100, 500)
+                        self._page.mouse.move(x, y)
+                        self._page.mouse.move(x + 10, y + 10)
+                        self._page.mouse.click(10, 10, delay=50)
+                        
+                        # Ping HTTP no mesmo domínio para renovar o token da sessão no servidor
+                        self._page.evaluate("fetch(window.location.href, {method:'HEAD'}).catch(()=>{})")
+                    except Exception:
+                        pass
+
         self._close_browser()
 
     # -------------------------------------------------------------- API publica
@@ -334,6 +357,20 @@ class SimulatorService(ThreadActor):
         except Exception:
             pass
         self._context.add_init_script(self._bot.STEALTH_JS)
+        self._context.add_init_script("""
+const observer = new MutationObserver(() => {
+    const banner = document.querySelector('.dss-alert-banner');
+    if (banner && !banner.dataset.reported) {
+        banner.dataset.reported = '1';
+        const paragraphs = Array.from(banner.querySelectorAll('p'));
+        const motives = paragraphs.map(p => p.textContent.trim()).filter(text => text.length > 0);
+        if (motives.length > 0) {
+            sessionStorage.setItem('motivos_erro_portal', JSON.stringify(motives));
+        }
+    }
+});
+observer.observe(document, {childList: true, subtree: true});
+        """)
         self._context.on("page", lambda page: _safe(self._bot._aplicar_stealth, page))
         self._page = self._context.pages[0] if self._context.pages else self._context.new_page()
         _safe(self._bot._aplicar_stealth, self._page)
@@ -379,8 +416,10 @@ class SimulatorService(ThreadActor):
                          timeout=20_000)
         else:
             self._log("INFO", "O portal já estava aberto; não recarreguei a página.")
-        self._tentar("Login automático no Santander",
-                     self._bot.tentar_login_automatico, self._page)
+        
+        # Usa nosso fluxo com MFA no lugar do login simples do bot.py
+        self._tentar("Login automático com MFA",
+                     self._tentar_login_automatico_com_mfa)
 
         found = self._tentar("Procurar a página do formulário",
                              self._bot._encontrar_pagina_formulario, self._context)
@@ -438,6 +477,108 @@ class SimulatorService(ThreadActor):
     _ESPERA_LOGIN_SEGUNDOS = 300.0
     _INTERVALO_DA_CONFERENCIA = 3.0
 
+    def _tentar_login_automatico_com_mfa(self) -> bool:
+        """Tenta fazer o login e passar pelo MFA via e-mail."""
+        from .gmail_otp import buscar_codigo_santander
+        from dotenv import dotenv_values
+        from pathlib import Path
+
+        # Lê direto do arquivo físico toda vez (hot reload), pra não precisar reiniciar o bot!
+        env_path = Path(__file__).resolve().parent.parent / ".env"
+        env_vars = dotenv_values(env_path)
+
+        user = env_vars.get("GMAIL_USER")
+        pwd = env_vars.get("GMAIL_APP_PASSWORD")
+        if pwd:
+            pwd = pwd.replace(" ", "")
+
+        if not user or not pwd:
+            return False
+
+        self._log("INFO", "Iniciando auto-login e captura de OTP via Gmail...")
+
+        try:
+            cpf = env_vars.get('SANTANDER_CPF', '').strip()
+            senha = env_vars.get('SANTANDER_SENHA', '').strip()
+
+            self._log("INFO", f"Verificação interna: CPF configurado no arquivo? {'SIM' if cpf else 'NAO'}")
+
+            if not cpf or not senha:
+                self._log("WARNING", "CPF ou Senha ausentes no .env")
+                return False
+
+            # Injeta FORÇADAMENTE no bot global
+            self._bot.CPF_ACESSO = cpf
+            self._bot.SENHA_ACESSO = senha
+
+            # Vai para a landing page e clica em acessar
+            self._page.goto(self._bot.URL_LANDING, wait_until="domcontentloaded", timeout=15_000)
+            time.sleep(2)
+            
+            for sel in ['button:has-text("Acessar o Portal")', 'a:has-text("Acessar o Portal")']:
+                try:
+                    loc = self._page.locator(sel).first
+                    if loc.is_visible(timeout=2000):
+                        loc.click()
+                        break
+                except:
+                    pass
+
+            time.sleep(3)
+            
+            # Encontra a aba de login verdadeira (o popup de login do SSO)
+            lp = self._bot._achar_pagina_login(self._context) or self._page
+            
+            self._log("INFO", "Tentando auto-login do Arqueiro na aba correta...")
+            # Usa a função nativa do Arqueiro na aba correta para aproveitar o Shadow DOM
+            self._bot.tentar_login_automatico(lp)
+
+            # Espera carregar e ver se pede MFA NA ABA DO POPUP (lp)
+            try:
+                lp.wait_for_selector('text="Autenticação Parceiro Santander"', timeout=8000)
+            except Exception:
+                # Se não pediu autenticação e já entrou
+                found = _safe(self._bot._encontrar_pagina_formulario, self._context)
+                if found:
+                    self._page = found
+                    return True
+                return False
+
+            self._log("INFO", "Tela de MFA detectada. Selecionando envio por e-mail...")
+            # Seleciona radio do email NA ABA CORRETA (lp)
+            lp.locator('label:has-text("@gmail.com")').click(timeout=3000)
+            # Clica em enviar
+            lp.locator('button:has-text("Enviar")').click(timeout=3000)
+
+            self._log("INFO", f"OTP solicitado para {user}. Aguardando o e-mail do Santander...")
+            codigo = buscar_codigo_santander(user, pwd, timeout_sec=60)
+
+            if not codigo:
+                self._log("WARNING", "Não recebi o código OTP no Gmail a tempo.")
+                return False
+
+            self._log("INFO", f"OTP {codigo} recebido! Preenchendo validação no portal...")
+            
+            inputs = lp.locator('input[type="text"], input[type="number"]')
+            if inputs.count() > 0:
+                inputs.first.fill(codigo)
+            else:
+                lp.keyboard.type(codigo)
+
+            lp.locator('button:has-text("Continuar")').click(timeout=3000)
+            
+            time.sleep(3)
+            found = _safe(self._bot._encontrar_pagina_formulario, self._context)
+            if found:
+                self._page = found
+                self._log("INFO", "Auto-login com OTP bem-sucedido! Retomando as simulações.")
+                return True
+                
+        except Exception as e:
+            self._log("WARNING", f"Falha no fluxo de auto-login OTP: {e}")
+            
+        return False
+
     def _esperar_login_do_operador(self):
         """Espera o login SEM tocar na pagina.
 
@@ -450,11 +591,16 @@ class SimulatorService(ThreadActor):
         O ``bot.py`` do Arqueiro nao foi alterado; apenas deixamos de chamar a
         funcao dele que navega.
         """
+        # 1. Tentativa automatizada primeiro
+        if self._tentar_login_automatico_com_mfa():
+            return self._page
+
+        # 2. Se falhar, avisa que o operador precisará logar na mão
         self._log(
             "WARNING",
             "Sessão do Santander caiu. Faça login na janela do simulador — "
             "não vou recarregar a página enquanto você digita. "
-            f"Aguardo por até {int(self._ESPERA_LOGIN_SEGUNDOS / 60)} minutos.",
+            f"Aguardo por até {int(self._ESPERA_LOGIN_SEGUNDOS / 60)} minutos."
         )
         limite = time.monotonic() + self._ESPERA_LOGIN_SEGUNDOS
         while time.monotonic() < limite:
@@ -510,22 +656,24 @@ class SimulatorService(ThreadActor):
                 notify(Stage.EXTRACTING)
                 status, _reducao, contratos, margem = self._bot.verificar_refinanciamento(self._page)
                 # A FOTO VEM ANTES de voltar ao formulario: `voltar_ao_formulario`
-                # navega, e a tela do resultado deixa de existir. Foi o mesmo
-                # cuidado que ja' se toma com o texto do erro do portal.
+                # navega, e a tela do resultado deixa de existir.
                 foto = self._fotografar_o_resultado(job)
+                
+                # Ler os motivos e as matriculas ANTES de sair da página
+                achados_pre = self._ler_motivos_do_portal()
+                matriculas_pre = self._ler_matriculas()
+                
                 self._safe_return_to_form()
-                return self._build_result(job, status, contratos, margem, portal_png=foto)
+                return self._build_result(job, status, contratos, margem, portal_png=foto, achados_pre=achados_pre, matriculas_pre=matriculas_pre)
 
             except PlaywrightTimeout as exc:
-                # Ler o banner ANTES de voltar ao formulario: a navegacao
-                # apaga a mensagem, e ela e' justamente o que o consultor
-                # precisa saber.
-                detalhe, _ = self._ler_erro_do_portal()
+                # Ler o banner ANTES de voltar ao formulario
+                detalhe, repetir_portal = self._ler_erro_do_portal()
                 self._safe_return_to_form()
                 return SimulationResult(
-                    job=job, ok=False, status="Timeout",
+                    job=job, ok=False, status="Timeout" if not detalhe else "Erro",
                     error=detalhe or f"o portal não respondeu a tempo ({_short(exc)})",
-                    retryable=True,
+                    retryable=repetir_portal if detalhe else True,
                 )
             except PlaywrightError as exc:
                 detalhe, _ = self._ler_erro_do_portal()
@@ -577,6 +725,14 @@ class SimulatorService(ThreadActor):
             self._log("INFO", f"{job.request_id}: sem print do portal — {motivo}")
         return caminho
 
+    def _ler_matriculas(self) -> list[str]:
+        if self._page is None:
+            return []
+        try:
+            return self._page.evaluate(MATRICULAS_JS) or []
+        except Exception:
+            return []
+
     def _ler_motivos_do_portal(self) -> list[dict]:
         """Tudo que o portal disse, LITERAL, na ordem em que apareceu.
 
@@ -619,12 +775,11 @@ class SimulatorService(ThreadActor):
         return achados[0]["texto"], motivos.vale_repetir(achados)
 
     def _build_result(self, job, status, contratos, margem,
-                      portal_png: str = "") -> SimulationResult:
+                      portal_png: str = "", achados_pre: list[dict] | None = None, matriculas_pre: list[str] | None = None) -> SimulationResult:
         contratos = list(contratos or [])
-        # Ler os motivos SEMPRE, nao so' quando da' erro: uma recusa vem com
-        # `ok=True` e `status="Nao"`, e e' justamente nela que o motivo e' a
-        # informacao que o consultor precisa.
-        achados = self._ler_motivos_do_portal() if not contratos else []
+        # Usar achados_pre porque a página já navegou
+        achados = achados_pre if achados_pre is not None else (self._ler_motivos_do_portal() if not contratos else [])
+        matriculas = matriculas_pre if matriculas_pre is not None else self._ler_matriculas()
         reducao = self._bot._calcular_reducao(contratos) if contratos else 0.0
         if status == "Sim" and reducao <= 0:
             status = "Não"
@@ -654,6 +809,7 @@ class SimulatorService(ThreadActor):
             installment_count=total_parcelas,
             debt_sum=soma_saldo,
             motivos=tuple(achados),
+            matriculas=tuple(matriculas),
             portal_png=portal_png,
         )
 
@@ -681,25 +837,63 @@ class SimulatorService(ThreadActor):
 # libera" -- uma ele resolve, a outra nao.
 ERRO_PORTAL_JS = r"""
 () => {
-  const vistos = [];
-  const limpar = (s) => (s || '').replace(/\s+/g, ' ').trim();
-  const guardar = (s) => {
-    const t = limpar(s);
-    if (t.length > 8 && t.length < 400 && !vistos.includes(t)) vistos.push(t);
-  };
+    // 1. Tentar ler do sessionStorage salvo pelo MutationObserver (para o caso de ter navegado)
+    try {
+        const stored = sessionStorage.getItem('motivos_erro_portal');
+        if (stored) {
+            const motives = JSON.parse(stored);
+            sessionStorage.removeItem('motivos_erro_portal');
+            if (motives && motives.length > 0) return motives;
+        }
+    } catch (e) {}
 
-  document.querySelectorAll(
-    '[role="alert"], [class*="error"], [class*="erro"], [class*="alert"], [class*="message"]'
-  ).forEach((el) => guardar(el.innerText));
+    // 2. Tentar ler as mensagens do alerta de recusa (.dss-alert-banner) na hora
+    const alertBanner = document.querySelector(".dss-alert-banner");
+    if (alertBanner) {
+        const paragraphs = Array.from(alertBanner.querySelectorAll("p"));
+        const motives = paragraphs
+            .map(p => p.textContent.trim())
+            .filter(text => text.length > 0);
+        
+        if (motives.length > 0) {
+            return motives;
+        }
+    }
 
-  const padrao = /mensagem do servi|erro no cam|averbadora|matr\u00edcula|matricula|n\u00e3o foi poss\u00edvel|nao foi possivel|indispon\u00edvel|sem acesso|n\u00e3o tem acesso/i;
-  document.querySelectorAll('div, span, p, li').forEach((el) => {
-    if (el.children.length > 3) return;
-    const t = el.innerText || '';
-    if (t.length < 300 && padrao.test(t)) guardar(t);
-  });
+    // 3. Fallback original
+    const vistos = [];
+    const limpar = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const guardar = (s) => {
+      const t = limpar(s);
+      if (t.length > 8 && t.length < 400 && !vistos.includes(t)) vistos.push(t);
+    };
 
-  return vistos.slice(0, 6);
+    document.querySelectorAll(
+      '[role="alert"], [class*="error"], [class*="erro"], [class*="alert"], [class*="message"]'
+    ).forEach((el) => guardar(el.innerText));
+
+    const padrao = /mensagem do servi|erro no cam|averbadora|matr\u00edcula|matricula|n\u00e3o foi poss\u00edvel|nao foi possivel|indispon\u00edvel|sem acesso|n\u00e3o tem acesso/i;
+    document.querySelectorAll('div, span, p, li').forEach((el) => {
+      if (el.children.length > 3) return;
+      const t = el.innerText || '';
+      if (t.length < 300 && padrao.test(t)) guardar(t);
+    });
+
+    return vistos.slice(0, 6);
+}
+"""
+
+MATRICULAS_JS = r"""
+() => {
+    const text = document.body ? document.body.innerText : "";
+    const matches = [...text.matchAll(/Matr[íi]cula[\s\n]*:?[\s\n]*([0-9a-zA-Z\-]+)/gi)];
+    const arr = [];
+    for (const match of matches) {
+        if (!arr.includes(match[1])) {
+            arr.push(match[1]);
+        }
+    }
+    return arr;
 }
 """
 

@@ -89,6 +89,8 @@ class Config:
     evolution_instance: str
     evolution_group_jid: str
     evolution_webhook_token: str
+    evolution_catchup_enabled: bool
+    evolution_catchup_max_age_hours: int
 
     # --- Alarmes da fila ---
     #
@@ -98,6 +100,7 @@ class Config:
     # dizia que 49 consultores estavam esperando.
     alerta_fila: int
     alerta_espera_minutos: float
+    queue_paused_at_startup: bool
 
     # --- Regras de negocio ---
     supported_banks: set[str]
@@ -236,6 +239,9 @@ def load_config(env_file: str | Path | None = None) -> Config:
         evolution_instance=os.getenv("EVOLUTION_INSTANCE", "allana").strip(),
         evolution_group_jid=os.getenv("EVOLUTION_GROUP_JID", "").strip(),
         evolution_webhook_token=os.getenv("EVOLUTION_WEBHOOK_TOKEN", "").strip(),
+        evolution_catchup_enabled=_flag("EVOLUTION_CATCHUP_ENABLED", "true"),
+        evolution_catchup_max_age_hours=_int("EVOLUTION_CATCHUP_MAX_AGE_HOURS", 24),
+        queue_paused_at_startup=_flag("QUEUE_PAUSED_AT_STARTUP", "true"),
         # A Evolution sobe junto com o bot: liga o WSL se ela estiver fora do
         # ar e reaponta o webhook se o IP do WSL mudou (reinicio do Windows).
         evolution_autostart=_flag("EVOLUTION_AUTOSTART", "true"),
