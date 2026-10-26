@@ -48,7 +48,7 @@ def _esperar(condicao, timeout=30.0):
     raise AssertionError("não aconteceu dentro do tempo")
 
 
-def _payload(texto: str = "Ivone Teste\nGoverno SP\n42888832453\nAmapá", *, id_msg="3EB0AAA",
+def _payload(texto: str = "Ivone Teste\nGoverno SP\n52998224725\nAmapá", *, id_msg="3EB0AAA",
              de_mim=False, grupo=GRUPO, participante=CONSULTOR,
              estendida=False, push="Ryan") -> dict:
     if estendida:
@@ -108,13 +108,13 @@ class TestOQueNaoDeveEntrar:
 # --------------------------------------------------------------- 12: o texto
 class TestDeOndeVemOTexto:
     def test_conversation(self):
-        leitura = interpretar(_payload("Maria\n31619614391"), GRUPO)
-        assert leitura.mensagem.text == "Maria\n31619614391"
+        leitura = interpretar(_payload("Maria\n52998224725"), GRUPO)
+        assert leitura.mensagem.text == "Maria\n52998224725"
 
     def test_extended_text_message(self):
         """Mensagem que responde a outra chega aqui, não em conversation."""
-        leitura = interpretar(_payload("Maria\n31619614391", estendida=True), GRUPO)
-        assert leitura.mensagem.text == "Maria\n31619614391"
+        leitura = interpretar(_payload("Maria\n52998224725", estendida=True), GRUPO)
+        assert leitura.mensagem.text == "Maria\n52998224725"
 
     def test_extrair_texto_sozinho(self):
         assert extrair_texto({"conversation": " oi "}) == "oi"
@@ -253,7 +253,7 @@ class TestARotaDoWebhook:
         assert not manager.whatsapp.inbox.empty()
         # Verificar o que entrou na fila
         msg = manager.whatsapp.inbox.get(timeout=1.0)
-        assert msg.text == "Ivone Teste\nGoverno SP\n42888832453\nAmapá"
+        assert msg.text == "Ivone Teste\nGoverno SP\n52998224725\nAmapá"
 
     def test_messages_update_classificacao_de_status(self, sistema):
         client, manager = sistema
@@ -404,7 +404,7 @@ class TestARotaDoWebhook:
         linha = manager.db.fetchone(
             "SELECT * FROM messages WHERE direction='in' AND wa_message_id='3EB0AAA'")
         assert linha is not None, "a mensagem não foi gravada antes de aceitar"
-        assert "42888832453" in linha["text"]
+        assert "52998224725" in linha["text"]
         assert linha["chat_id"] == GRUPO
 
     def test_reentrega_do_mesmo_payload_rende_uma_mensagem_so(self, sistema):
@@ -548,7 +548,7 @@ class TestDaMensagemAteAResposta:
         client, manager, enviados = sistema_completo
 
         r = client.post("/webhook/whatsapp",
-                        json=_payload("Ivone Teste\nGoverno SP\n42888832453\nSantander",
+                        json=_payload("Ivone Teste\nGoverno SP\n52998224725\nSantander",
                                       id_msg="3EB0PEDIDO"),
                         headers=CABECALHO)
         assert r.status_code == 200
@@ -567,19 +567,19 @@ class TestDaMensagemAteAResposta:
     def test_a_simulacao_ficou_registrada(self, sistema_completo):
         client, manager, enviados = sistema_completo
         client.post("/webhook/whatsapp",
-                    json=_payload("Ivone Teste\nGoverno SP\n42888832453", id_msg="3EB0PEDIDO2"),
+                    json=_payload("Ivone Teste\nGoverno SP\n52998224725", id_msg="3EB0PEDIDO2"),
                     headers=CABECALHO)
         _esperar(lambda: manager.db.fetchall(
             "SELECT id FROM simulations WHERE replied_at IS NOT NULL"))
         linha = manager.db.fetchone("SELECT * FROM simulations")
-        assert linha["cpf"] == "42888832453"
+        assert linha["cpf"] == "52998224725"
         assert linha["replied_at"]
 
     def test_a_propria_resposta_nao_vira_pedido_novo(self, sistema_completo):
         """O laço de 53 mensagens, agora impossível: fromMe resolve na entrada."""
         client, manager, enviados = sistema_completo
         client.post("/webhook/whatsapp",
-                    json=_payload("Ivone Teste\nGoverno SP\n42888832453", id_msg="3EB0PEDIDO3"),
+                    json=_payload("Ivone Teste\nGoverno SP\n52998224725", id_msg="3EB0PEDIDO3"),
                     headers=CABECALHO)
         _esperar(lambda: any(r.startswith("/message/send") for r, _ in enviados))
 

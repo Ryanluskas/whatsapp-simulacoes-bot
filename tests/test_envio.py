@@ -377,7 +377,7 @@ class TestOCitouRealChegaNaMensagem:
         from app.models import (IncomingMessage, ParsedRequest, SimulationJob,
                                 SimulationResult)
 
-        pedido = ParsedRequest(consultant_name="Ryan", cpf="42888832453",
+        pedido = ParsedRequest(consultant_name="Ryan", cpf="52998224725",
                                bank="Santander", contract="",
                                customer_name="Ivone Teste", origin="Amapá")
         msg = IncomingMessage(message_id="2A1", chat_id="g@g.us", chat_name="G",

@@ -34,7 +34,7 @@ def fila(tmp_path):
 def _inserir(fila, request_id: str, status: str, esperando_ha: float = 0.0) -> None:
     quando = iso_atras(esperando_ha) if esperando_ha else now_iso()
     fila.db.insert("simulations", {
-        "request_id": request_id, "cpf": "31619614391", "bank": "Santander",
+        "request_id": request_id, "cpf": "52998224725", "bank": "Santander",
         "consultant_name": "Ryan", "customer_name": "Maria",
         "status": status, "stage": Stage.QUEUED,
         "queued_at": quando, "created_at": quando, "updated_at": quando,

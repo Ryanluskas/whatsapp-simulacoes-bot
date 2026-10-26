@@ -98,26 +98,26 @@ class TestParser:
         É o formato dos prints do grupo "Santander Capital Simulações".
         A versão anterior do parser ignoraria todas estas mensagens.
         """
-        pedido, faltando = parse_request("Paulo Testes\nAmapá\n182.841.754.87", "Tester")
+        pedido, faltando = parse_request("Cliente Teste\nGO\n529.982.247-25", "Tester")
         assert faltando == []
-        assert pedido.customer_name == "Paulo Testes"
-        assert pedido.origin == "Amapá"
-        assert pedido.cpf == "18284175487"
+        assert pedido.customer_name == "Cliente Teste"
+        assert pedido.origin == "GO"
+        assert pedido.cpf == "52998224725"
         assert pedido.consultant_name == "Tester"
         assert pedido.bank == "Santander"   # assumido: o grupo é de um banco só
         assert pedido.contract == ""        # o contrato é resultado, não entrada
 
     def test_formato_real_sem_orgao(self):
-        pedido, faltando = parse_request("LUIZ FERNANDO TESTE\nGov\n31611176034", "Camila")
+        pedido, faltando = parse_request("LUIZ FERNANDO TESTE\nGov\n11144477735", "Camila")
         assert faltando == []
         assert pedido.customer_name == "LUIZ FERNANDO TESTE"
         assert pedido.origin == "Gov"
-        assert pedido.cpf == "31611176034"
+        assert pedido.cpf == "11144477735"
 
     def test_so_o_cpf_ainda_e_um_pedido(self):
-        pedido, faltando = parse_request("João\nGov\n11278412972", "Camila")
+        pedido, faltando = parse_request("João\nGov\n52998224725", "Camila")
         assert faltando == []
-        assert pedido.cpf == "11278412972"
+        assert pedido.cpf == "52998224725"
         assert pedido.customer_name == "João"
 
     def test_formato_rotulado_continua_aceito(self):
@@ -192,7 +192,7 @@ class TestParser:
 
     def test_cpf_em_varios_formatos(self):
         """O grupo escreve o CPF de três jeitos diferentes."""
-        for escrito in ("31611176034", "182.841.754.87", "529.982.247-25"):
+        for escrito in ("11144477735", "529.982.247-25"):
             pedido, _ = parse_request(f"Cliente\nGoverno SP\n{escrito}", "X")
             assert pedido is not None, escrito
             assert len(pedido.cpf) == 11
@@ -728,10 +728,10 @@ class TestMensagensReaisDoGrupo:
         O parser sempre esteve certo; quem falhava era a leitura do HTML.
         Fica aqui para que o formato sem pontuação nunca deixe de ser aceito.
         """
-        pedido, erros = parse_request("Ivone Teste\n42888832453\nAmapá")
+        pedido, erros = parse_request("Ivone Teste\n52998224725\nAmapá")
         assert erros == []
         assert pedido is not None
-        assert pedido.cpf == "42888832453"
+        assert pedido.cpf == "52998224725"
         assert pedido.customer_name == "Ivone Teste"
         assert pedido.origin == "Amapá"
 

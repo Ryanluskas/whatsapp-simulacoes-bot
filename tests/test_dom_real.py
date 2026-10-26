@@ -4,7 +4,7 @@ Todo retrabalho deste projeto veio de eu escrever seletor contra um HTML que
 imaginei. Estes testes usam os fatos observados com `ferramentas/dump_dom.py`:
 
 * ``.message-in`` / ``.message-out`` **não existem** — nenhuma linha tem;
-* ``data-pre-plain-text`` traz ``"[20:14, 30/08/2026] Ryan: "``;
+* ``data-pre-plain-text`` traz ``"[20:14, 30/08/2026] Consultor Teste: "``;
 * o bot assina como **"Operacional Capital"**;
 * o ``data-id`` vem pelado; as enviadas começam com ``3EB0``;
 * o botão do menu não tem ``data-icon`` — só ``aria-label="Abrir opções de
@@ -94,28 +94,28 @@ class TestAutoriaSemClassesCSS:
             pagina.close()
 
     def test_le_a_mensagem_do_consultor(self, navegador):
-        lidas = self._ler(navegador, _linha("2A48135636067914CA2B", "Ryan",
-                                            "Ivone Teste 42888832453"))
+        lidas = self._ler(navegador, _linha("2A000000000000000001", "Consultor Teste",
+                                            "Cliente Teste 52998224725"))
         assert len(lidas) == 1
-        assert "Ivone Teste" in lidas[0]["text"]
+        assert "Cliente Teste" in lidas[0]["text"]
 
     def test_ignora_a_propria_pelo_nome_do_autor(self, navegador):
         """O sinal que funciona aqui: quem assinou no data-pre-plain-text."""
         assert self._ler(navegador,
-                         _linha("3EB065E1F5CE2672313B9C", EU, "Nao libera")) == []
+                         _linha("3EB0000000000000000002", EU, "Nao libera")) == []
 
     def test_ignora_a_propria_pelo_prefixo_quando_falta_o_autor(self, navegador):
         """Sem data-pre-plain-text, o prefixo 3EB0 resolve."""
-        corpo = ('<div role="row"><div data-id="3EB06B5613DB090DA22216">'
+        corpo = ('<div role="row"><div data-id="3EB0000000000000000003">'
                  '<span class="selectable-text">Nao libera</span></div></div>')
         assert self._ler(navegador, corpo) == []
 
     def test_separa_as_duas_no_mesmo_chat(self, navegador):
-        corpo = (_linha("2A48135636067914CA2B", "Ryan", "Ivone Teste")
-                 + _linha("3EB065E1F5CE2672313B9C", EU, "Nao libera")
-                 + _linha("2A77A2F7D2E4AE82B46B", "Tobias", "Maria Tabare"))
+        corpo = (_linha("2A000000000000000001", "Consultor Teste", "Cliente Teste")
+                 + _linha("3EB0000000000000000002", EU, "Nao libera")
+                 + _linha("2A000000000000000004", "Consultor Exemplo", "Cliente Exemplo"))
         lidas = self._ler(navegador, corpo)
-        assert [m["text"] for m in lidas] == ["Ivone Teste", "Maria Tabare"]
+        assert [m["text"] for m in lidas] == ["Cliente Teste", "Cliente Exemplo"]
 
     def test_o_nome_proprio_vem_de_fora(self, navegador):
         """Com outro nome configurado, a mesma mensagem passa a ser lida."""
@@ -127,7 +127,7 @@ class TestAutoriaSemClassesCSS:
         pagina = navegador.new_page()
         try:
             pagina.set_content('<!doctype html><html><body><div id="main">'
-                               + _linha("2A_X", "Ryan", "oi")
+                               + _linha("2A_X", "Consultor Teste", "oi")
                                + "</div></body></html>")
             assert pagina.locator(".message-in, .message-out").count() == 0
         finally:
@@ -185,24 +185,24 @@ class TestGatilhoPorAriaLabel:
         try:
             pagina.set_content(
                 f'<!doctype html><html><body><div id="main">{corpo}</div></body></html>')
-            return _setinha(pagina, "2A48135636067914CA2B")
+            return _setinha(pagina, "2A000000000000000001")
         finally:
             pagina.close()
 
     def test_acha_o_botao_pelo_aria_label(self, navegador):
         n, rotulos = self._marcar(
-            navegador, _linha("2A48135636067914CA2B", "Ryan", "Ivone"))
+            navegador, _linha("2A000000000000000001", "Consultor Teste", "Ivone"))
         assert n == 1
         assert rotulos == ["Abrir opções de mensagem"]
 
     def test_descarta_o_botao_de_reagir(self, navegador):
         """Reagir também aparece no hover e abre o seletor de emoji."""
         _n, rotulos = self._marcar(
-            navegador, _linha("2A48135636067914CA2B", "Ryan", "Ivone"))
+            navegador, _linha("2A000000000000000001", "Consultor Teste", "Ivone"))
         assert "Reagir" not in rotulos
 
     def test_sem_botao_devolve_zero(self, navegador):
-        corpo = ('<div role="row"><div data-id="2A48135636067914CA2B">'
+        corpo = ('<div role="row"><div data-id="2A000000000000000001">'
                  "<span>sem botao</span></div></div>")
         n, _ = self._marcar(navegador, corpo)
         assert n == 0
@@ -260,7 +260,7 @@ class TestHeaderDoChatNaoDaListaLateral:
               '<header><span title="3 Atualizações no status">3 Atualizações</span></header>'
               '<div id="main">'
               f'<header><span title="{GRUPO}">{GRUPO}</span>'
-              '<span title="Allana, Glaucon, Joselia, Ryan">Allana...</span></header>'
+              '<span title="Consultora Teste, Consultor Sintetico, Consultora Exemplo, Consultor Teste">Consultora Teste...</span></header>'
               '<div role="row"><div data-id="2A48135636"></div></div>'
               "</div></body></html>")
 
@@ -310,15 +310,15 @@ class TestConferenciaDoNomeProprio:
             pagina.close()
 
     CONVERSA = (
-        '<div data-pre-plain-text="[20:14, 30/08/2026] Ryan: ">a</div>'
+        '<div data-pre-plain-text="[20:14, 30/08/2026] Consultor Teste: ">a</div>'
         f'<div data-pre-plain-text="[20:17, 30/08/2026] {EU}: ">b</div>'
-        '<div data-pre-plain-text="[20:20, 30/08/2026] Tobias Testão: ">c</div>'
-        '<div data-pre-plain-text="[20:22, 30/08/2026] Ryan: ">d</div>'
+        '<div data-pre-plain-text="[20:20, 30/08/2026] Consultor Exemplo Testão: ">c</div>'
+        '<div data-pre-plain-text="[20:22, 30/08/2026] Consultor Teste: ">d</div>'
     )
 
     def test_extrai_os_autores_sem_repetir(self, navegador):
         autores = self._autores(navegador, self.CONVERSA)
-        assert autores == ["Ryan", EU, "Tobias Testão"]
+        assert autores == ["Consultor Teste", EU, "Consultor Exemplo Testão"]
 
     def test_ignora_linha_sem_marca(self, navegador):
         autores = self._autores(navegador, self.CONVERSA + "<div>sem marca</div>")
@@ -336,13 +336,14 @@ class TestConferenciaDoNomeProprio:
         """O caso que a verificação existe para pegar."""
         from app.whatsapp import _normalizar
         autores = self._autores(navegador, self.CONVERSA)
-        assert not any(_normalizar(a) == _normalizar("Allana") for a in autores)
+        assert not any(_normalizar(a) == _normalizar("Consultora Teste") for a in autores)
 
     def test_a_comparacao_tolera_acento_e_espaco(self, navegador):
-        """`Tobias  Testão` com espaço duplo é o mesmo nome."""
+        """`Consultor Exemplo  Testão` com espaço duplo é o mesmo nome."""
         from app.whatsapp import _normalizar
         autores = self._autores(navegador, self.CONVERSA)
-        assert any(_normalizar(a) == _normalizar("tobias  testão") for a in autores)
+        assert any(_normalizar(a) == _normalizar("consultor exemplo  testão")
+                   for a in autores)
 
     def test_a_conferencia_roda_uma_vez_so(self):
         """Erro repetido a cada 3 segundos vira ruído e esconde o resto."""
@@ -380,7 +381,7 @@ class TestCabecalhoOndeSoOsParticipantesTemTitle:
         '<header><span title="3 Atualizações no status">3 Atualizações</span></header>'
         '<div id="main"><header>'
         f'<div><span>{GRUPO}</span></div>'
-        '<div><span title="Allana, Glaucon, Joselia, Ryan, Tobias">Allana...</span></div>'
+        '<div><span title="Consultora Teste, Consultor Sintetico, Consultora Exemplo, Consultor Teste, Consultor Exemplo">Consultora Teste...</span></div>'
         '</header><div role="row"><div data-id="2A48"></div></div></div>'
         "</body></html>")
 
@@ -458,14 +459,14 @@ class TestTodoJSCompilaNumNavegador:
                 '<header><span title="lateral">lateral</span></header>'
                 '<input type="file" accept="image/*">'
                 f'<div id="main"><header><span>{GRUPO}</span></header>'
-                + _linha("2A48135636067914CA2B", "Ryan", "Ivone Teste")
+                + _linha("2A000000000000000001", "Consultor Teste", "Cliente Teste")
                 + '</div><footer><div contenteditable="true" data-tab="10"></div>'
                 '<span data-icon="plus-rounded" aria-label="Anexar"></span></footer>'
                 "</body></html>")
             falhas = []
             for nome, js in self._constantes():
                 try:
-                    pagina.evaluate(js, "2A48135636067914CA2B")
+                    pagina.evaluate(js, "2A000000000000000001")
                 except Exception as exc:
                     if "SyntaxError" in str(exc):
                         falhas.append(f"{nome}: {str(exc)[:120]}")
@@ -485,11 +486,11 @@ class TestTodoJSCompilaNumNavegador:
             pagina.set_content(
                 '<!doctype html><html><body>'
                 f'<div id="main"><header><span>{GRUPO}</span></header>'
-                + _linha("2A48135636067914CA2B", "Ryan", "Ivone Teste")
+                + _linha("2A000000000000000001", "Consultor Teste", "Cliente Teste")
                 + "</div></body></html>")
             assert pagina.evaluate(CHAT_INFO_JS)["titulos"], "cabeçalho vazio"
             assert pagina.evaluate(READ_MESSAGES_JS, [30, EU]), "não leu a mensagem"
-            assert _quantas_setinhas(pagina, "2A48135636067914CA2B") == 1
+            assert _quantas_setinhas(pagina, "2A000000000000000001") == 1
         finally:
             pagina.close()
 
@@ -575,7 +576,7 @@ class TestOBotaoDeAcaoPrecisaDeTempoParaAparecer:
     O WhatsApp renderiza a seta de contexto no `mouseenter`, depois que o
     React reage. Procurar imediatamente encontra a bolha sem botão nenhum --
     e o diagnóstico registrava exatamente isso, todas as vezes:
-    ``ícones=['tail-in'] rótulos=[] botões=['Ryan']``.
+    ``ícones=['tail-in'] rótulos=[] botões=['Consultor Teste']``.
 
     Estes testes usam DOM real com o mesmo atraso, porque o defeito é de
     TEMPO: um teste com o botão já presente passaria mesmo com o bug.
@@ -584,7 +585,7 @@ class TestOBotaoDeAcaoPrecisaDeTempoParaAparecer:
     HTML = """
     <div id="main">
       <div role="row"><div data-id="2AAAA">
-        <span class="selectable-text">Ivone Teste 42888832453</span>
+        <span class="selectable-text">Cliente Teste 52998224725</span>
       </div></div>
     </div>
     <script>
@@ -984,14 +985,14 @@ class TestABarraDeCitacaoEhADoCompositor:
     -------------------------------------------
     A versão anterior escrevia a barra assim::
 
-        Ryan LUCIANGELA TESTADO 72845554753
+        Consultor Teste CLIENTE DE EXEMPLOS 52998224725
 
     ou seja, o corpo inteiro dentro dela. **A barra real não é assim.**
     `diagnostico/barra_citacao.png`, colhido com a barra armada de verdade,
     mostra três linhas::
 
-        Ryan
-        LUCIÂNGELA TESTADO
+        Consultor Teste
+        CLIENTE DE EXEMPLOS
         ...
 
     O CPF não aparece: o WhatsApp encerra a prévia em reticências. Com a
@@ -1005,7 +1006,7 @@ class TestABarraDeCitacaoEhADoCompositor:
     <div id="main">
       <div role="row">
         <div data-testid="quoted-message" style="width:200px;height:40px">
-          Victor Medeiros FLAVIO AUGUSTO
+          Cliente Diferente
         </div>
         <span class="selectable-text">mensagem antiga</span>
       </div>
@@ -1014,17 +1015,17 @@ class TestABarraDeCitacaoEhADoCompositor:
     #: A barra REAL: autor, começo da mensagem, reticências. Sem o CPF.
     COMPOSITOR = """
     <footer>
-      <div data-testid="quoted-message" style="width:400px;height:60px">Ryan
-LUCIANGELA TESTADO
+      <div data-testid="quoted-message" style="width:400px;height:60px">Consultor Teste
+CLIENTE DE EXEMPLOS
 ...</div>
       <button aria-label="Cancelar" style="width:20px;height:20px"></button>
       <div contenteditable="true" aria-label="Digite uma mensagem para o grupo X"></div>
     </footer>"""
 
     #: Como o pedido chega de verdade: NOME / CPF / ESTADO.
-    MARCAS = {"achou": True, "autor": "Ryan",
-              "primeiraLinha": "LUCIANGELA TESTADO",
-              "corpo": "LUCIANGELA TESTADO\n72845554753\nAMAPA"}
+    MARCAS = {"achou": True, "autor": "Consultor Teste",
+              "primeiraLinha": "CLIENTE DE EXEMPLOS",
+              "corpo": "CLIENTE DE EXEMPLOS\n52998224725\nGO"}
 
     def _ativa(self, navegador, corpo: str, marcas) -> dict:
         from app.whatsapp import CITACAO_ATIVA_JS
@@ -1052,25 +1053,25 @@ LUCIANGELA TESTADO
         A barra mostra só o nome; o CPF e o estado ficam de fora. Quem exigir
         mais que isso descarta uma citação que funcionou.
         """
-        assert "72845554753" not in self.COMPOSITOR, (
+        assert "52998224725" not in self.COMPOSITOR, (
             "a fixture voltou a inventar uma barra que mostra o corpo inteiro")
         assert self._ativa(navegador, self.COMPOSITOR, self.MARCAS)["ativa"] is True
 
     @pytest.mark.parametrize("nome", [
-        "Roseane",                      # 7 caracteres
-        "JOSETE DUARTE",
-        "JOSIANE CRISTINA",
-        "LUCIANGELA TESTADO",           # 17 sem espaços — reprovava por um
-        "MARCELA DE CAMPOS TABARE",
+        "Cliente",                      # 7 caracteres
+        "Cliente Exemplo",
+        "Cliente de Teste",
+        "CLIENTE DE EXEMPLOS",           # 17 sem espaços — reprovava por um
+        "Cliente de Exemplo",
     ])
     def test_nomes_de_qualquer_tamanho(self, navegador, nome):
         """Os nomes curtos eram a maioria das reprovações."""
         barra = f"""
-        <footer><div data-testid="quoted-message" style="width:400px;height:60px">Ryan
+        <footer><div data-testid="quoted-message" style="width:400px;height:60px">Consultor Teste
 {nome}
 ...</div></footer>"""
-        marcas = {"achou": True, "autor": "Ryan", "primeiraLinha": nome,
-                  "corpo": f"{nome}\n72845554753\nAMAPA"}
+        marcas = {"achou": True, "autor": "Consultor Teste", "primeiraLinha": nome,
+                  "corpo": f"{nome}\n52998224725\nGO"}
         assert self._ativa(navegador, barra, marcas)["ativa"] is True
 
     def test_barra_de_outra_mensagem_e_recusada(self, navegador):
@@ -1079,19 +1080,19 @@ LUCIANGELA TESTADO
         É o risco que justifica conferir: o consultor leria o resultado de
         outro cliente como se fosse o dele.
         """
-        outra = {"achou": True, "autor": "Ryan",
-                 "primeiraLinha": "MARCIA TESTADORA",
-                 "corpo": "MARCIA TESTADORA\n80390002704\nAMAPA"}
+        outra = {"achou": True, "autor": "Consultor Teste",
+                 "primeiraLinha": "OUTRO CLIENTE",
+                 "corpo": "OUTRO CLIENTE\n11144477735\nGO"}
         assert self._ativa(navegador, self.COMPOSITOR, outra)["ativa"] is False
 
     def test_prefixo_parecido_nao_engana(self, navegador):
         """MARIA e MARIANA começam igual; a prévia decide."""
         barra = """
-        <footer><div data-testid="quoted-message" style="width:400px;height:60px">Ryan
-MARIANA DE SOUZA
+        <footer><div data-testid="quoted-message" style="width:400px;height:60px">Consultor Teste
+CLIENTE TESTADO
 ...</div></footer>"""
-        maria = {"achou": True, "autor": "Ryan", "primeiraLinha": "MARIA DE SOUZA",
-                 "corpo": "MARIA DE SOUZA\n11122233344\nAMAPA"}
+        maria = {"achou": True, "autor": "Consultor Teste", "primeiraLinha": "CLIENTE",
+                 "corpo": "CLIENTE\n11122233344\nGO"}
         assert self._ativa(navegador, barra, maria)["ativa"] is False
 
     def test_sem_marcas_nao_confirma(self, navegador):
@@ -1109,11 +1110,11 @@ MARIANA DE SOUZA
         O log não dizia se a barra existia, o que ela mostrava, nem contra o
         que foi comparada.
         """
-        outra = {"achou": True, "autor": "Ryan", "primeiraLinha": "OUTRA PESSOA",
+        outra = {"achou": True, "autor": "Consultor Teste", "primeiraLinha": "OUTRA PESSOA",
                  "corpo": "OUTRA PESSOA\n1\nX"}
         r = self._ativa(navegador, self.COMPOSITOR, outra)
         assert r["temBarra"] is True
-        assert r["rodape"] and "LUCIANGELA" in r["rodape"]
+        assert r["rodape"] and "CLIENTE DE EXEMPLOS" in r["rodape"]
         assert r["previa"], "não disse o que a barra mostrava"
         assert r["porque"], "não disse por que recusou"
 
@@ -1126,15 +1127,15 @@ class TestAsMarcasDaMensagem:
     conferência recebia vazio e reprovava uma citação perfeita.
     """
 
-    #: Estrutura real, tirada de `diagnostico/01b_grupo_aberto.html`.
+    #: Estrutura sintética baseada no formato observado no DOM.
     LINHA = """
     <div role="row">
-      <div class="copyable-text" data-pre-plain-text="[20:14, 30/08/2026] Ryan: "
-           data-id="2A0E5CDB2622616E3E02">
+      <div class="copyable-text" data-pre-plain-text="[20:14, 30/08/2026] Consultor Teste: "
+           data-id="2A000000000000000005">
         <span data-testid="selectable-text" class="selectable-text copyable-text"
-              style="white-space: pre-wrap">Ivone Teste
-42888832453
-Amapa</span>
+              style="white-space: pre-wrap">Cliente Teste
+52998224725
+GO</span>
         <span aria-hidden="true">20:14</span>
       </div>
     </div>"""
@@ -1151,18 +1152,18 @@ Amapa</span>
             pagina.close()
 
     def test_le_o_autor_do_pre_plain_text(self, navegador):
-        assert self._marcas(navegador, "2A0E5CDB2622616E3E02")["autor"] == "Ryan"
+        assert self._marcas(navegador, "2A000000000000000005")["autor"] == "Consultor Teste"
 
     def test_le_a_primeira_linha(self, navegador):
         assert self._marcas(
-            navegador, "2A0E5CDB2622616E3E02")["primeiraLinha"] == "Ivone Teste"
+            navegador, "2A000000000000000005")["primeiraLinha"] == "Cliente Teste"
 
     def test_le_o_corpo_inteiro(self, navegador):
-        r = self._marcas(navegador, "2A0E5CDB2622616E3E02")
-        assert "42888832453" in r["corpo"] and "Amapa" in r["corpo"]
+        r = self._marcas(navegador, "2A000000000000000005")
+        assert "52998224725" in r["corpo"] and "GO" in r["corpo"]
 
     def test_o_horario_nao_entra_no_corpo(self, navegador):
-        assert "20:14" not in self._marcas(navegador, "2A0E5CDB2622616E3E02")["corpo"]
+        assert "20:14" not in self._marcas(navegador, "2A000000000000000005")["corpo"]
 
     def test_mensagem_ausente_nao_estoura(self, navegador):
         r = self._marcas(navegador, "NAO_EXISTE")
@@ -1173,14 +1174,14 @@ Amapa</span>
         from app.whatsapp import CITACAO_ATIVA_JS, MARCAS_DA_MENSAGEM_JS
 
         barra = """
-        <footer><div data-testid="quoted-message" style="width:400px;height:60px">Ryan
-Ivone Teste
+        <footer><div data-testid="quoted-message" style="width:400px;height:60px">Consultor Teste
+Cliente Teste
 ...</div></footer>"""
         pagina = navegador.new_page()
         try:
             pagina.set_content(
                 f"<!doctype html><html><body>{self.LINHA}{barra}</body></html>")
-            marcas = pagina.evaluate(MARCAS_DA_MENSAGEM_JS, "2A0E5CDB2622616E3E02")
+            marcas = pagina.evaluate(MARCAS_DA_MENSAGEM_JS, "2A000000000000000005")
             assert pagina.evaluate(CITACAO_ATIVA_JS, marcas)["ativa"] is True
         finally:
             pagina.close()
@@ -1225,7 +1226,7 @@ class TestCancelarCitacaoOrfa:
         fora_do_footer = """
         <div class="preview">
           <div class="painel">
-            <div data-testid="quoted-message" style="width:300px;height:50px">Ryan</div>
+            <div data-testid="quoted-message" style="width:300px;height:50px">Consultor Teste</div>
             <button aria-label="Cancelar" style="width:20px;height:20px"></button>
           </div>
         </div>"""
@@ -1439,7 +1440,7 @@ class TestReancorarAntesDeCadaClique:
 
     O log de 01/09 mostrou os dois sintomas dessa condição:
 
-        Rodapé sem a citação esperada: 'Allana testando 2.274'
+        Rodapé sem a citação esperada: 'Consultor Teste 2.274'
         Citação falhou em: PASSO 4 ... linha_no_dom=False
         menus=['Adicionar membro  Dados do grupo  ...  Sair do grupo']
 
@@ -1501,7 +1502,7 @@ class TestReancorarAntesDeCadaClique:
             pagina.set_content("""<!doctype html><html><body><div id="main">
               <div role="row" style="width:900px">
                 <div class="copyable-text" data-id="2A1"
-                     data-pre-plain-text="[10:00, 01/09/2026] Ryan: "
+                     data-pre-plain-text="[10:00, 01/09/2026] Consultor Teste: "
                      style="display:block;width:300px;height:60px">
                   <span class="selectable-text">Maria Tabaré</span>
                 </div>
@@ -1585,9 +1586,9 @@ class TestReancorarAntesDeCadaClique:
         try:
             pagina.set_content("""<!doctype html><html><body><div id="main">
               <div role="row"><div data-id="2AUM" style="display:block;width:200px;height:40px">
-                <span class="selectable-text">Cliente Teste 52998224725 AMAPA</span></div></div>
+                <span class="selectable-text">Cliente Teste 52998224725 GO</span></div></div>
               <div role="row"><div data-id="2ADOIS" style="display:block;width:200px;height:40px">
-                <span class="selectable-text">Cliente Teste 52998224725 AMAPA</span></div></div>
+                <span class="selectable-text">Cliente Teste 52998224725 GO</span></div></div>
               </div></body></html>""")
             r = pagina.evaluate(GEOMETRIA_DA_LINHA_JS, "2ADOIS")
             assert r["achou"] is True and r["dataId"] == "2ADOIS"

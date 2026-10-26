@@ -63,17 +63,17 @@ def _pagina(corpo: str) -> str:
 
 # Geracao atual: classe .message-in presente E data-id no mesmo elemento.
 COM_CLASSE = _pagina(
-    _msg(f"{GRUPO}_AAA_5562111@c.us", "message-in", "Ryan", "Ivone Teste")
+    _msg(f"{GRUPO}_AAA_5562111@c.us", "message-in", "Consultor A", "Cliente Teste")
     + _msg(f"{EU}_BBB", "message-out", "Operacional Capital", "resposta do bot")
-    + _msg(f"{GRUPO}_CCC_5562222@c.us", "message-in", "Tobias", "428.888.324-53")
+    + _msg(f"{GRUPO}_CCC_5562222@c.us", "message-in", "Consultor B", "529.982.247-25")
 )
 
 # Geracao sem as classes message-in/out: so' o data-id distingue.
 SEM_CLASSE = _pagina(
-    _msg(f"{GRUPO}_AAA_5562111@c.us", "x1c4 focusable-list-item", "Ryan", "Ivone Teste")
+    _msg(f"{GRUPO}_AAA_5562111@c.us", "x1c4 focusable-list-item", "Consultor A", "Cliente Teste")
     + _msg(f"{EU}_BBB", "x1c4 focusable-list-item", "Operacional Capital",
          "resposta do bot")
-    + _msg(f"{GRUPO}_CCC_5562222@c.us", "x1c4 focusable-list-item", "Tobias", "428.888.324-53")
+    + _msg(f"{GRUPO}_CCC_5562222@c.us", "x1c4 focusable-list-item", "Consultor B", "529.982.247-25")
 )
 
 SO_ENVIADAS = _pagina(_msg(f"{EU}_BBB", "message-out", "Operacional Capital", "so eu falei"))
@@ -102,7 +102,7 @@ class TestLeitura:
     @pytest.mark.parametrize("html,rotulo", [(COM_CLASSE, "com classe"), (SEM_CLASSE, "sem classe")])
     def test_le_as_recebidas_nas_duas_geracoes(self, navegador, html, rotulo):
         lidas = _ler(navegador, html)
-        assert [m["text"] for m in lidas] == ["Ivone Teste", "428.888.324-53"], rotulo
+        assert [m["text"] for m in lidas] == ["Cliente Teste", "529.982.247-25"], rotulo
 
     @pytest.mark.parametrize("html", [COM_CLASSE, SEM_CLASSE])
     def test_nunca_le_o_que_nos_mesmos_enviamos(self, navegador, html):
@@ -112,20 +112,20 @@ class TestLeitura:
 
     def test_traz_o_data_pre_plain_text(self, navegador):
         primeira = _ler(navegador, COM_CLASSE)[0]
-        assert primeira["meta"] == "[19:47, 29/08/2026] Ryan: "
+        assert primeira["meta"] == "[19:47, 29/08/2026] Consultor A: "
         assert primeira["id"] == f"{GRUPO}_AAA_5562111@c.us"
 
     def test_nao_duplica_quando_o_data_id_aparece_aninhado(self, navegador):
         aninhado = _pagina(
             f'<div role="row" data-id="{GRUPO}_AAA_5562111@c.us">'
-            + _msg(f"{GRUPO}_AAA_5562111@c.us", "message-in", "Ryan", "uma vez so")
+            + _msg(f"{GRUPO}_AAA_5562111@c.us", "message-in", "Consultor A", "uma vez so")
             + "</div>"
         )
         assert len(_ler(navegador, aninhado)) == 1
 
     def test_respeita_o_limite(self, navegador):
         muitas = _pagina("".join(
-            _msg(f"{GRUPO}_M{i}_5562111@c.us", "message-in", "Ryan", f"msg {i}")
+            _msg(f"{GRUPO}_M{i}_5562111@c.us", "message-in", "Consultor A", f"msg {i}")
             for i in range(40)))
         lidas = _ler(navegador, muitas, limite=30)
         assert len(lidas) == 30
@@ -215,14 +215,14 @@ class TestAcharConversaNaLista:
         primeiro" mandaria dado de cliente para o grupo errado. Escolher é de
         uma pessoa, não do bot.
         """
-        html = _barra_lateral(["Joselia Teste", GRUPO_NOME, GRUPO_NOME])
+        html = _barra_lateral(["Consultor C Teste", GRUPO_NOME, GRUPO_NOME])
         assert self._achar(navegador, html, GRUPO_NOME) == (False, 0), (
             "escolheu um entre dois grupos de mesmo nome")
         assert self._quantos(navegador, html, GRUPO_NOME) == 2, (
             "sem a contagem, o log não explica por que não abriu")
 
     def test_acha_pelo_nome_exato(self, navegador):
-        html = _barra_lateral(["Joselia Teste", GRUPO_NOME, "Tobias Testão"])
+        html = _barra_lateral(["Consultor C Teste", GRUPO_NOME, "Consultor B Testão"])
         assert self._achar(navegador, html, GRUPO_NOME) == (True, 1)
 
     def test_acha_com_acento_decomposto_no_dom(self, navegador):
@@ -230,7 +230,7 @@ class TestAcharConversaNaLista:
         import unicodedata
         decomposto = unicodedata.normalize("NFD", GRUPO_NOME)
         assert decomposto != GRUPO_NOME, "o caso precisa ser realmente diferente"
-        html = _barra_lateral(["Joselia Teste", decomposto])
+        html = _barra_lateral(["Consultor C Teste", decomposto])
         assert self._achar(navegador, html, GRUPO_NOME) == (True, 1)
 
     def test_tolera_espaco_duplo_e_maiuscula(self, navegador):
@@ -249,7 +249,7 @@ class TestAcharConversaNaLista:
             pagina.close()
 
     def test_grupo_ausente_devolve_falso(self, navegador):
-        html = _barra_lateral(["Joselia Teste", "Tobias Testão"])
+        html = _barra_lateral(["Consultor C Teste", "Consultor B Testão"])
         assert self._achar(navegador, html, GRUPO_NOME) == (False, 0)
 
     def test_nao_deixa_marca_velha_para_tras(self, navegador):
@@ -257,15 +257,15 @@ class TestAcharConversaNaLista:
         from app.whatsapp import ACHAR_CONVERSA_JS, MARCA_ALVO
         pagina = navegador.new_page()
         try:
-            pagina.set_content(_barra_lateral(["Joselia Teste", GRUPO_NOME]))
+            pagina.set_content(_barra_lateral(["Consultor C Teste", GRUPO_NOME]))
             pagina.evaluate(ACHAR_CONVERSA_JS, GRUPO_NOME)
-            pagina.evaluate(ACHAR_CONVERSA_JS, "Joselia Teste")
+            pagina.evaluate(ACHAR_CONVERSA_JS, "Consultor C Teste")
             assert pagina.locator(f"[{MARCA_ALVO}]").count() == 1
         finally:
             pagina.close()
 
 
-PARTICIPANTES = ("Allana, Glaucon, Joselia, Ryan, Tobias, +55 62 8000-1004, "
+PARTICIPANTES = ("Consultor D, Consultor E, Consultor C, Consultor A, Consultor B, +55 62 8000-1004, "
                  "+55 62 9000-1005, +55 62 9000-1006, +55 62 9000-1007")
 
 
@@ -279,8 +279,8 @@ def _cabecalho(titulos: list[str]) -> str:
     return f"""<!doctype html><html><body>
     <div id="main"><header>{spans}</header></div>
     <div id="main"><div role="row" data-id="false_5562000@g.us_AAA_5562111@c.us">
-      <div class="copyable-text" data-pre-plain-text="[20:13, 29/08/2026] Ryan: ">
-        <span class="selectable-text"><span>Ivone Teste</span></span>
+      <div class="copyable-text" data-pre-plain-text="[20:13, 29/08/2026] Consultor A: ">
+        <span class="selectable-text"><span>Cliente Teste</span></span>
       </div></div></div></body></html>"""
 
 
@@ -333,7 +333,7 @@ class TestTituloDoCabecalho:
 
         s = WhatsAppService(profile_dir=tmp_path / "p", group_name=GRUPO_NOME,
                             state=StateStore(tmp_path / "s.json"), headless=True)
-        assert s._escolher_titulo(["Joselia Teste", "online"]) == "Joselia Teste"
+        assert s._escolher_titulo(["Consultor C Teste", "online"]) == "Consultor C Teste"
 
 
 class TestEscolhaDoInputDeAnexo:
@@ -396,7 +396,7 @@ def _bolha_de_grupo(data_id: str, autor: str, corpo: str) -> str:
 
     O rótulo com o nome de quem escreveu vem ANTES do corpo no DOM. Os
     primeiros testes usavam uma bolha simplificada, sem esse rótulo — e foi
-    exatamente por isso que passaram enquanto o bot gravava "Ryan" como
+    exatamente por isso que passaram enquanto o bot gravava "Consultor A" como
     sendo o texto de toda mensagem recebida.
     """
     linhas = corpo.replace("\n", "<br>")
@@ -425,35 +425,35 @@ class TestCorpoDaMensagemEmGrupo:
             pagina.close()
 
     def test_le_o_corpo_e_nao_o_nome_do_autor(self, navegador):
-        """A regressão real: gravou 'Ryan' em vez do pedido da Clarisa."""
+        """A regressão real: gravou 'Consultor A' em vez do pedido da Clarisa."""
         html = _bolha_de_grupo(
-            "false_5562000@g.us_AAA_5562111@c.us", "Ryan",
-            "Clarisa de Tássia\n82674159804\nAmapá")
+            "false_5562000@g.us_AAA_5562111@c.us", "Consultor A",
+            "Clarisa de Tássia\n52998224725\nAmapá")
         lidas = self._ler(navegador, html)
         assert len(lidas) == 1
         texto = lidas[0]["text"]
-        assert texto.strip() != "Ryan", "voltou a capturar o nome do remetente"
+        assert texto.strip() != "Consultor A", "voltou a capturar o nome do remetente"
         assert "Clarisa de Tássia" in texto
-        assert "82674159804" in texto
+        assert "52998224725" in texto
         assert "Amapá" in texto
 
     def test_o_autor_continua_disponivel_no_meta(self, navegador):
         """O nome não se perde: ele vem do data-pre-plain-text, que é o lugar dele."""
-        html = _bolha_de_grupo("false_5562000@g.us_AAA_5562111@c.us", "Ryan", "teste")
-        assert "Ryan" in self._ler(navegador, html)[0]["meta"]
+        html = _bolha_de_grupo("false_5562000@g.us_AAA_5562111@c.us", "Consultor A", "teste")
+        assert "Consultor A" in self._ler(navegador, html)[0]["meta"]
 
     def test_o_texto_lido_vira_uma_simulacao(self, navegador):
         """Ponta a ponta: o que sai do DOM tem de atravessar o parser."""
         from app.parser import parse_request
 
         html = _bolha_de_grupo(
-            "false_5562000@g.us_AAA_5562111@c.us", "Ryan",
-            "Clarisa de Tássia\n82674159804\nAmapá")
+            "false_5562000@g.us_AAA_5562111@c.us", "Consultor A",
+            "Clarisa de Tássia\n52998224725\nAmapá")
         texto = self._ler(navegador, html)[0]["text"]
         pedido, erros = parse_request(texto)
         assert erros == []
         assert pedido is not None, "o texto lido não virou pedido"
-        assert pedido.cpf == "82674159804"
+        assert pedido.cpf == "52998224725"
         assert pedido.customer_name == "Clarisa de Tássia"
 
 
@@ -788,7 +788,7 @@ class TestTodoJSDeDiagnosticoRoda:
                 <span data-icon="plus-rounded"></span>
                 <div id="main">
                   <div role="row" data-id="false_g@g.us_A_x@c.us">
-                    <div class="copyable-text" data-pre-plain-text="[00:00, 30/08/2026] Ryan: ">
+                    <div class="copyable-text" data-pre-plain-text="[00:00, 30/08/2026] Consultor A: ">
                       <span class="selectable-text"><span>texto</span></span>
                     </div>
                   </div>
@@ -826,7 +826,7 @@ class TestGatilhosDaBolha:
     O mecanismo mudou depois que o laboratório (`ferramentas/testar_citacao.py`)
     mostrou o rótulo REAL desta instalação::
 
-        aria-label="Menu de contexto para a mensagem de Ryan"
+        aria-label="Menu de contexto para a mensagem de Consultor A"
 
     Não é "Abrir opções de mensagem" — esse era palpite meu, e por isso o
     código caía sempre no plano B do botão direito. O rótulo carrega o NOME
@@ -864,13 +864,13 @@ class TestGatilhosDaBolha:
         """O que o laboratório observou no WhatsApp de verdade."""
         n, rotulos = self._marcar(
             navegador,
-            '<div role="button" aria-label="Menu de contexto para a mensagem de Ryan">v</div>')
+            '<div role="button" aria-label="Menu de contexto para a mensagem de Consultor A">v</div>')
         assert n == 1
         assert rotulos[0].startswith("Menu de contexto")
 
     def test_o_nome_no_rotulo_nao_atrapalha(self, navegador):
         """Ele muda a cada mensagem — por isso a comparação é por prefixo."""
-        for quem in ("Ryan", "Allana testando", "+55 62 8000-1002"):
+        for quem in ("Consultor A", "Consultor D teste", "+55 62 8000-1002"):
             n, _ = self._marcar(
                 navegador,
                 f'<div role="button" aria-label="Menu de contexto para a mensagem de {quem}">v</div>')
@@ -885,7 +885,7 @@ class TestGatilhosDaBolha:
         """Os dois aparecem juntos no hover. Só um pode ser clicado."""
         n, rotulos = self._marcar(navegador, """
             <div role="button" aria-label="Encaminhar">seta</div>
-            <div role="button" aria-label="Menu de contexto para a mensagem de Ryan">v</div>""")
+            <div role="button" aria-label="Menu de contexto para a mensagem de Consultor A">v</div>""")
         assert n == 1
         assert "Encaminhar" not in rotulos[0]
 
@@ -904,7 +904,7 @@ class TestGatilhosDaBolha:
             pagina.set_content(f"""<!doctype html><html><body><div id="main">
                 <div role="row" data-id="{self.ID}">
                   <span class="selectable-text">Maria</span>
-                  <div role="button" aria-label="Menu de contexto para a mensagem de Ryan"
+                  <div role="button" aria-label="Menu de contexto para a mensagem de Consultor A"
                        style="display:none">v</div>
                 </div></div></body></html>""")
             assert _quantas_setinhas(pagina, self.ID) == 0
@@ -945,8 +945,8 @@ class TestNuncaLerAsProprias:
     DELE_SEM_PREFIXO = """
       <div role="row">
         <div data-id="2AF4AAAAAAAAAAAAAAAAAA">
-          <div class="copyable-text" data-pre-plain-text="[02:05, 30/08/2026] Ryan: ">
-            <span class="selectable-text"><span>Maria Tabaré 316.196.143.91</span></span>
+          <div class="copyable-text" data-pre-plain-text="[02:05, 30/08/2026] Consultor A: ">
+            <span class="selectable-text"><span>Maria Tabaré 529.982.247-25</span></span>
           </div>
         </div>
       </div>"""
@@ -1006,7 +1006,7 @@ class TestMirarNaLinhaDaMensagem:
         <span data-icon="down-context" style="display:block;width:20px;height:20px"></span>
         <div class="message-in">
           <div class="copyable-text" data-id="{ID}"
-               data-pre-plain-text="[02:03, 30/08/2026] Ryan: ">
+               data-pre-plain-text="[02:03, 30/08/2026] Consultor A: ">
             <span class="selectable-text"><span>Maria Tabaré</span></span>
           </div>
         </div>
@@ -1074,17 +1074,17 @@ class TestNaoResponderASiMesmo:
 
     MENSAGENS_DO_BOT = [
         "⚠️ *Operacional Capital*, para simular preciso de:\nCPF.",
-        "❌ *Ryan* — não foi possível simular\nCarregado\n🆔 REQ000021",
+        "❌ *Consultor A* — não foi possível simular\nCarregado\n🆔 REQ000021",
         "🔁 *Resultado da sua simulação* (reenvio)\n\n🧑 Marina",
-        "⚠️ *Não libera*\n👤 Ryan\n📋 Contrato\n🆔 REQ000020",
-        "📥 *Simulação recebida*\n\n👤 Consultor: Ryan",
-        "✅ *Libera R$ 2.219,77*\n👤 Ryan\n🆔 REQ000019",
+        "⚠️ *Não libera*\n👤 Consultor A\n📋 Contrato\n🆔 REQ000020",
+        "📥 *Simulação recebida*\n\n👤 Consultor: Consultor A",
+        "✅ *Libera R$ 2.219,77*\n👤 Consultor A\n🆔 REQ000019",
         "🔎 *Simulação realizada*\n\n🧑 Silvana Brito",
     ]
 
     DE_CONSULTOR = [
-        "Maria Tabaré\nAmapá\n316.196.143.91",
-        "Ivone Teste\n42888832453\nAmapá",
+        "Maria Tabaré\nAmapá\n529.982.247-25",
+        "Cliente Teste\n52998224725\nAmapá",
         "sem matricula",
         "bom dia",
         "CLIENTE EM ATRASO EM PRODUTOS DO BANCO",
@@ -1142,7 +1142,7 @@ class TestMenuRealDoOperador:
     """
 
     # Ordem e textos exatos do print.
-    ITENS = ["Responder", "Responder em particular", "Conversar com Ryan",
+    ITENS = ["Responder", "Responder em particular", "Conversar com Consultor A",
              "Copiar", "Reagir", "Encaminhar", "Fixar", "Pergunte à Meta AI",
              "Favoritar", "Denunciar", "Apagar"]
 
@@ -1346,7 +1346,7 @@ class TestAlbumNossoEhNosso:
                    if autor else "")
             pagina.set_content(f"""<!doctype html><html><body><div id="main">
               <div role="row"><div data-id="{data_id}" {pre}>
-                <span class="selectable-text">Maria Tabaré 31619614391</span>
+                <span class="selectable-text">Maria Tabaré 52998224725</span>
               </div></div></div></body></html>""")
             lidas = pagina.evaluate(READ_MESSAGES_JS, [20, "Operacional Capital"])
             # Se a mensagem foi lida, ela NÃO foi considerada nossa.

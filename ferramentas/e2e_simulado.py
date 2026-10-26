@@ -54,13 +54,13 @@ WEBHOOK_TOKEN = "e2e-token-do-webhook"
 AGENT_TOKEN = "e2e-token-do-agente"
 INSTANCIA = "allana"
 
-# CPFs válidos, um por cenário, para nada se misturar entre eles.
+# CPFs de teste permitidos; os IDs das mensagens isolam cada cenário.
 CPFS = {
     "A": "52998224725", "B1": "11144477735", "B2": "12345678909",
-    "C": "40481494235", "D": "98765432100", "E": "39053344705",
-    "F": "71428793860", "G1": "15350946056", "G2": "86288366757",
-    "G3": "39825979194", "H": "35623012353",
-    "I": "78778932807", "J": "74852605700",
+    "C": "52998224725", "D": "11144477735", "E": "52998224725",
+    "F": "11144477735", "G1": "52998224725", "G2": "11144477735",
+    "G3": "11144477735", "H": "11144477735",
+    "I": "52998224725", "J": "11144477735",
 }
 
 

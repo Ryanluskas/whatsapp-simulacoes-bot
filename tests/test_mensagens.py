@@ -17,7 +17,7 @@ from app.models import (IncomingMessage, ParsedRequest, SimulationJob,
                         SimulationResult)
 
 
-def _job(cliente="Ivone Teste", cpf="42888832453", consultor="Ryan",
+def _job(cliente="Ivone Teste", cpf="52998224725", consultor="Ryan",
          origem="Amapá"):
     pedido = ParsedRequest(consultant_name=consultor, cpf=cpf, bank="Santander",
                            contract="", customer_name=cliente, origin=origem)
@@ -58,7 +58,7 @@ class TestTomNatural:
             m.legenda(ERRO, "REQ1"),
             m.texto(LIBERA, "REQ1"),
             m.texto(ERRO, "REQ1"),
-            m.resultado_reenviado({"cpf": "42888832453", "status": "completed",
+            m.resultado_reenviado({"cpf": "52998224725", "status": "completed",
                                    "reduction_value": 100}),
         ]
 
@@ -107,13 +107,13 @@ class TestConteudoUtil:
         fala = m.texto(LIBERA, "REQ1")
         assert "4.913,52" in fala
         assert "IVONE TESTE" in fala, "o nome vai em caixa alta no texto"
-        assert "428" in fala, "sem CPF não dá para saber de quem é"
+        assert "529" in fala, "sem CPF não dá para saber de quem é"
 
     def test_cpf_mascarado_por_padrao(self):
         assert "***" in m.texto(LIBERA, "REQ1")
 
     def test_reenvio_se_identifica(self):
-        fala = m.resultado_reenviado({"cpf": "42888832453", "status": "completed",
+        fala = m.resultado_reenviado({"cpf": "52998224725", "status": "completed",
                                       "reduction_value": 2219.77})
         assert "reenvio" in fala.lower()
         assert "2.219,77" in fala
@@ -143,8 +143,8 @@ class TestAssinaturasCobremAsFalas:
             f"{fala!r} não seria reconhecida — o bot poderia responder a si mesmo")
 
     @pytest.mark.parametrize("texto", [
-        "Maria Tabaré\nAmapá\n316.196.143.91",
-        "Ivone Teste\n42888832453\nAmapá",
+        "Maria Tabaré\nAmapá\n529.982.247-25",
+        "Ivone Teste\n52998224725\nAmapá",
         "sem matricula",
         "bom dia",
         "CLIENTE EM ATRASO EM PRODUTOS DO BANCO",
@@ -333,7 +333,7 @@ class TestALegendaNaoRepeteOCard:
     def test_a_legenda_nao_traz_cpf(self, resultado):
         legenda = m.legenda(resultado, "REQ000182")
         assert "CPF" not in legenda
-        assert "428" not in legenda, "nem o CPF cru nem o mascarado"
+        assert "529" not in legenda, "nem o CPF cru nem o mascarado"
         assert "***" not in legenda
 
     @pytest.mark.parametrize("resultado", [LIBERA, NAO_LIBERA])
@@ -390,7 +390,7 @@ class TestFormatoExato:
     def test_texto_liberado(self):
         assert m.texto(LIBERA, "REQ000182") == (
             "✅ *IVONE TESTE*\n\n"
-            "CPF 428.***.***-53 — Amapá\n\n"
+            "CPF 529.***.***-25 — Amapá\n\n"
             "Libera *R$ 4.913,52*\n"
             "3 contratos — parcela R$ 740,77\n"
             "_REQ000182_")
@@ -398,7 +398,7 @@ class TestFormatoExato:
     def test_texto_nao_libera(self):
         assert m.texto(NAO_LIBERA, "REQ000182") == (
             "⛔ *Não liberou.*\n\n"
-            "CPF 428.***.***-53 — Amapá\n\n"
+            "CPF 529.***.***-25 — Amapá\n\n"
             "Nenhum contrato encontrado no banco\n"
             "_REQ000182_")
 
@@ -426,7 +426,7 @@ class TestRegrasDeFormatacao:
     def test_sem_markdown(self):
         """WhatsApp usa *negrito* e _itálico_. "**" e "###" saem literais.
 
-        A máscara de CPF (``428.***.***-53``) sai da conferência: os
+        A máscara de CPF (``529.***.***-25``) sai da conferência: os
         asteriscos dela não são formatação, são o mascaramento -- e foi um
         falso positivo na primeira versão deste teste.
         """
@@ -460,10 +460,10 @@ class TestRegrasDeFormatacao:
 
     def test_cpf_continua_mascarado(self):
         assert "***" in m.texto(LIBERA, "REQ000182")
-        assert "42888832453" not in m.texto(LIBERA, "REQ000182")
+        assert "52998224725" not in m.texto(LIBERA, "REQ000182")
 
     def test_sem_mascara_quando_o_operador_pede(self):
-        assert "42888832453" in m.texto(LIBERA, "REQ000182", mascarar=False)
+        assert "52998224725" in m.texto(LIBERA, "REQ000182", mascarar=False)
 
 
 class TestNomeDoConsultorSoQuandoACitacaoFalha:

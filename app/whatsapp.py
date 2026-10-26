@@ -586,27 +586,26 @@ ULTIMA_SAIDA_JS = r"""
 #
 # `diagnostico/barra_citacao.png`, com a barra armada de verdade:
 #
-#     Ryan
-#     LUCIANGELA TESTADO
+#     Consultor Teste
+#     CLIENTE DE EXEMPLOS
 #     ...
 #
-# O corpo era "LUCIANGELA TESTADO / 72845554753 / AMAPA". Normalizado sem
-# espacos, "luciangelatestado" tem 17 caracteres -- um a menos que os 18
-# comparados. O 18o caractere procurado era o primeiro digito do CPF, que a
-# barra nunca mostra. A conferencia reprovava por UM caractere.
+# Os dados identificaveis da mensagem original foram substituidos por dados
+# de teste. A pre-visualizacao nao inclui o CPF, por isso comparar um prefixo
+# fixo do corpo inteiro fazia a conferencia procurar texto que nao estava la.
 #
 # O formato do pedido e' sempre NOME / CPF / ESTADO, entao isso acontecia
 # em qualquer nome curto. Rodando a conta sobre os 116 pedidos multi-linha
 # gravados no banco: **69 reprovariam**. E o log de 01/09 as 12:20 mostra o
 # desfecho -- a barra ESTAVA la', com autor e previa, e foi descartada:
 #
-#     INFO     Rodape sem a citacao esperada: 'Allana testando 2.274'
+#     INFO     Rodape sem a citacao esperada: 'Consultor Teste 2.274'
 #     WARNING  Cliquei em 'responder' mas a barra de citacao nao apareceu
 #
 # Ou seja: a citacao funcionava. Quem a jogava fora era esta conferencia.
 #
 # O teste que deixou passar tinha uma barra de mentira, com o corpo inteiro
-# dentro dela ("Ryan LUCIANGELA TESTADO 72845554753"). A fixture inventada
+# dentro dela ("Consultor Teste CLIENTE DE EXEMPLOS 52998224725"). A fixture inventada
 # confirmava o codigo em vez de confrontar a tela.
 #
 # COMO ELA JULGA AGORA
@@ -1037,7 +1036,7 @@ BOTAO_DE_OPCOES_JS = r"""
   }
 
   // O rotulo REAL desta instalacao, colhido pelo laboratorio:
-  //     "Menu de contexto para a mensagem de Ryan"
+  //     "Menu de contexto para a mensagem de Consultor Teste"
   //
   // Ele carrega o NOME de quem mandou, entao muda a cada mensagem -- por
   // isso a comparacao e' por PREFIXO, e nao por igualdade. A lista anterior
@@ -1213,12 +1212,12 @@ MENU_ABERTO_JS = r"""
 # Isto nao e' teoria: `diagnostico/barra_citacao.png`, colhido com a barra
 # armada de verdade, mostra tres linhas --
 #
-#     Ryan
-#     LUCIANGELA TESTADO
+#     Consultor Teste
+#     CLIENTE DE EXEMPLOS
 #     ...
 #
-# O corpo da mensagem era "LUCIANGELA TESTADO / 72845554753 / AMAPA". O CPF
-# e o estado NAO aparecem: o WhatsApp encerra a previa em reticencias.
+# Os dados identificaveis da mensagem original foram substituidos por dados
+# de teste. O CPF e o estado nao aparecem na previa do WhatsApp.
 #
 # Por que isto tem um JS proprio: a conferencia da citacao precisa das duas
 # marcas ANTES de o menu abrir. Depois do clique em "Responder" a conversa
@@ -1234,7 +1233,7 @@ MARCAS_DA_MENSAGEM_JS = r"""
   }
   if (!linha) return { achou: false, autor: '', primeiraLinha: '', corpo: '' };
 
-  // O autor vem do `data-pre-plain-text`: "[12:20, 01/09/2026] Allana: "
+  // O autor vem do `data-pre-plain-text`: "[12:20, 01/09/2026] Consultora Teste: "
   let autor = '';
   const dono = linha.querySelector('[data-pre-plain-text]')
             || (linha.hasAttribute('data-pre-plain-text') ? linha : null);
@@ -1428,7 +1427,7 @@ DIAGNOSTICO_LEITURA_JS = """
 # Devolve TODOS os titulos do cabecalho, nao um so'.
 #
 # Num grupo o cabecalho tem duas linhas com atributo title: o nome do grupo e
-# a lista de participantes ("Allana, Glaucon, Joselia, Ryan, ..."). Pegar "o
+# a lista de participantes ("Consultora Teste, Consultor Sintetico, Consultora Exemplo, Consultor Teste, ..."). Pegar "o
 # primeiro span[title]" trazia a lista de participantes, o bot concluia que a
 # conversa aberta nao era o grupo configurado e recusava ler -- repetindo o
 # aviso a cada 3 segundos. Quem sabe qual dos titulos importa e' o Python,
@@ -1549,7 +1548,7 @@ def id_de_mensagem_nossa(data_id: str) -> bool:
 
 
 def parse_pre_plain(meta: str) -> tuple[str, str]:
-    """``[15:32, 27/08/2026] Ryan: `` -> ("15:32, 27/08/2026", "Ryan")."""
+    """``[15:32, 27/08/2026] Consultor Teste: `` -> ("15:32, 27/08/2026", "Consultor Teste")."""
     match = _PRE_PLAIN.match((meta or "").strip())
     if not match:
         return "", ""

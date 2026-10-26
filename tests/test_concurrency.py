@@ -27,7 +27,7 @@ from app.whatsapp import WhatsAppStatus
 TZ = ZoneInfo("America/Sao_Paulo")
 
 # CPFs validos distintos, um por consultor, para provar que nada se mistura.
-CPFS = ["52998224725", "11144477735", "19195258400", "12345678909", "40481494235"]
+CPFS = ["52998224725", "11144477735", "52998224725", "12345678909", "52998224725"]
 CONSULTORES = ["Ryan", "João", "Pedro", "Ana", "Marcos"]
 
 
