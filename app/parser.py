@@ -2,12 +2,12 @@
 
 O formato real do grupo é livre, não rotulado::
 
-    LUIZ FERNANDO TESTE
-    31611176034
+    Cliente Teste
+    11144477735
 
-    Paulo Testes
+    Cliente Exemplo
     Amapá
-    182.841.754.87
+    529.982.247-25
 
 Nome, órgão/estado (opcional) e CPF. **Não há** ``Banco:``, ``Contrato:`` nem
 palavra-gatilho. A versão anterior deste arquivo exigia os três campos
@@ -41,7 +41,7 @@ TRIGGER_RE = re.compile(
 FIELD_RE = re.compile(r"^\s*([\w\s/.çãáàâéêíóôõú-]{2,30}?)\s*[:=]\s*(.+?)\s*$", re.IGNORECASE)
 
 # 11 dígitos, aceitando os separadores que aparecem no grupo:
-# 31611176034 · 182.841.754.87 · 529.982.247-25 · 118 902 594 97
+# 11144477735 · 529.982.247-25 · 111.444.777-35 · 111 444 777 35
 CPF_SOLTO_RE = re.compile(r"(?<!\d)(\d[\d.\-\s]{9,17}\d)(?!\d)")
 MATRICULA_SOLTA_RE = re.compile(r"(?<!\d)(\d{6,10})(?!\d)")
 

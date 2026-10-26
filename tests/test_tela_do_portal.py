@@ -7,8 +7,8 @@ O consultor confia no que ele mesmo veria no portal. Um card montado por nós
 O risco mora no recorte. A página inteira carrega, no topo, quem está logado::
 
     Parceiro Santander
-    Fulaninha
-    Xyz Promotora Ltda Me
+    Operadora Teste
+    Empresa Teste Ltda
     Home  Meu negócio  Produtos  Propostas  Serviços  Central de ajuda
 
 Isso é o acesso da empresa ao banco. Num grupo com dezenas de consultores,
@@ -41,16 +41,16 @@ def navegador():
 TOPO = """
 <header style="height:120px">
   <div>Parceiro Santander</div>
-  <div>Fulaninha</div>
-  <div>Xyz Promotora Ltda Me</div>
+  <div>Operadora Teste</div>
+  <div>Empresa Teste Ltda</div>
   <nav>Home Meu negócio Produtos Propostas Serviços Central de ajuda Expandir menu</nav>
 </header>"""
 
 #: O bloco do cliente, que fica ACIMA dos contratos.
 CLIENTE = """
 <section style="height:100px">
-  <p>Nome do cliente</p><p>LUCIÂNGELA TESTADO</p>
-  <p>CPF</p><p>728.455.547-53</p>
+  <p>Nome do cliente</p><p>Cliente Teste</p>
+  <p>CPF</p><p>529.982.247-25</p>
 </section>"""
 
 #: Os contratos, com os campos que o portal mostra.
@@ -92,12 +92,12 @@ class TestOndeORecorteCai:
         """O que o consultor não pode ver: quem está logado no portal."""
         texto = _recorte(navegador, PAGINA)["texto"]
         assert "Parceiro Santander" not in texto
-        assert "Fulaninha" not in texto
-        assert "Xyz Promotora" not in texto
+        assert "Operadora Teste" not in texto
+        assert "Empresa Teste" not in texto
 
     def test_o_cpf_do_cliente_fica_de_fora(self, navegador):
         """O bloco do cliente está acima dos contratos; subir demais o pega."""
-        assert "728.455.547-53" not in _recorte(navegador, PAGINA)["texto"]
+        assert "529.982.247-25" not in _recorte(navegador, PAGINA)["texto"]
 
     def test_para_no_primeiro_ancestral_com_contratos(self, navegador):
         """Cada nível a mais aproxima o recorte do topo da página."""
@@ -200,7 +200,7 @@ class TestOQueERecusado:
         ruim = {**self.BOM, "texto": "Home Meu negócio Produtos\n" + self.BOM["texto"]}
         assert recusar(ruim) != ""
 
-    @pytest.mark.parametrize("cpf", ["728.455.547-53", "72845554753"])
+    @pytest.mark.parametrize("cpf", ["529.982.247-25", "52998224725"])
     def test_cpf_a_vista_descarta(self, cpf):
         ruim = {**self.BOM, "texto": f"Nome do cliente\n{cpf}\n" + self.BOM["texto"]}
         assert "CPF" in recusar(ruim)
@@ -271,7 +271,7 @@ class TestOPrintVemNaFrenteDoCard:
     """Qual imagem o consultor recebe.
 
     O card é a nossa transcrição da tela; o print é a tela. Quando os dois
-    existem, o print ganha — foi o que o Ryan pediu. Quando o recorte se
+    existem, o print ganha — foi o que o Consultor Teste pediu. Quando o recorte se
     descarta (topo da página à vista), o card entra no lugar: o consultor
     nunca fica sem imagem por causa disso.
     """
@@ -294,9 +294,9 @@ class TestOPrintVemNaFrenteDoCard:
                                 SimulationResult)
 
         msg = IncomingMessage(message_id="3EB0X", chat_id="g@g.us", chat_name="g",
-                              sender_id="55@s.whatsapp.net", sender_name="Ryan",
+                              sender_id="55@s.whatsapp.net", sender_name="Consultor Teste",
                               text="Jose\n52998224725")
-        pedido = ParsedRequest(consultant_name="Ryan", cpf="52998224725",
+        pedido = ParsedRequest(consultant_name="Consultor Teste", cpf="52998224725",
                                bank="Santander", contract="",
                                customer_name="Jose da Silva")
         job = SimulationJob(request_id="REQ000900", request=pedido, message=msg,
@@ -427,9 +427,9 @@ class TestSimuladorSoFotografaQuandoOPrintPodeSair:
         falso = SimpleNamespace(_page=object(), _log=lambda *a, **k: None,
                                 config=replace(_config(tmp_path), image_show_client_data=mostrar))
         msg = IncomingMessage(message_id="3EB0Y", chat_id="g@g.us", chat_name="g",
-                              sender_id="55@s.whatsapp.net", sender_name="Ryan", text="x")
+                              sender_id="55@s.whatsapp.net", sender_name="Consultor Teste", text="x")
         job = SimulationJob(request_id="REQ000901", message=msg, simulation_id=1,
-                            request=ParsedRequest(consultant_name="Ryan", cpf="52998224725",
+                            request=ParsedRequest(consultant_name="Consultor Teste", cpf="52998224725",
                                                   bank="Santander", contract="",
                                                   customer_name="Jose da Silva"))
         return modulo.SimulatorService._fotografar_o_resultado(falso, job), capturas

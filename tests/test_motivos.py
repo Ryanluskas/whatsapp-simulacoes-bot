@@ -39,7 +39,7 @@ DOS_PRINTS = [
 
 
 def _resultado(motivos=(), libera=0.0, cliente="Joselia Maria de Teste"):
-    pedido = ParsedRequest(consultant_name="Ryan", cpf="41576764753",
+    pedido = ParsedRequest(consultant_name="Ryan", cpf="11144477735",
                            bank="Santander", contract="",
                            customer_name=cliente, origin="Amapá")
     msg = IncomingMessage(message_id="2A1", chat_id="g", chat_name="G",
@@ -201,18 +201,18 @@ class TestOCpfNaoVazaNoMotivo:
     """A regra de mascaramento vale para tudo que sai — motivo incluído."""
 
     def test_cpf_dentro_do_motivo_e_mascarado(self):
-        achados = motivos_do_portal(["CPF 415.767.647-53 com pendência cadastral"])
-        assert "415.767.647-53" not in achados[0]["texto"]
-        assert "415.***.***-53" in achados[0]["texto"]
+        achados = motivos_do_portal(["CPF 111.444.777-35 com pendência cadastral"])
+        assert "111.444.777-35" not in achados[0]["texto"]
+        assert "111.***.***-35" in achados[0]["texto"]
 
     def test_cpf_sem_pontuacao_tambem(self):
-        achados = motivos_do_portal(["Documento 41576764753 irregular"])
-        assert "41576764753" not in achados[0]["texto"]
+        achados = motivos_do_portal(["Documento 11144477735 irregular"])
+        assert "11144477735" not in achados[0]["texto"]
 
     def test_o_motivo_mascarado_e_o_que_chega_na_mensagem(self):
-        achados = motivos_do_portal(["CPF 415.767.647-53 com pendência"])
+        achados = motivos_do_portal(["CPF 111.444.777-35 com pendência"])
         fala = mensagens.texto(_resultado(achados), "REQ000182")
-        assert "415.767.647-53" not in fala
+        assert "111.444.777-35" not in fala
 
 
 class TestRepetirSoQuandoAdianta:
@@ -241,7 +241,7 @@ class TestOMotivoSobreviveAoReenvio:
 
     def test_o_reenvio_repete_o_motivo_guardado(self):
         fala = mensagens.resultado_reenviado({
-            "cpf": "41576764753", "customer_name": "Joselia",
+            "cpf": "11144477735", "customer_name": "Joselia",
             "status": "completed", "reduction_value": 0,
             "request_id": "REQ000182",
             "motivos_portal": json.dumps(motivos_do_portal(DOS_PRINTS)),
@@ -253,13 +253,13 @@ class TestOMotivoSobreviveAoReenvio:
     def test_linha_antiga_sem_a_coluna_nao_quebra(self):
         """Antes desta coluna existir, a frase genérica é tudo o que sabemos."""
         fala = mensagens.resultado_reenviado({
-            "cpf": "41576764753", "customer_name": "Joselia",
+            "cpf": "11144477735", "customer_name": "Joselia",
             "status": "completed", "reduction_value": 0})
         assert "Nenhum contrato encontrado no banco" in fala
 
     def test_json_corrompido_nao_quebra(self):
         fala = mensagens.resultado_reenviado({
-            "cpf": "41576764753", "status": "completed",
+            "cpf": "11144477735", "status": "completed",
             "reduction_value": 0, "motivos_portal": "{não é json"})
         assert "Nenhum contrato encontrado no banco" in fala
 

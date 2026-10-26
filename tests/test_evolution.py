@@ -157,7 +157,7 @@ class TestCitacao:
         webhook -- depois de reiniciar, a citação saía vazia.
         """
         r = cliente.send(GRUPO, "Simulações", "resposta", quote_message_id=ID_ORIGINAL,
-                         quote_text="Ivone Teste\n42888832453",
+                         quote_text="Ivone Teste\n52998224725",
                          quote_participant="5562999990000@s.whatsapp.net")
         # A resposta falsa padrão não traz stanzaId: a citação foi PEDIDA, mas
         # não há prova de que pegou. `quoted_ok` só afirma com prova.
@@ -167,7 +167,7 @@ class TestCitacao:
         assert citada["key"]["id"] == ID_ORIGINAL
         assert citada["key"]["remoteJid"] == GRUPO
         assert citada["key"]["participant"] == "5562999990000@s.whatsapp.net"
-        assert citada["message"]["conversation"] == "Ivone Teste\n42888832453"
+        assert citada["message"]["conversation"] == "Ivone Teste\n52998224725"
 
     def test_sem_id_nao_manda_campo_quoted(self, cliente, espiao):
         r = cliente.send(GRUPO, "Simulações", "resposta")
@@ -470,8 +470,8 @@ class TestAQuedaParaTextoFuncionaNasDuasCamadas:
         mensagem = IncomingMessage(
             message_id="3EB0X", chat_id=GRUPO, chat_name="g",
             sender_id="556799@s.whatsapp.net", sender_name="Ryan",
-            text="Ivone\n42888832453")
-        pedido = ParsedRequest(consultant_name="Ryan", cpf="42888832453",
+            text="Ivone\n52998224725")
+        pedido = ParsedRequest(consultant_name="Ryan", cpf="52998224725",
                                bank="Santander", contract="900001",
                                customer_name="Ivone Teste")
         job = SimulationJob(request_id="REQ000900", request=pedido,

@@ -53,7 +53,7 @@ SERVIDOR_NO_ENVELOPE = "http://evolution-interna:8080"
 CABECALHO = {"X-Webhook-Token": TOKEN}
 PNG_1X1 = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
            "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
-PEDIDO = "Ivone Teste\n42888832453\nSantander"
+PEDIDO = "Ivone Teste\n52998224725\nSantander"
 
 
 # ----------------------------------------------------------------- formatos

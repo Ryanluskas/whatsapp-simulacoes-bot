@@ -15,8 +15,8 @@ from app.formatter import format_stored_result
 class TestFormatoDoReenvio:
     def _linha(self, **extra):
         base = {
-            "cpf": "82674159804", "customer_name": "Clarisa de Tássia",
-            "consultant_name": "Ryan", "request_id": "REQ000012",
+            "cpf": "52998224725", "customer_name": "Cliente Teste",
+            "consultant_name": "Consultor Teste", "request_id": "REQ000012",
             "status": "completed", "reduction_value": 2219.77,
         }
         base.update(extra)
@@ -45,10 +45,10 @@ class TestFormatoDoReenvio:
         assert "falha na consulta" in texto
 
     def test_cpf_mascarado_por_padrao(self):
-        assert "826.***.***-04" in format_stored_result(self._linha())
+        assert "529.***.***-25" in format_stored_result(self._linha())
 
     def test_sem_mascara_quando_pedido(self):
-        assert "82674159804" in format_stored_result(self._linha(), mask=False)
+        assert "52998224725" in format_stored_result(self._linha(), mask=False)
 
     def test_linha_incompleta_nao_derruba(self):
         """O reenvio lê o que sobrou no banco; pode faltar campo."""
@@ -84,7 +84,7 @@ class TestColunaDeTentativas:
         db = Database(tmp_path / "t.db")
         db.insert("simulations", {
             "request_id": "REQ1", "cpf": "1", "bank": "Santander",
-            "consultant_name": "Ryan", "status": "completed",
+            "consultant_name": "Consultor Teste", "status": "completed",
             "created_at": "2026-08-29T00:00:00Z",
             "updated_at": "2026-08-29T00:00:00Z",
         })
@@ -105,7 +105,7 @@ class TestQuemEntraNaFilaDeReenvio:
     def _inserir(self, db, request_id, status, replied_at=None, tentativas=0):
         db.insert("simulations", {
             "request_id": request_id, "cpf": "1", "bank": "Santander",
-            "consultant_name": "Ryan", "status": status,
+            "consultant_name": "Consultor Teste", "status": status,
             "replied_at": replied_at, "reply_attempts": tentativas,
             "created_at": "2026-08-29T00:00:00Z",
             "updated_at": "2026-08-29T00:00:00Z",
@@ -165,8 +165,8 @@ class TestOLacoDeReenvioFunciona:
 
     def _pendente(self, manager, **extra):
         dados = {
-            "request_id": "REQ000010", "cpf": "82674159804", "bank": "Santander",
-            "consultant_name": "Ryan", "customer_name": "Clarisa",
+            "request_id": "REQ000010", "cpf": "52998224725", "bank": "Santander",
+            "consultant_name": "Consultor Teste", "customer_name": "Cliente Teste",
             "status": "completed", "reduction_value": 2219.77,
             "chat_id": "grupo@g.us", "source_message_id": "false_g@g.us_M_x@c.us",
             "replied_at": None, "reply_attempts": 0,
@@ -245,7 +245,7 @@ class TestNaoAtropelarAEntregaEmCurso:
     def _inserir(self, db, request_id, terminou_em):
         db.insert("simulations", {
             "request_id": request_id, "cpf": "1", "bank": "Santander",
-            "consultant_name": "Ryan", "status": "completed",
+            "consultant_name": "Consultor Teste", "status": "completed",
             "replied_at": None, "reply_attempts": 0,
             "finished_at": terminou_em,
             "created_at": terminou_em, "updated_at": terminou_em,
@@ -299,8 +299,8 @@ class TestSolicitacaoPresaNaoFicaInvisivel:
 
     def _inserir(self, db, request_id, status, comecou_em, replied_at=None):
         db.insert("simulations", {
-            "request_id": request_id, "cpf": "31619614391", "bank": "Santander",
-            "consultant_name": "Ryan", "customer_name": "Maria Tabaré",
+            "request_id": request_id, "cpf": "52998224725", "bank": "Santander",
+            "consultant_name": "Consultor Teste", "customer_name": "Cliente Exemplo",
             "status": status, "started_at": comecou_em, "finished_at": comecou_em,
             "replied_at": replied_at, "reply_attempts": 0,
             "created_at": comecou_em, "updated_at": comecou_em,
@@ -355,7 +355,7 @@ class TestSolicitacaoPresaNaoFicaInvisivel:
     def test_a_mensagem_da_interrompida_explica(self):
         from app.mensagens import resultado_reenviado
         texto = resultado_reenviado({
-            "cpf": "31619614391", "customer_name": "Maria Tabaré",
+            "cpf": "52998224725", "customer_name": "Cliente Exemplo",
             "status": "interrupted",
             "error_message": "a simulação travou e não retornou"})
         assert "não consegui simular" in texto.lower()

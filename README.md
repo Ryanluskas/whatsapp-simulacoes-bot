@@ -90,13 +90,13 @@ Na primeira execução, abra a aba **Status** e leia o QR Code com o celular.
 É o formato livre que o grupo já usa — nome, órgão (opcional) e CPF:
 
 ```text
-Jose da Silva
+Cliente Teste
 Amapá
 529.982.247-25
 ```
 
 ```text
-MARIA DE SOUZA
+Cliente Exemplo
 11144477735
 ```
 
@@ -133,14 +133,14 @@ curta:
 
 ```
 ✅ Libera R$ 4.913,52
-Jose da Silva
+Cliente Teste
 ```
 
 Não existe "Simulação recebida", "processando" nem "consulta concluída". O aviso
 de fila só sai quando há alguém na frente, porque aí ele informa algo:
 
 ```
-Ryan, peguei. Tem 2 na frente, já te respondo.
+Consultor Teste, peguei. Tem 2 na frente, já te respondo.
 ```
 
 Sendo o próximo da fila, o resultado sai em ~90 s e o "recebi" seria a segunda
@@ -531,8 +531,8 @@ atualize esta seção.
 | O que | Como é aqui |
 |---|---|
 | `.message-in` / `.message-out` | **Não existem.** Nenhuma linha tem. |
-| Quem enviou | `data-pre-plain-text="[20:14, 30/08/2026] Ryan: "` — o nome fica entre `] ` e `: ` |
-| Nome do bot no grupo | `Operacional Capital` (`BOT_SELF_NAME`) — vem do **nome do perfil** da conta logada (+55 62 8000-1001), **não** de um autor visível no grupo |
+| Quem enviou | `data-pre-plain-text="[hora, data] <nome>: "` — o nome fica entre `] ` e `: ` |
+| Nome do bot no grupo | `Operacional Capital` (`BOT_SELF_NAME`) — vem do **nome do perfil** da conta logada, **não** de um autor visível no grupo |
 | `data-id` | Vem **pelado**: `2A4813...` recebidas, `3EB065...` enviadas |
 | Botão do menu da bolha | `aria-label="Menu de contexto para a mensagem de <quem enviou>"` — carrega o NOME, então a comparação é por **prefixo** |
 | Onde clicar na bolha | No **balão**, nunca no centro de `div[role="row"]`: a linha ocupa a largura toda e o centro cai no fundo vazio |
@@ -546,7 +546,7 @@ atualize esta seção.
 | Compositor da conversa | `aria-label="Digite uma mensagem para o grupo <nome>"`, `data-tab="10"`, dentro do `footer` |
 | Barra de citação armada | `[data-testid="quoted-message"]` **fora** de `div[role="row"]` + botão `aria-label="Cancelar"` |
 | Citação no histórico | mesmo `data-testid`, mas **dentro** de `div[role="row"]` — não confundir |
-| O que a barra de citação **mostra** | O autor e o **começo** da mensagem, encerrado em reticências. `diagnostico/barra_citacao.png`: `Ryan` / `LUCIÂNGELA TESTADO` / `...` — o corpo era `LUCIÂNGELA TESTADO / 72845554753 / AMAPÁ`. O CPF **não** aparece |
+| O que a barra de citação **mostra** | O autor e o **começo** da mensagem, encerrado em reticências. Os dados da mensagem original foram omitidos; o CPF **não** aparece na prévia |
 | Fechar a pré-visualização | Escape **não** fecha: abre `"Deseja descartar a seleção?"` (Cancelar / **Descartar**) |
 | `img[src^="blob:"]` | **Não** indica preview aberto — imagens já enviadas na conversa também são blob |
 
@@ -606,7 +606,8 @@ Ela comparava os **18 primeiros caracteres do corpo inteiro** com o texto da
 barra. A barra não mostra o corpo inteiro: mostra o autor e o começo da
 mensagem, e encerra em reticências. Como o pedido é sempre NOME / CPF /
 ESTADO, o 18º caractere procurado caía no CPF — que a barra nunca mostra.
-`LUCIÂNGELA TESTADO` tem 17 caracteres sem espaços: reprovava por um.
+Um nome de exemplo curto era comparado com 18 caracteres: a conferência
+acabava procurando o primeiro dígito do CPF, que a prévia nunca mostra.
 
 Rodando a conta sobre os 116 pedidos multi-linha gravados no banco,
 **69 reprovariam**.

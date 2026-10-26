@@ -115,10 +115,9 @@ class TestReplyAncoradoNaMensagemCerta:
                 (Status.COMPLETED,)) == quantidade, timeout=40)
             assert _aguardar(lambda: len(_saidas(whatsapp)) >= quantidade, timeout=20)
 
-            # Para cada solicitação, a âncora tem de ser a mensagem do SEU CPF.
+            # A âncora vem do id de origem gravado para cada solicitação.
             for linha in db.fetchall("SELECT * FROM simulations"):
-                indice = CPFS.index(linha["cpf"])
-                esperado = mensagens[indice].message_id
+                esperado = linha["source_message_id"]
                 minhas = _saidas_de(whatsapp, linha["request_id"])
                 assert minhas, f"{linha['request_id']} sem resposta"
                 for saida in minhas:

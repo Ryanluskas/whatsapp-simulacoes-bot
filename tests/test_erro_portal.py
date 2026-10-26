@@ -121,13 +121,13 @@ class TestChegaAoConsultor:
         from app.models import (IncomingMessage, ParsedRequest, SimulationJob,
                                 SimulationResult)
 
-        pedido = ParsedRequest(consultant_name="Ryan", cpf="94106789353",
+        pedido = ParsedRequest(consultant_name="Ryan", cpf="52998224725",
                                bank="Santander", contract="", customer_name="Palmas")
         mensagem = IncomingMessage(
             message_id="false_grupo@g.us_MSG1_5566999998888@c.us",
             chat_id="grupo@g.us", chat_name="Santander Capital Simulações",
             sender_id="5566999998888@c.us", sender_name="Ryan",
-            text="Palmas\n941.067.893-53",
+            text="Palmas\n529.982.247-25",
         )
         job = SimulationJob(request=pedido, message=mensagem,
                             request_id="REQ000007", simulation_id=7)

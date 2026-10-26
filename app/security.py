@@ -276,7 +276,7 @@ def redact(text: str | None) -> str:
     """Remove CPFs de textos livres antes de gravar em log.
 
     Aceita os separadores que o grupo realmente usa -- ``529.982.247-25``,
-    ``182.841.754.87``, ``118 902 594 97``, ``31611176034``. A versao anterior
+    ``529.982.247-25``, ``111 444 777 35``, ``11144477735``. A versao anterior
     so' reconhecia ``-`` antes dos dois ultimos digitos, e o formato com ponto
     (o mais comum no grupo) ia inteiro para o log.
     """
