@@ -23,6 +23,7 @@ PR que a introduz.
 
 ### Corrigido
 
+- **Bloqueio de Mensagens Paradas no Webhook:** Mensagens enviadas no WhatsApp com timestamp anterior ao corte de sincronização (`last_evolution_sync`) — por exemplo, quando o WhatsApp descarrega mensagens acumuladas de dias anteriores ao reconectar — agora são descartadas automaticamente como expiradas sem criar simulação nem enfileirar.
 - O analisador de pedidos (`parse_request`) agora fatiar corretamente quebras de linha com caracteres especiais (`\u2028`), comuns ao copiar de blocos de notas de celulares e planilhas, evitando que mensagens com múltiplos campos em linhas visuais sejam ignoradas como linha única.
 - Resolvido um bug interno de travamento em simulações (Pausa Segura) que paralisava o sistema após reinícios.
 

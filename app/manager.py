@@ -272,6 +272,11 @@ class BotManager:
         recovered = self.queue.recover()
         if recovered:
             self.log("WARNING", "sistema", f"{recovered} solicitação(ões) retomadas da fila.")
+        # Com catch-up desligado, avança o corte para agora para ignorar mensagens
+        # acumuladas enquanto o bot esteve desligado.
+        if self.config.whatsapp_mode == "evolution" and not self.config.evolution_catchup_enabled:
+            self.db.set_meta("last_evolution_sync", str(int(utc_now().timestamp())))
+
         # Depois do recover: uma mensagem que ja' virou solicitacao e' ligada
         # a ela aqui, em vez de gerar outra.
         self._retomar_entradas()
@@ -998,9 +1003,13 @@ class BotManager:
         )
         limite = utc_now() - timedelta(seconds=JANELA_DE_RETOMADA_SEGUNDOS)
         retomadas = 0
+        corte_str = self.db.get_meta("last_evolution_sync", "")
+        corte_ts = int(corte_str) if corte_str.isdigit() else 0
         for linha in linhas:
             criada = parse_iso(linha.get("created_at"))
-            if criada is not None and criada < limite:
+            wa_ts_str = str(linha.get("wa_timestamp") or "")
+            wa_ts = int(wa_ts_str) if wa_ts_str.isdigit() else 0
+            if (criada is not None and criada < limite) or (corte_ts > 0 and wa_ts > 0 and wa_ts < corte_ts):
                 self._marcar_entrada(linha["id"], ENTRADA_EXPIRADA)
                 self.log("WARNING", "whatsapp",
                          f"Mensagem {linha.get('wa_message_id')} ficou sem tratar desde "
@@ -1419,6 +1428,19 @@ class BotManager:
         # onde essa informacao serve para alguma coisa.
         self._metrics_dirty.set()
 
+    def _mensagem_expirada(self, message: IncomingMessage, entrada_id: int) -> bool:
+        if not (message.timestamp and str(message.timestamp).isdigit()):
+            return False
+        corte_str = self.db.get_meta("last_evolution_sync", "")
+        corte_ts = int(corte_str) if corte_str.isdigit() else 0
+        if corte_ts > 0 and int(message.timestamp) < corte_ts:
+            self._marcar_entrada(entrada_id, ENTRADA_EXPIRADA)
+            self.log("WARNING", "whatsapp",
+                     f"Mensagem {message.message_id} ignorada por ser antiga "
+                     f"(timestamp {message.timestamp} < corte {corte_ts}).")
+            return True
+        return False
+
     def _handle_message(self, message: IncomingMessage) -> None:
         if self._e_mensagem_nossa(message.text):
             self.log(
@@ -1432,6 +1454,9 @@ class BotManager:
         if abertura is None:
             return  # ja' tratada
         entrada_id, request_id = abertura
+
+        if self._mensagem_expirada(message, entrada_id):
+            return
 
         try:
             consultor = self._identificar_e_registrar(message, entrada_id)

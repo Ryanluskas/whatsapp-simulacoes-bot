@@ -589,3 +589,35 @@ class TestDaMensagemAteAResposta:
                            headers=CABECALHO).json()["ignorado"]
         time.sleep(0.5)
         assert len(manager.db.fetchall("SELECT id FROM simulations")) == 1
+
+
+def test_mensagem_antiga_anterior_ao_corte_e_ignorada(tmp_path):
+    from app.config import load_config
+    from app.db import Database, ENTRADA_EXPIRADA
+    from app.events import EventHub
+    from app.manager import BotManager
+    from app.models import IncomingMessage
+
+    db = Database(tmp_path / "test_corte.db")
+    hub = EventHub(db)
+    config = load_config()
+    manager = BotManager(config, db, hub)
+
+    db.set_meta("last_evolution_sync", "1000")
+
+    msg_velha = IncomingMessage(
+        message_id="VELHA_1",
+        chat_id=config.evolution_group_jid or "120363@g.us",
+        chat_name="Grupo",
+        sender_id="5511999999999@s.whatsapp.net",
+        sender_name="Consultor",
+        text="Cliente Teste\n529.982.247-25\nSP",
+        timestamp="900",
+        participant="5511999999999@s.whatsapp.net",
+    )
+
+    manager._handle_message(msg_velha)
+    linha = db.fetchone("SELECT status FROM messages WHERE wa_message_id='VELHA_1'")
+    assert linha is not None
+    assert linha["status"] == ENTRADA_EXPIRADA
+    assert db.scalar("SELECT COUNT(*) FROM simulations WHERE source_message_id='VELHA_1'") == 0
